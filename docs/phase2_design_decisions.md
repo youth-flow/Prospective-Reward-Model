@@ -28,12 +28,12 @@ m_\phi
 A_0(r_\phi-r^*).
 $$
 
-The next experiment is not a rerun of Phase 1. It uses fresh candidates,
-labels, heads, policy rollouts, seeds, and a new design identity.
-
-No Phase 2 confirmatory run has started. The current implementation is an
-engineering candidate that must first pass the target-free
-optimization/KL/response-horizon pilot described below.
+Phase 2 is not a rerun of Phase 1. It uses fresh candidates, labels, heads,
+policy rollouts, seeds, and a new design identity. A confirmatory identity is
+admissible only after the target-free optimization/KL/response-horizon pilot
+described below has produced an accepted, hash-bound freeze aggregate. This
+design document intentionally does not assert live HPC4 queue or campaign
+status.
 
 ## 2. Decisions that are frozen in principle
 
@@ -397,14 +397,25 @@ seeds, the five Phase 1 seeds, and any seed observed while
 changing the design are excluded. Seed-conditional `K_cal` calibration is a
 pilot-only scale diagnostic and is forbidden in confirmatory execution.
 Every one of the 30 seed slots must end in either one admissible result or one
-immutable terminal failure manifest. Only same-seed, pre-outcome
-infrastructure retries are allowed; replacement seeds are forbidden. Failure
-manifests already enforce a contiguous attempt ledger. A success following an
-infrastructure retry must have its complete ledger bound by the future formal
-Slurm wrapper; the current result JSON/finalizer does not yet enforce that path,
-so exact-30 execution is blocked until the wrapper closes this gate. A failed
-slot produces `not_passed_due_to_seed_failure` with no primary CI;
-valid negative effects retain their intervals and produce `not_passed`.
+immutable terminal failure manifest. The formal ledger policy is
+`single_predeclared_attempt_no_retry`: each seed has exactly `attempt-1`, the
+registry `recoveries/` directory must remain empty, and neither retry nor
+replacement seed is admissible. The implemented held-array submitter reserves
+the ordered task-to-seed map before release; the GPU publisher, compute and
+scheduler terminalizers, registry resolver, and CPU finalizer jointly enforce
+one terminal head per slot. A failed slot produces
+`not_passed_due_to_seed_failure` with no primary CI; valid negative effects
+retain their intervals and produce `not_passed`.
+
+The terminal ownership rule is structural. The GPU job builds its complete
+bundle in a hidden staging directory and atomically renames it to the canonical
+job directory only after validation and durable sync. If a hard termination
+occurs before that rename, no canonical job exists and the scheduler
+terminalizer may bind the terminal `sacct` root record. If the canonical
+directory exists with `FAILURE_PENDING`, only the compute terminalizer may
+complete it. A published success or failure is immutable and idempotently
+recognized. None of these recovery operations creates another scientific
+attempt.
 
 ## 7. Ridge, scale, and efficiency experiments
 

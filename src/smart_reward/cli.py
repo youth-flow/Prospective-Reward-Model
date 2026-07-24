@@ -1638,6 +1638,43 @@ def _phase2_failure_manifest(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _phase2_success_manifest(arguments: argparse.Namespace) -> int:
+    from .phase2_campaign import (
+        load_phase2_seed_success_spec,
+        write_phase2_seed_success_manifest,
+    )
+    from .phase2_config import load_phase2_config_bundle
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    spec = load_phase2_seed_success_spec(arguments.spec)
+    attempt_ledger = spec["attempt_ledger"]
+    if not isinstance(attempt_ledger, dict):
+        raise TypeError("Phase-2 success attempt ledger must be one JSON object")
+    payload = write_phase2_seed_success_manifest(
+        bundle.config,
+        arguments.result,
+        attempt_ledger,
+        arguments.output,
+    )
+    attempts = payload["attempt_ledger"]["attempts"]
+    if not isinstance(attempts, list):
+        raise RuntimeError("success terminal manifest returned malformed attempt evidence")
+    _print_json(
+        {
+            "attempt_count": len(attempts),
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "result_sha256": payload["result"]["sha256"],
+            "rollout_sha256": payload["rollout"]["sha256"],
+            "seed": payload["seed"],
+            "status": "successful_seed_terminal_recorded",
+            "supports_formal_claim": False,
+        }
+    )
+    return 0
+
+
 def _phase2_campaign_finalize(arguments: argparse.Namespace) -> int:
     from .phase2_campaign import write_phase2_campaign_terminal
     from .phase2_config import load_phase2_config_bundle
@@ -2034,9 +2071,28 @@ def build_parser() -> argparse.ArgumentParser:
     phase2_failure_parser.add_argument("output", help="new immutable seed failure manifest")
     phase2_failure_parser.set_defaults(handler=_phase2_failure_manifest)
 
+    phase2_success_parser = subparsers.add_parser(
+        "phase2-success-manifest",
+        help="immutably bind one successful formal seed result and its attempt ledger",
+    )
+    phase2_success_parser.add_argument(
+        "overlay",
+        help="validated formal Phase-2 confirmatory overlay",
+    )
+    phase2_success_parser.add_argument(
+        "result",
+        help="identity-bound successful Phase-2 result JSON",
+    )
+    phase2_success_parser.add_argument(
+        "spec",
+        help="strict JSON object containing exactly one attempt_ledger field",
+    )
+    phase2_success_parser.add_argument("output", help="new immutable seed success manifest")
+    phase2_success_parser.set_defaults(handler=_phase2_success_manifest)
+
     phase2_finalize_parser = subparsers.add_parser(
         "phase2-campaign-finalize",
-        help="finalize exactly 30 success-result or failed-seed terminal slots",
+        help="finalize exactly 30 success- or failure-manifest terminal slots",
     )
     phase2_finalize_parser.add_argument(
         "overlay",
@@ -2050,7 +2106,7 @@ def build_parser() -> argparse.ArgumentParser:
     phase2_finalize_parser.add_argument(
         "terminals",
         nargs="+",
-        help="exactly one success result or failure manifest for every declared seed",
+        help="exactly one success or failure terminal manifest for every declared seed",
     )
     phase2_finalize_parser.set_defaults(handler=_phase2_campaign_finalize)
     return parser

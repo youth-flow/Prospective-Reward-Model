@@ -56,7 +56,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Item | Status |
 |---|---|
 | Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
-| Automated test suite | **671 passed locally** for the pilot commit candidate; all four Phase 2 scripts separately passed `bash -n` on HPC4, while real CUDA execution remains the index-0 canary gate |
+| Automated verification | Pilot code has its historical test record; the six post-edit formal Phase 2 shell entry points separately passed `bash -n` on HPC4 on 2026-07-25, while a fresh non-confirmatory CUDA rehearsal remains mandatory before exact-30 launch |
 | Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
@@ -68,7 +68,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Five-seed accepted main experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
 | Formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
-| Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed aggregation implemented; target-free pilot and formal campaign not yet run |
+| Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed aggregation implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
 
 The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
 manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
@@ -373,9 +373,9 @@ The completed campaign has preregistered status `not_passed`; no positive mechan
 ### Next experiment: common-beta deployment
 
 The complete post-audit decision record is
-[docs/phase2_design_decisions.md](docs/phase2_design_decisions.md). In
-particular, the current Phase 2 configuration is a pilot-capable engineering
-candidate, not an accepted confirmatory identity.
+[docs/phase2_design_decisions.md](docs/phase2_design_decisions.md). A Phase 2
+confirmatory identity is admissible only after the target-free pilot acceptance
+chain is complete and its accepted freeze evidence is hash-bound.
 
 Phase 2 also freezes a single operational-oracle coordinate system across
 seeds: `b_0=-4.500244140625` and `tau_0=2.7715682983398438`. They are the
@@ -807,14 +807,14 @@ bash scripts/hpc4/submit_phase2_pilot.sh \
   gpu-l20 1-00:00:00
 ```
 
-The executable Phase 2 pilot is hardware-locked to `gpu-l20` (NVIDIA L20).
-Its dedicated submit entry rejects every other GPU partition. The future
-confirmatory wrapper must preserve this guard before any formal seed runs;
-pilot aggregation remains a CPU-only `amd|intel` job.
+The executable Phase 2 pilot and confirmatory campaign are hardware-locked to
+`gpu-l20` (NVIDIA L20). Their dedicated submit entries reject every other GPU
+partition; pilot aggregation and formal campaign finalization remain CPU-only
+`amd|intel` jobs.
 
 The three-seed pilot writes only convergence/rank, train-only beta candidate,
 response-length/EOS and on-policy KL evidence under
-`$PRORM_PROJECT_ROOT/runs/phase2-pilot/<design-sha>/`. It has not yet produced a
+`$PRORM_PROJECT_ROOT/runs/phase2-pilot/<design-sha>/`. Pilot evidence is never a
 formal result; exact acceptance paths and forbidden outcome fields are defined
 in [docs/hpc4.md](docs/hpc4.md).
 
@@ -842,6 +842,66 @@ uses the accepted calibration aggregate as both `--beta-source-aggregate` and
 `--horizon-parent-aggregate`. A beta-grid retry uses the immediately preceding
 failed freeze as its beta source while retaining the accepted calibration as
 its horizon parent. Exact commands are in [docs/hpc4.md](docs/hpc4.md).
+
+These retries belong only to outcome-blind pilot design selection. The formal
+campaign has a different, stricter contract: one exact ordered array,
+seeds `20260901` through `20260930`, and exactly `attempt-1` for every seed.
+There is no formal retry, requeue, or replacement seed.
+
+### Formal Phase 2 execution
+
+Do not copy an identity from this README. First commit the accepted
+confirmatory overlay/base identities and accepted freeze aggregate, then use
+their real paths on HPC4. With the required `PRORM_*` environment already
+exported and a clean committed checkout:
+
+```bash
+export PRORM_PHASE2_ARRAY_CONCURRENCY=2
+
+array_submission="$(
+  bash scripts/hpc4/submit_phase2_confirmatory.sh \
+    configs/REPLACE_WITH_CONFIRMATORY_OVERLAY.yaml \
+    configs/REPLACE_WITH_CONFIRMATORY_BASE.yaml \
+    /ABS/PATH/TO/accepted-freeze-aggregate.json \
+    gpu-l20 \
+    REPLACE_WITH_WALLTIME
+)"
+printf '%s\n' "${array_submission}"
+```
+
+The optional sixth argument is accepted only as the literal full range
+`0-29`; a subset is invalid. The wrapper submits the array held, commits the
+exact-30 registry, and then releases it. If the shell is interrupted after the
+registry commit but before release, rerun the **identical command**: it
+validates and releases that held array without calling `sbatch` again.
+
+Every task must publish one terminal head. A canonical job directory with
+`FAILURE_PENDING` is finalized by
+`terminalize_phase2_compute_failure.sh`. A terminal non-success scheduler
+record with no canonical job directory is finalized by
+`terminalize_phase2_scheduler_failure.sh`, using one raw `sacct -X -n -P` root
+row. These paths classify the single attempt; they never authorize another
+attempt.
+
+After all 30 heads are terminal, submit the CPU finalizer:
+
+```bash
+design_root="${PRORM_PROJECT_ROOT}/runs/phase2-confirmatory/REPLACE_WITH_DESIGN_SHA256"
+
+bash scripts/hpc4/submit_phase2_campaign_finalize.sh \
+  configs/REPLACE_WITH_CONFIRMATORY_OVERLAY.yaml \
+  configs/REPLACE_WITH_CONFIRMATORY_BASE.yaml \
+  "${design_root}/campaign-final/phase2-campaign-terminal.json" \
+  "${design_root}/campaign-final/phase2-primary-aggregate.json" \
+  amd \
+  REPLACE_WITH_WALLTIME
+```
+
+The finalizer resolves the exact 30 terminal heads from the immutable registry;
+callers do not select result directories. If any seed failed, the campaign
+terminal status is `not_passed_due_to_seed_failure` and no primary aggregate
+or CI is produced. The complete copy-paste runbook, failure-classification
+schemas, and monitoring commands are in [docs/hpc4.md](docs/hpc4.md).
 
 ## 8. Documentation and code map
 
@@ -893,14 +953,15 @@ Smart-Reward-Model/             # retained repository name
    immediately preceding failed freeze aggregate.
 5. Bind the accepted freeze aggregate SHA-256, global `beta_0`, and all
    numerical/KL/horizon gates into a new confirmatory identity.
-6. Before any formal allocation, complete and audit the confirmatory GPU/CPU
-   Slurm wrappers, including the success-after-infrastructure-retry attempt
-   ledger. The current executable wrapper is pilot-only.
-7. Run exactly paired seeds `20260901`–`20260930`. Every seed must occupy one
-   terminal slot: a valid result or an immutable failure manifest. A failed
-   seed is never deleted or replaced; any such failure terminates the campaign
-   without a primary CI. A complete valid campaign may still return the
-   scientifically meaningful status `not_passed`.
+6. Audit the implemented confirmatory GPU wrapper, terminalizers, immutable
+   campaign registry, resolver, and CPU finalizer before formal allocation.
+7. Submit the one exact ordered array for paired seeds
+   `20260901`–`20260930`. Each seed has exactly one predeclared attempt
+   (`attempt-1`): there is no formal retry and no replacement seed. Every slot
+   must end in one atomically published success or terminal-failure bundle.
+   One failed seed produces `not_passed_due_to_seed_failure` and suppresses the
+   primary CI. A complete valid campaign may still return the scientifically
+   meaningful status `not_passed`.
 8. Only afterward run the frozen ridge/beta sensitivity grid, mechanism
    qualifiers, capacity/sample-size, all-six-pair, and OOD/human-label
    robustness experiments as secondary evidence.

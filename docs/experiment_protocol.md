@@ -3,8 +3,9 @@
 本文是实验执行与结果判定规格。数学定义以 [theory.md](theory.md) 为准。
 本文在观察正式结果前冻结，不因结果改写；执行记录与权威结果见
 [phase1_results.md](phase1_results.md)。
-第 1–12 节保留已冻结的 Phase 1 协议与历史执行语义；第 13 节是尚未运行正式结果的
-Phase 2 预实验/confirmatory 规格，不能反向改变 Phase 1 的 `not_passed` 判定。
+第 1–12 节保留已冻结的 Phase 1 协议与历史执行语义；第 13 节是 Phase 2
+预实验/confirmatory 规格，不能反向改变 Phase 1 的 `not_passed` 判定。本文不声明
+HPC4 的实时队列或 campaign 状态。
 论文标题固定为：
 
 > **Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret**
@@ -884,27 +885,38 @@ $$
 standard deviations；合取检验的 power 由最弱 endpoint 决定。
 
 exact 30 中每个 seed 必须有一个 terminal slot：合法 result 或 immutable failure
-manifest。只允许同一个 seed 在 outcome reveal 前因 infrastructure failure 重试，且不得
-替换 seed。failure-manifest 路径已经代码强制 contiguous attempt ledger；对“前序
-infrastructure failure 后最终成功”的路径，完整 ledger 仍须由尚待实现的 formal Slurm
-wrapper 绑定，不能只依赖 result JSON。该 wrapper gate 关闭前不得启动 exact 30。任一失败
-slot 令 campaign
+manifest。正式 ledger policy 是 `single_predeclared_attempt_no_retry`：每个 seed 只有
+`attempt-1`，`recoveries/` 必须为空，不允许 retry、requeue 或 replacement seed。held-array
+submitter 在 release 前将任务 `0..29`、seeds `20260901..20260930` 与单次 attempt 原子写入
+immutable registry；重复执行同一提交命令只能恢复“registry 已提交但仍 held”的原数组，
+不能产生第二次 `sbatch`。任一失败 slot 令 campaign
 `not_passed_due_to_seed_failure` 且不计算 primary CI。若 30 个结果都合法但效果未通过，
 仍计算并保留区间，科学状态为 `not_passed`。
 
 正式 CPU finalizer 必须调用统一终态入口，而不是绕过 terminal-slot 检查直接运行
 `phase2-aggregate`：
 
-```text
-prorm phase2-failure-manifest OVERLAY FAILURE_SPEC FAILURE_JSON
-prorm phase2-campaign-finalize \
-  OVERLAY CAMPAIGN_TERMINAL_JSON PRIMARY_AGGREGATE_JSON TERMINAL_1 ... TERMINAL_30
+```bash
+bash scripts/hpc4/submit_phase2_campaign_finalize.sh \
+  configs/REPLACE_WITH_CONFIRMATORY_OVERLAY.yaml \
+  configs/REPLACE_WITH_CONFIRMATORY_BASE.yaml \
+  "${DESIGN_ROOT}/campaign-final/phase2-campaign-terminal.json" \
+  "${DESIGN_ROOT}/campaign-final/phase2-primary-aggregate.json" \
+  amd \
+  REPLACE_WITH_WALLTIME
 ```
 
 若任一 terminal 是 failure manifest，`PRIMARY_AGGREGATE_JSON` 必须保持不存在且不计算 CI；
 若 30 个 terminal 全是合法 success result，finalizer 才在该保留路径发布 primary aggregate。
-HPC4 仍需一个 detached-checkout CPU wrapper 来绑定 commit、image、inventory、30 个输入和
-上述 success-retry ledger；直接在 login node 运行该 CLI 不是正式流程。
+已实现的 CPU wrapper 会在 submission 与 compute 两侧绑定 commit、image、inventory 和
+base/overlay identities，并由 registry resolver 自动选择且验证 exact-30 terminal heads；
+调用者不得手选 30 个输入。直接在 login node 运行底层 Python CLI 不是正式流程。
+
+终态所有权也固定：canonical job directory 含 `FAILURE_PENDING` 时，只能调用
+`terminalize_phase2_compute_failure.sh`；若作业在原子 rename 前被 scheduler 硬终止、
+canonical job directory 不存在，则用一条 terminal non-success `sacct` root record 调用
+`terminalize_phase2_scheduler_failure.sh`。两者都只终结 `attempt-1`，不授权新 attempt。
+完整命令、classification schema 与验收步骤见 [HPC4 runbook](hpc4.md)。
 
 借鉴 AuxDPO 的是证据架构：analytic misspecification example、matched data/compute、
 capacity/sample-size stress、exactly 30 preregistered paired formal seeds、
@@ -915,7 +927,7 @@ all-six、frozen-global-beta multiplier sensitivity 与 OOD/human evaluation 都
 secondary/external-validity
 experiments，不能替代上述 common-`beta_0` controlled mechanism test。
 
-当前 pilot 尚未构成正式结果。pilot 通过后才创建新的 confirmatory config；其必须绑定
+pilot evidence 不构成正式结果。pilot 通过后才创建新的 confirmatory config；其必须绑定
 `beta_0`、完整有序的 30-seed 列表 `20260901`–`20260930`、源 artifact identity、
 聚合判据、全部数值正控及
 response-horizon/KL gates。任何值都不能从 confirmatory held-out 或 rollout outcomes

@@ -520,7 +520,7 @@ submit 脚本在 committed identity 中读取完整 seed 数，并形成
 单 index 或连续闭区间，`PRORM_ARRAY_CONCURRENCY` 必须是正整数。当前用户决定拉满已确认
 QoS，因此 accepted FP64 campaign 取 2；`MaxJobsPU=2` 仍是所有 split arrays 的全局并发上限。
 
-### 6.1 Phase 2 outcome-blind pilot（尚未运行）
+### 6.1 Phase 2 outcome-blind pilot
 
 Phase 2 使用两个被同时锁定的 config：
 
@@ -562,9 +562,9 @@ bash scripts/hpc4/submit_phase2_pilot.sh \
 ```
 
 当前可执行的 Phase 2 pilot GPU design 固定为 `gpu-l20`（NVIDIA L20）；专用 pilot 提交
-入口会拒绝任何其他 GPU partition。未来 confirmatory wrapper 在运行任何正式 seed 前必须
-保留同一硬件 guard，避免把跨硬件 producer 差异混入方法效应。CPU pilot aggregation 仍只
-允许 `amd|intel`，不受此 GPU 锁定影响。
+入口会拒绝任何其他 GPU partition。已实现的 confirmatory wrapper 同样只接受
+`gpu-l20`，避免把跨硬件 producer 差异混入方法效应。CPU pilot aggregation 与正式
+campaign finalization 仍只允许 `amd|intel`，不受此 GPU 锁定影响。
 
 可选第五参数仍是一个 zero-based index 或连续闭区间。该专用入口在 allocation 前验证：
 
@@ -739,8 +739,8 @@ confirmatory identity。
 seeds/arms 相同的 global `beta_0`、response horizon、optimization/KL/length gates，并使用
 顺序锁定的 30 个 paired seeds `20260901`–`20260930`。正式 beta sensitivity 只运行固定的
 `beta in {0.5*beta_0, 2.0*beta_0}`；seed-specific curvature calibration 仅是 pilot
-train-only 诊断，禁止进入 confirmatory jobs。当前文件没有记录任何 Phase 2 pilot job ID
-或结果，因为该 campaign 尚未运行。
+train-only 诊断，禁止进入 confirmatory jobs。本文件不硬编码 Phase 2 job ID 或实时状态；
+以 immutable run evidence、`squeue` 与 `sacct` 为准。
 
 ### 6.2 Historical numerical incident
 
@@ -1021,3 +1021,306 @@ rm -r -- "${targets[@]}"
    account、partition、GPU model 下重跑受影响 seed。若环境必须改变，则全部五 seed 重跑。
 
 任何需要改变预注册 config 的修复，都必须重新运行全部五个 paired seeds。
+
+## 11. Phase 2 confirmatory：exact-30、no-retry 正式运行手册
+
+本节是正式 Phase 2 的权威操作入口。上文出现的 calibration/freeze “retry”只表示
+**outcome-blind pilot 设计产生新 identity**，不适用于 confirmatory seed。正式 campaign
+固定 seeds `20260901`–`20260930`，每个 seed 只有 `attempt-1`，不允许 retry、requeue、
+replacement seed 或手工补跑。
+
+本仓库文档不记录尚未产生的 confirmatory config SHA、Git commit、image/inventory SHA、
+accepted-freeze SHA、Slurm job ID 或当前运行状态。以下 `REPLACE_WITH_*` 必须在正式提交时
+由已接受的 freeze、已提交 config identities 和 HPC4 实际环境解析，不能从示例猜测。
+
+### 11.1 提交前身份与环境
+
+先确认：
+
+- 已接受的 strict freeze aggregate 存在，并与 confirmatory overlay 中绑定的 SHA256 一致；
+- confirmatory overlay 和 base 都是 `configs/*.yaml` 下的 tracked file，且
+  `configs/identities.json` 中二者均声明 `seed_count=30`；
+- 当前 checkout 是将要执行的 exact commit，worktree clean；正式提交前先将该 commit 推送
+  到协作远程；
+- SIF、SIF SHA256、base-specific HF inventory 和离线 cache 已通过既有 preflight/staging；
+- `PRORM_PROJECT_ROOT` 与 `PRORM_SCRATCH_ROOT` 是两个互不包含的 canonical writable
+  absolute directory；
+- shell 中不存在导出的 `APPTAINER*`、`SINGULARITY*` 或 `SBATCH_*` 覆盖变量。
+
+```bash
+set -euo pipefail
+
+cd /ABS/PATH/TO/Smart-Reward-Model
+git status --short
+git rev-parse HEAD
+
+export PRORM_PROJECT_ROOT=/ABS/PATH/TO/PROJECT_DATA
+export PRORM_SCRATCH_ROOT=/ABS/PATH/TO/SCRATCH
+export PRORM_IMAGE=/ABS/PATH/TO/LOCKED_IMAGE.sif
+export PRORM_IMAGE_SHA256=REPLACE_WITH_64_HEX_IMAGE_SHA256
+export PRORM_HF_CACHE=/ABS/PATH/TO/OFFLINE_HF_CACHE
+export PRORM_PHASE2_ARRAY_CONCURRENCY=2
+```
+
+`PRORM_PHASE2_ARRAY_CONCURRENCY` 只能是 `1` 或 `2`，默认是 `2`；它只限制同时占用的
+L20 数量，不改变 exact-30 seed 集或 attempt policy。
+
+### 11.2 唯一正式提交与 held-array 恢复
+
+只提交完整数组，不按 seed 拆分：
+
+```bash
+overlay=configs/REPLACE_WITH_CONFIRMATORY_OVERLAY.yaml
+base=configs/REPLACE_WITH_CONFIRMATORY_BASE.yaml
+accepted_freeze=/ABS/PATH/TO/accepted-freeze-aggregate.json
+gpu_walltime=REPLACE_WITH_HH_MM_SS_OR_D_HH_MM_SS
+
+submission="$(
+  bash scripts/hpc4/submit_phase2_confirmatory.sh \
+    "${overlay}" \
+    "${base}" \
+    "${accepted_freeze}" \
+    gpu-l20 \
+    "${gpu_walltime}"
+)"
+printf '%s\n' "${submission}"
+array_job_id="${submission%%;*}"
+test -n "${array_job_id}"
+```
+
+可选第六参数只允许字面值 `0-29`；省略即可。`0`、子区间或第二个 array 都会被拒绝。
+wrapper 的顺序是：
+
+1. 校验 clean Git、双 config identity、accepted freeze、SIF 和 inventory；
+2. 用 `--hold --array=0-29%1|2 --no-requeue` 提交唯一数组；
+3. 在 registry lock 下原子提交 exact-30 submission record；
+4. fsync registry 后才执行 `scontrol release`。
+
+如果进程在第 3 步之后、第 4 步之前中断，**原样重跑上面的同一命令**。wrapper 会从
+immutable registry 找到同一个 held array，复核其 Slurm record 并 release；它不会再次调用
+`sbatch`。不要手工提交新数组，也不要自行执行 `scontrol release` 绕过复核。
+
+正式 design root 由已提交 overlay 的 semantic identity 决定：
+
+```bash
+design_sha=REPLACE_WITH_COMMITTED_CONFIRMATORY_DESIGN_SHA256
+design_root="${PRORM_PROJECT_ROOT}/runs/phase2-confirmatory/${design_sha}"
+registry="${design_root}/campaign-registry"
+
+test -f "${registry}/submissions/array-${array_job_id}.json"
+test -z "$(find "${registry}/recoveries" -mindepth 1 -maxdepth 1 -print -quit)"
+```
+
+### 11.3 监控
+
+只读监控不会改变 campaign：
+
+```bash
+squeue -j "${array_job_id}" \
+  -o '%.18i %.9P %.24j %.8T %.10M %.6D %R'
+
+sacct -X -j "${array_job_id}" \
+  --format=Cluster,JobIDRaw,JobID,State,ExitCode,Elapsed,MaxRSS
+
+tail -n 100 \
+  "${PRORM_PROJECT_ROOT}/slurm-logs/prorm-phase2-confirmatory-${array_job_id}_"*.out
+```
+
+对 task `t`，seed 固定为 `20260901+t`，canonical path 固定为：
+
+```text
+<design-root>/seed-<seed>/attempt-1/job-<array-job-id>_<array-task-id>/
+```
+
+完整 success 必须有 `SUCCESS` 与 `phase2-success-terminal.json`；compute failure 在 GPU
+publisher 完成原子 rename 后表现为 `FAILURE_PENDING`。隐藏的
+`.job-<array-job-id>_<task>.in-progress-<slurm-job-id>` 不是 terminal input。
+
+### 11.4 失败分流：先看 canonical path
+
+对每个 Slurm terminal non-success task，严格按下表处理：
+
+| 观测 | 唯一动作 |
+|---|---|
+| canonical job directory 含 `SUCCESS` | 已是 terminal success；不再处理 |
+| canonical job directory 含 `FAILURE_PENDING` | compute terminalizer |
+| canonical job directory 含 `FAILED` 或 `SCHEDULER_FAILED` | 已是 terminal failure；幂等复核即可 |
+| canonical job directory不存在，且 `sacct` root row 是 terminal non-success | scheduler terminalizer |
+| Slurm 尚非 terminal，或 evidence 不唯一 | 等待/调查；不得猜测分类或创建 terminal |
+
+GPU publisher 在隐藏 staging 中完成文件同步、hash、receipt、ledger、marker 验证与 fsync，
+并在 registry lock 下把完整目录原子 rename 到 canonical path。因此，rename 前 hard kill
+不会留下 canonical job，由 scheduler terminalizer 负责；一旦 canonical
+`FAILURE_PENDING` 存在，scheduler terminalizer 不再拥有该 slot。
+
+classification 是明确的 operator/scientific judgment，不得用默认值掩盖未知原因。
+`failure_stage`、`failure_class`、`failure_type` 必须是小写安全 token；
+`failure_class` 只能是
+`infrastructure|scientific|safety|identity|numerical|software`。先将受控的简短故障描述
+做 SHA256；原始描述保留在受控日志/incident record，不把任意日志内容拼入 JSON。
+
+#### A. canonical `FAILURE_PENDING`：compute terminalizer
+
+```bash
+seed=REPLACE_WITH_SEED
+array_task_id=REPLACE_WITH_TASK_0_TO_29
+failed_job_dir="${design_root}/seed-${seed}/attempt-1/job-${array_job_id}_${array_task_id}"
+test -f "${failed_job_dir}/FAILURE_PENDING"
+
+message='REPLACE_WITH_CONTROLLED_FAILURE_SUMMARY'
+message_sha256="$(printf '%s' "${message}" | sha256sum | awk '{print $1}')"
+classification=/ABS/PATH/TO/compute-failure-classification.json
+```
+
+`classification` 文件必须恰好包含：
+
+```json
+{
+  "failure_stage": "replace_with_safe_stage",
+  "failure_class": "replace_with_allowed_class",
+  "failure_type": "replace_with_safe_type",
+  "failure_message_sha256": "REPLACE_WITH_64_HEX_MESSAGE_SHA256"
+}
+```
+
+然后：
+
+```bash
+bash scripts/hpc4/terminalize_phase2_compute_failure.sh \
+  "${overlay}" \
+  "${failed_job_dir}" \
+  "${classification}"
+
+test -f "${failed_job_dir}/FAILED"
+test -f "${failed_job_dir}/phase2-failure-terminal.json"
+```
+
+该命令只接受已有 `FAILURE_PENDING`、attempt ledger 与 canonical evidence 的目录，原子生成
+v2 failure terminal 并把 marker 变为 `FAILED`；重复调用只会确认同一终态。
+
+#### B. canonical job 不存在：scheduler terminalizer
+
+先保存**恰好一行**未经改写的 root record：
+
+```bash
+seed=REPLACE_WITH_SEED
+array_task_id=REPLACE_WITH_TASK_0_TO_29
+sacct_raw=/ABS/PATH/TO/sacct-${array_job_id}_${array_task_id}.txt
+
+sacct -X -n -P \
+  -j "${array_job_id}_${array_task_id}" \
+  -o Cluster,JobIDRaw,JobID,State,ExitCode \
+  > "${sacct_raw}"
+
+test "$(wc -l < "${sacct_raw}")" -eq 1
+cat "${sacct_raw}"
+```
+
+这一行必须是
+`Cluster|JobIDRaw|JobID|State|ExitCode`，属于目标 array task，cluster 是 `hpc4`，
+且 state 为 terminal non-success。不要传 step rows、表头、筛选后的摘要或多行输出。
+
+在没有 run manifest/artifact 的 hard-kill 情况下，scheduler classification 的完整 schema
+如下；`final_outcome_reveal_started` 必须按真实执行边界显式填写 `true` 或 `false`：
+
+```json
+{
+  "failure_stage": "scheduler_reconciliation",
+  "failure_class": "infrastructure",
+  "failure_type": "replace_with_safe_type",
+  "failure_message_sha256": "REPLACE_WITH_64_HEX_MESSAGE_SHA256",
+  "final_outcome_reveal_started": false,
+  "evidence_availability": {
+    "schema_version": "phase2-seed-failure-evidence-availability/v1",
+    "run_manifest": {
+      "status": "unavailable",
+      "reason": "not_published_before_hard_termination"
+    },
+    "artifact_metadata": {
+      "status": "unavailable",
+      "reason": "not_produced_before_failure"
+    },
+    "environment_identity": {
+      "status": "unavailable",
+      "reason": "not_recoverable_from_scheduler_evidence"
+    }
+  }
+}
+```
+
+若某项 evidence 实际可用，必须按 schema 填 `available` 的真实 digest/value，不能套用上面的
+`unavailable`。执行 reconciliation 前，从原 submission record/正式身份设置：
+
+```bash
+export PRORM_GIT_COMMIT=REPLACE_WITH_SUBMITTED_GIT_COMMIT
+export PRORM_CLUSTER_NAME=hpc4
+export PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256=REPLACE_WITH_ACCEPTED_FREEZE_SHA256
+
+scheduler_classification=/ABS/PATH/TO/scheduler-failure-classification.json
+bash scripts/hpc4/terminalize_phase2_scheduler_failure.sh \
+  "${overlay}" \
+  "${seed}" \
+  "${array_job_id}" \
+  "${array_task_id}" \
+  1 \
+  "${scheduler_classification}" \
+  "${sacct_raw}"
+```
+
+attempt index 必须是字面值 `1`。该命令要求 canonical job 不存在，验证 held-array
+submission、可用时的 execution registry 和 raw `sacct` SHA256，然后在 registry lock 下
+原子发布 scheduler failure terminal。它不会授权 retry。
+
+### 11.5 Registry resolver 与 CPU campaign finalizer
+
+只有 30 个 slot 都 terminal 后才提交 finalizer。通常不要直接调用 resolver：
+`submit_phase2_campaign_finalize.sh` 会在提交前和 CPU compute 内各运行一次 resolver，验证：
+
+- 只有一个 exact ordered `0..29` attempt-1 submission；
+- task-to-seed 映射严格为 `20260901..20260930`；
+- Git、design/base、SIF、inventory、accepted-freeze 与 producer hashes 一致；
+- `recoveries/` 为空，每个 seed 只有唯一 terminal owner；
+- terminal manifest、marker、attempt ledger 与 nested success evidence 的 hashes 一致。
+
+只读审计需要时，resolver 接口为：
+
+```bash
+python3 scripts/hpc4/resolve_phase2_campaign_registry.py \
+  "${design_root}" \
+  "${design_sha}" \
+  REPLACE_WITH_BASE_CONFIG_HASH \
+  REPLACE_WITH_SUBMITTED_GIT_COMMIT \
+  REPLACE_WITH_IMAGE_SHA256 \
+  REPLACE_WITH_HF_INVENTORY_SHA256
+```
+
+正式 publication 被锁定为一次性的 `campaign-final/`：
+
+```bash
+campaign_dir="${design_root}/campaign-final"
+
+finalizer_job="$(
+  bash scripts/hpc4/submit_phase2_campaign_finalize.sh \
+    "${overlay}" \
+    "${base}" \
+    "${campaign_dir}/phase2-campaign-terminal.json" \
+    "${campaign_dir}/phase2-primary-aggregate.json" \
+    amd \
+    REPLACE_WITH_WALLTIME
+)"
+printf '%s\n' "${finalizer_job}"
+```
+
+finalizer 完成后：
+
+```bash
+sacct -X -j "${finalizer_job%%;*}" \
+  --format=JobID,State,ExitCode,Elapsed,MaxRSS
+test -f "${campaign_dir}/phase2-campaign-terminal.json"
+```
+
+若 30 个 terminal 全部成功，才允许存在
+`phase2-primary-aggregate.json`，并由其报告 `passed|not_passed` 与 primary intervals。
+若任一 seed terminal failure，campaign 状态必须是
+`not_passed_due_to_seed_failure`，`phase2-primary-aggregate.json` 必须不存在，也不得计算、
+展示或用替代 seed 补出 primary CI。这是预注册 estimand 的终态，不是待重跑的工程状态。

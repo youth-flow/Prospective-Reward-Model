@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import smart_reward.phase2_campaign as phase2_campaign_module
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.phase2_aggregate import (
     PHASE2_AGGREGATE_SCHEMA,
@@ -17,10 +18,16 @@ from smart_reward.phase2_aggregate import (
 from smart_reward.phase2_campaign import (
     PHASE2_ATTEMPT_LEDGER_SCHEMA,
     PHASE2_CAMPAIGN_TERMINAL_SCHEMA,
+    PHASE2_FAILURE_EVIDENCE_AVAILABILITY_SCHEMA,
     PHASE2_SEED_FAILURE_SCHEMA,
+    PHASE2_SEED_FAILURE_SCHEMA_V1,
+    PHASE2_SEED_SUCCESS_SCHEMA,
     build_phase2_seed_failure_manifest,
+    build_phase2_seed_success_manifest,
+    load_phase2_seed_success_spec,
     write_phase2_campaign_terminal,
     write_phase2_seed_failure_manifest,
+    write_phase2_seed_success_manifest,
 )
 from smart_reward.phase2_config import (
     PHASE2_MIN_CONFIRMATORY_SEEDS,
@@ -2286,12 +2293,15 @@ def _failure_spec(
         "final_outcome_reveal_started": False,
         "attempt_ledger": {
             "schema_version": PHASE2_ATTEMPT_LEDGER_SCHEMA,
-            "retry_policy": "same_predeclared_seed_pre_outcome_infrastructure_only",
+            "retry_policy": "single_predeclared_attempt_no_retry",
             "replacement_seed_allowed": False,
             "attempts": (
                 [
                     {
                         "attempt_index": 1,
+                        "cluster_name": "hpc4",
+                        "array_job_id": "9001",
+                        "array_task_id": seed - 20260901,
                         "slurm_job_id": "9001_0",
                         "status": "terminal_failure",
                         "final_outcome_reveal_started": False,
@@ -2307,6 +2317,87 @@ def _failure_spec(
             "pre_oracle_gate": _token_sha256("pre-oracle gate evidence"),
         },
     }
+
+
+def _unavailable_failure_spec(seed: int) -> dict[str, object]:
+    spec = _failure_spec(seed)
+    for key in (
+        "run_manifest_sha256",
+        "artifact_metadata_sha256",
+        "environment_identity",
+    ):
+        del spec[key]
+    spec["failure_stage"] = "scheduler_reconciliation"
+    spec["failure_class"] = "infrastructure"
+    spec["failure_type"] = "hard_termination_before_compute_trap"
+    spec["capture_method"] = "scheduler_terminal_reconciliation"
+    spec["evidence_availability"] = {
+        "schema_version": PHASE2_FAILURE_EVIDENCE_AVAILABILITY_SCHEMA,
+        "run_manifest": {
+            "status": "unavailable",
+            "reason": "not_published_before_hard_termination",
+        },
+        "artifact_metadata": {
+            "status": "unavailable",
+            "reason": "not_produced_before_failure",
+        },
+        "environment_identity": {
+            "status": "unavailable",
+            "reason": "not_recoverable_from_scheduler_evidence",
+        },
+    }
+    spec["evidence_sha256_by_role"] = {
+        "scheduler_terminal_attestation": _token_sha256(
+            "Slurm terminal state and exit-code attestation"
+        )
+    }
+    return spec
+
+
+def _success_attempt_ledger(
+    seed: int,
+) -> dict[str, object]:
+    attempts = [
+        {
+            "attempt_index": 1,
+            "cluster_name": "hpc4",
+            "array_job_id": str(seed * 100 + 1),
+            "array_task_id": seed - 20260901,
+            "slurm_job_id": f"{seed}01",
+            "status": "success_result",
+            "final_outcome_reveal_started": True,
+            "log_sha256": _token_sha256(f"seed {seed} attempt 1"),
+        }
+    ]
+    return {
+        "schema_version": PHASE2_ATTEMPT_LEDGER_SCHEMA,
+        "retry_policy": "single_predeclared_attempt_no_retry",
+        "replacement_seed_allowed": False,
+        "attempts": attempts,
+    }
+
+
+def _success_terminal(
+    config: dict[str, Any],
+    result_path: Path,
+) -> Path:
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    seed = int(result["seed"])
+    output = result_path.with_name("SUCCESS.json")
+    write_phase2_seed_success_manifest(
+        config,
+        result_path,
+        _success_attempt_ledger(seed),
+        output,
+    )
+    return output
+
+
+def _success_terminals(
+    config: dict[str, Any],
+    result_paths: list[Path],
+) -> list[Path]:
+    return [_success_terminal(config, path) for path in result_paths]
 
 
 def test_failed_seed_manifest_is_identity_bound_and_immutable(tmp_path: Path) -> None:
@@ -2333,7 +2424,103 @@ def test_failed_seed_manifest_is_identity_bound_and_immutable(tmp_path: Path) ->
         write_phase2_seed_failure_manifest(config, _failure_spec(seed), output)
 
 
-def test_failure_manifest_allows_only_same_seed_pre_outcome_infrastructure_retries(
+def test_failure_v2_records_unavailable_early_stage_evidence_without_fake_hashes(
+    tmp_path: Path,
+) -> None:
+    config, _ = _confirmatory_campaign(tmp_path / "campaign")
+    seed = int(config["run"]["seeds"][0])
+    manifest = write_phase2_seed_failure_manifest(
+        config,
+        _unavailable_failure_spec(seed),
+        tmp_path / "hard-termination.json",
+    )
+
+    assert manifest["schema_version"] == PHASE2_SEED_FAILURE_SCHEMA
+    availability = manifest["evidence_availability"]
+    assert availability["schema_version"] == PHASE2_FAILURE_EVIDENCE_AVAILABILITY_SCHEMA
+    assert availability["run_manifest"] == {
+        "status": "unavailable",
+        "reason": "not_published_before_hard_termination",
+    }
+    assert "sha256" not in availability["run_manifest"]
+    assert availability["artifact_metadata"]["status"] == "unavailable"
+    assert availability["environment_identity"]["status"] == "unavailable"
+    assert set(manifest["evidence_sha256_by_role"]) == {"scheduler_terminal_attestation"}
+
+
+@pytest.mark.parametrize(
+    ("slot_name", "slot_value", "message"),
+    [
+        (
+            "run_manifest",
+            {"status": "unavailable", "reason": "", "sha256": "a" * 64},
+            "fields differ",
+        ),
+        (
+            "artifact_metadata",
+            {"status": "available", "reason": "missing"},
+            "fields differ",
+        ),
+        (
+            "run_manifest",
+            {"status": "unavailable", "reason": "/secret/job/error text"},
+            "must be one of",
+        ),
+        (
+            "environment_identity",
+            {"status": "available", "value": None},
+            "must be a string-keyed mapping",
+        ),
+    ],
+)
+def test_failure_v2_rejects_ambiguous_or_fabricated_availability_slots(
+    tmp_path: Path,
+    slot_name: str,
+    slot_value: dict[str, object],
+    message: str,
+) -> None:
+    config, _ = _confirmatory_campaign(tmp_path / "campaign")
+    seed = int(config["run"]["seeds"][0])
+    spec = _unavailable_failure_spec(seed)
+    spec["evidence_availability"][slot_name] = slot_value
+    with pytest.raises((TypeError, ValueError), match=message):
+        write_phase2_seed_failure_manifest(
+            config,
+            spec,
+            tmp_path / f"invalid-{slot_name}.json",
+        )
+
+
+def test_campaign_finalizer_rejects_legacy_v1_failure_manifest(
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    seed = int(config["run"]["seeds"][0])
+    current = build_phase2_seed_failure_manifest(
+        config,
+        **_failure_spec(seed),
+    )
+    availability = current.pop("evidence_availability")
+    current.pop("capture_method")
+    current["schema_version"] = PHASE2_SEED_FAILURE_SCHEMA_V1
+    current["run_manifest_sha256"] = availability["run_manifest"]["sha256"]
+    current["artifact_metadata_sha256"] = availability["artifact_metadata"]["sha256"]
+    current["environment_identity"] = availability["environment_identity"]["value"]
+    legacy = result_paths[0].with_name("legacy-v1-failure.json")
+    _write_json(legacy, current)
+    terminals[0] = legacy
+
+    with pytest.raises(ValueError, match="neither a success terminal"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            tmp_path / "legacy-campaign.json",
+            aggregate_output_json=tmp_path / "legacy-aggregate.json",
+        )
+
+
+def test_failure_manifest_rejects_all_formal_retries(
     tmp_path: Path,
 ) -> None:
     config, _ = _confirmatory_campaign(tmp_path / "campaign")
@@ -2341,6 +2528,9 @@ def test_failure_manifest_allows_only_same_seed_pre_outcome_infrastructure_retri
     valid_attempts = [
         {
             "attempt_index": 1,
+            "cluster_name": "hpc4",
+            "array_job_id": "9001",
+            "array_task_id": seed - 20260901,
             "slurm_job_id": "9001_0",
             "status": "infrastructure_failure_pre_outcome",
             "final_outcome_reveal_started": False,
@@ -2348,32 +2538,19 @@ def test_failure_manifest_allows_only_same_seed_pre_outcome_infrastructure_retri
         },
         {
             "attempt_index": 2,
+            "cluster_name": "hpc4",
+            "array_job_id": "9002",
+            "array_task_id": seed - 20260901,
             "slurm_job_id": "9002_0",
             "status": "terminal_failure",
             "final_outcome_reveal_started": False,
             "log_sha256": _token_sha256("terminal failure"),
         },
     ]
-    manifest = build_phase2_seed_failure_manifest(
-        config,
-        **{
-            key: value
-            for key, value in _failure_spec(seed, attempts=valid_attempts).items()
-            if key
-            not in {
-                "seed",
-            }
-        },
-        seed=seed,
-    )
-    assert len(manifest["attempt_ledger"]["attempts"]) == 2
-
-    invalid_attempts = copy.deepcopy(valid_attempts)
-    invalid_attempts[0]["final_outcome_reveal_started"] = True
-    with pytest.raises(ValueError, match="cannot reveal outcomes"):
+    with pytest.raises(ValueError, match="exactly one"):
         write_phase2_seed_failure_manifest(
             config,
-            _failure_spec(seed, attempts=invalid_attempts),
+            _failure_spec(seed, attempts=valid_attempts),
             tmp_path / "invalid-retry.json",
         )
     with pytest.raises(ValueError, match="not predeclared"):
@@ -2384,10 +2561,225 @@ def test_failure_manifest_allows_only_same_seed_pre_outcome_infrastructure_retri
         )
 
 
+def test_success_manifest_binds_result_and_single_attempt(tmp_path: Path) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    result_path = result_paths[0]
+    seed = int(config["run"]["seeds"][0])
+    output = result_path.with_name("SUCCESS.json")
+
+    manifest = write_phase2_seed_success_manifest(
+        config,
+        result_path,
+        _success_attempt_ledger(seed),
+        output,
+    )
+
+    assert manifest["schema_version"] == PHASE2_SEED_SUCCESS_SCHEMA
+    assert manifest["terminal_status"] == "success_result"
+    assert manifest["terminal"] is True
+    assert manifest["supports_formal_claim"] is False
+    assert manifest["seed"] == seed
+    assert manifest["result"] == {
+        "path": "result.json",
+        "sha256": _sha256(result_path),
+        "schema_version": "common-beta-finite-policy/v2",
+    }
+    rollout_path = result_path.with_name("result.rollouts.jsonl")
+    assert manifest["rollout"] == {
+        "path": "result.rollouts.jsonl",
+        "sha256": _sha256(rollout_path),
+        "schema_version": "common-beta-trajectory/v2",
+    }
+    assert [attempt["attempt_index"] for attempt in manifest["attempt_ledger"]["attempts"]] == [1]
+    assert [attempt["status"] for attempt in manifest["attempt_ledger"]["attempts"]] == [
+        "success_result",
+    ]
+    assert manifest["attempt_ledger"]["attempts"][-1]["final_outcome_reveal_started"] is True
+    assert json.loads(output.read_text(encoding="utf-8")) == manifest
+    with pytest.raises(FileExistsError, match="overwrite"):
+        write_phase2_seed_success_manifest(
+            config,
+            result_path,
+            _success_attempt_ledger(seed),
+            output,
+        )
+
+
+@pytest.mark.parametrize("failure_mode", ["mutated", "deleted"])
+def test_success_manifest_rejects_changed_or_missing_rollout_jsonl(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    result_path = result_paths[0]
+    rollout_path = result_path.with_name("result.rollouts.jsonl")
+    seed = int(config["run"]["seeds"][0])
+    if failure_mode == "mutated":
+        with rollout_path.open("ab") as handle:
+            handle.write(b" ")
+        message = "rollout JSONL SHA-256 changed"
+    else:
+        rollout_path.unlink()
+        message = "must be a regular file"
+
+    with pytest.raises(ValueError, match=message):
+        write_phase2_seed_success_manifest(
+            config,
+            result_path,
+            _success_attempt_ledger(seed),
+            result_path.with_name("SUCCESS.json"),
+        )
+    assert not result_path.with_name("SUCCESS.json").exists()
+
+
+def test_success_manifest_rejects_rollout_symlink_substitution(tmp_path: Path) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    result_path = result_paths[0]
+    rollout_path = result_path.with_name("result.rollouts.jsonl")
+    preserved = rollout_path.with_name("preserved-rollouts.jsonl")
+    rollout_path.rename(preserved)
+    try:
+        rollout_path.symlink_to(preserved.name)
+    except OSError as error:
+        preserved.rename(rollout_path)
+        pytest.skip(f"symbolic links are unavailable: {error}")
+
+    seed = int(config["run"]["seeds"][0])
+    with pytest.raises(ValueError, match="must not be a symbolic link"):
+        write_phase2_seed_success_manifest(
+            config,
+            result_path,
+            _success_attempt_ledger(seed),
+            result_path.with_name("SUCCESS.json"),
+        )
+    assert not result_path.with_name("SUCCESS.json").exists()
+
+
+def test_success_manifest_rejects_rollout_with_unbound_row_schema(tmp_path: Path) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    result_path = result_paths[0]
+    rollout_path = result_path.with_name("result.rollouts.jsonl")
+    lines = rollout_path.read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    first["schema_version"] = "common-beta-trajectory/v999"
+    lines[0] = json.dumps(first, sort_keys=True)
+    rollout_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["rollouts_sha256"] = _sha256(rollout_path)
+    _write_json(result_path, result)
+
+    seed = int(config["run"]["seeds"][0])
+    with pytest.raises(ValueError, match="unsupported rollout trajectory schema"):
+        write_phase2_seed_success_manifest(
+            config,
+            result_path,
+            _success_attempt_ledger(seed),
+            result_path.with_name("SUCCESS.json"),
+        )
+    assert not result_path.with_name("SUCCESS.json").exists()
+
+
+def test_success_manifest_rejects_result_rollout_path_escape(tmp_path: Path) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    result_path = result_paths[0]
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["rollouts_jsonl"] = "../result.rollouts.jsonl"
+    _write_json(result_path, result)
+    seed = int(config["run"]["seeds"][0])
+
+    with pytest.raises(ValueError, match="one POSIX basename"):
+        write_phase2_seed_success_manifest(
+            config,
+            result_path,
+            _success_attempt_ledger(seed),
+            result_path.with_name("SUCCESS.json"),
+        )
+    assert not result_path.with_name("SUCCESS.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda attempts: attempts[0].__setitem__("attempt_index", 2),
+            "contiguous and one-based",
+        ),
+        (
+            lambda attempts: attempts[0].__setitem__(
+                "status",
+                "terminal_failure",
+            ),
+            "single formal attempt",
+        ),
+        (
+            lambda attempts: attempts[-1].__setitem__(
+                "final_outcome_reveal_started",
+                False,
+            ),
+            "must reveal its final outcome",
+        ),
+    ],
+)
+def test_success_manifest_rejects_attempt_ledger_tampering(
+    tmp_path: Path,
+    mutation: Any,
+    message: str,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    seed = int(config["run"]["seeds"][0])
+    ledger = _success_attempt_ledger(seed)
+    mutation(ledger["attempts"])
+
+    with pytest.raises(ValueError, match=message):
+        build_phase2_seed_success_manifest(
+            config,
+            result_paths[0],
+            ledger,
+            reference_base=result_paths[0].parent,
+        )
+
+
+def test_success_spec_is_duplicate_key_free_and_has_no_ambient_fields(tmp_path: Path) -> None:
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text(
+        '{"attempt_ledger":{},"attempt_ledger":{}}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_phase2_seed_success_spec(duplicate)
+
+    unknown = tmp_path / "unknown.json"
+    _write_json(
+        unknown,
+        {
+            "attempt_ledger": {},
+            "result_json": "ambient-result-path.json",
+        },
+    )
+    with pytest.raises(ValueError, match="fields differ"):
+        load_phase2_seed_success_spec(unknown)
+
+
+def test_formal_campaign_rejects_bare_success_results_without_ledgers(
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    with pytest.raises(ValueError, match="bare result"):
+        write_phase2_campaign_terminal(
+            config,
+            result_paths,
+            tmp_path / "bare-terminal.json",
+            aggregate_output_json=tmp_path / "bare-aggregate.json",
+        )
+    assert not (tmp_path / "bare-terminal.json").exists()
+    assert not (tmp_path / "bare-aggregate.json").exists()
+
+
 def test_campaign_failure_finalizer_keeps_exact_30_slots_and_emits_no_ci(
     tmp_path: Path,
 ) -> None:
     config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
     failed_index = 7
     failed_seed = int(config["run"]["seeds"][failed_index])
     failure_path = tmp_path / "campaign" / f"seed-{failed_seed}" / "FAILED.json"
@@ -2396,7 +2788,6 @@ def test_campaign_failure_finalizer_keeps_exact_30_slots_and_emits_no_ci(
         _failure_spec(failed_seed),
         failure_path,
     )
-    terminals = list(result_paths)
     terminals[failed_index] = failure_path
     terminal_output = tmp_path / "campaign-terminal.json"
     aggregate_output = tmp_path / "primary-aggregate.json"
@@ -2426,15 +2817,16 @@ def test_campaign_finalizer_rejects_missing_duplicate_and_replacement_seed(
     tmp_path: Path,
 ) -> None:
     config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
 
     with pytest.raises(ValueError, match="exactly one terminal input"):
         write_phase2_campaign_terminal(
             config,
-            result_paths[:-1],
+            terminals[:-1],
             tmp_path / "missing.json",
             aggregate_output_json=tmp_path / "missing-aggregate.json",
         )
-    duplicated = [*result_paths[:-1], result_paths[0]]
+    duplicated = [*terminals[:-1], terminals[0]]
     with pytest.raises(ValueError, match="duplicate terminal input"):
         write_phase2_campaign_terminal(
             config,
@@ -2443,14 +2835,11 @@ def test_campaign_finalizer_rejects_missing_duplicate_and_replacement_seed(
             aggregate_output_json=tmp_path / "duplicate-aggregate.json",
         )
 
-    def replace_seed(value: dict[str, object]) -> None:
-        value["seed"] = 99999999
-
-    _mutate(result_paths[-1], replace_seed)
-    with pytest.raises(ValueError, match="substitute undeclared seed"):
+    _mutate(terminals[-1], lambda value: value.__setitem__("seed", 99999999))
+    with pytest.raises(ValueError, match="disagrees with its bound result"):
         write_phase2_campaign_terminal(
             config,
-            result_paths,
+            terminals,
             tmp_path / "replacement.json",
             aggregate_output_json=tmp_path / "replacement-aggregate.json",
         )
@@ -2459,13 +2848,450 @@ def test_campaign_finalizer_rejects_missing_duplicate_and_replacement_seed(
     assert not (tmp_path / "replacement.json").exists()
 
 
+def test_campaign_finalizer_revalidates_every_success_sidecar_field(
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    original = json.loads(terminals[0].read_text(encoding="utf-8"))
+    cases = [
+        (
+            "identity",
+            lambda value: value.__setitem__("phase2_design_sha256", "0" * 64),
+            "invalid success terminal identity",
+        ),
+        (
+            "result-sha",
+            lambda value: value["result"].__setitem__("sha256", "0" * 64),
+            "SHA-256 changed",
+        ),
+        (
+            "absolute-result-path",
+            lambda value: value["result"].__setitem__("path", "C:/forged/result.json"),
+            "one POSIX basename",
+        ),
+        (
+            "traversal-result-path",
+            lambda value: value["result"].__setitem__("path", "../result.json"),
+            "one POSIX basename",
+        ),
+        (
+            "nested-result-path",
+            lambda value: value["result"].__setitem__("path", "nested/result.json"),
+            "one POSIX basename",
+        ),
+        (
+            "backslash-result-path",
+            lambda value: value["result"].__setitem__("path", r"nested\result.json"),
+            "POSIX separators",
+        ),
+        (
+            "result-copy",
+            lambda value: value.__setitem__("run_manifest_sha256", "0" * 64),
+            "disagrees with its bound result",
+        ),
+        (
+            "absolute-rollout-path",
+            lambda value: value["rollout"].__setitem__(
+                "path",
+                "C:/forged/result.rollouts.jsonl",
+            ),
+            "one POSIX basename",
+        ),
+        (
+            "traversal-rollout-path",
+            lambda value: value["rollout"].__setitem__(
+                "path",
+                "../result.rollouts.jsonl",
+            ),
+            "one POSIX basename",
+        ),
+        (
+            "backslash-rollout-path",
+            lambda value: value["rollout"].__setitem__(
+                "path",
+                r"nested\result.rollouts.jsonl",
+            ),
+            "POSIX separators",
+        ),
+        (
+            "rollout-sha",
+            lambda value: value["rollout"].__setitem__("sha256", "0" * 64),
+            "rollout sidecar disagrees with its bound result",
+        ),
+        (
+            "rollout-schema",
+            lambda value: value["rollout"].__setitem__(
+                "schema_version",
+                "common-beta-trajectory/v999",
+            ),
+            "rollout sidecar disagrees with its bound result",
+        ),
+        (
+            "attempt-index",
+            lambda value: value["attempt_ledger"]["attempts"][0].__setitem__(
+                "attempt_index",
+                2,
+            ),
+            "contiguous and one-based",
+        ),
+        (
+            "terminal-status",
+            lambda value: value["attempt_ledger"]["attempts"][0].__setitem__(
+                "status",
+                "terminal_failure",
+            ),
+            "single formal attempt",
+        ),
+        (
+            "success-without-reveal",
+            lambda value: value["attempt_ledger"]["attempts"][0].__setitem__(
+                "final_outcome_reveal_started",
+                False,
+            ),
+            "must reveal its final outcome",
+        ),
+    ]
+    for name, mutation, message in cases:
+        tampered = copy.deepcopy(original)
+        mutation(tampered)
+        tampered_path = terminals[0].parent / f"{name}-SUCCESS.json"
+        _write_json(tampered_path, tampered)
+        inputs = [tampered_path, *terminals[1:]]
+        terminal_output = tmp_path / f"{name}-campaign.json"
+        aggregate_output = tmp_path / f"{name}-aggregate.json"
+        with pytest.raises(ValueError, match=message):
+            write_phase2_campaign_terminal(
+                config,
+                inputs,
+                terminal_output,
+                aggregate_output_json=aggregate_output,
+            )
+        assert not terminal_output.exists()
+        assert not aggregate_output.exists()
+
+
+def test_campaign_finalizer_rejects_slurm_job_reuse_across_seed_ledgers(
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    first = json.loads(terminals[0].read_text(encoding="utf-8"))
+    reused_job_id = first["attempt_ledger"]["attempts"][-1]["slurm_job_id"]
+
+    def reuse_job(value: dict[str, object]) -> None:
+        value["attempt_ledger"]["attempts"][-1]["slurm_job_id"] = reused_job_id
+
+    _mutate(terminals[1], reuse_job)
+    with pytest.raises(ValueError, match="repeat Slurm job identity"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            tmp_path / "reused-job-campaign.json",
+            aggregate_output_json=tmp_path / "reused-job-aggregate.json",
+        )
+    assert not (tmp_path / "reused-job-campaign.json").exists()
+    assert not (tmp_path / "reused-job-aggregate.json").exists()
+
+
+def test_campaign_finalizer_rejects_symlink_substitution_for_bound_result(
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    result_path = result_paths[0]
+    preserved = result_path.with_name("preserved-result.json")
+    result_path.rename(preserved)
+    try:
+        result_path.symlink_to(preserved.name)
+    except OSError as error:
+        preserved.rename(result_path)
+        pytest.skip(f"symbolic links are unavailable: {error}")
+
+    with pytest.raises(ValueError, match="must not be a symbolic link"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            tmp_path / "symlink-campaign.json",
+            aggregate_output_json=tmp_path / "symlink-aggregate.json",
+        )
+    assert not (tmp_path / "symlink-campaign.json").exists()
+    assert not (tmp_path / "symlink-aggregate.json").exists()
+
+
+def test_campaign_finalizer_rehashes_all_terminal_manifests_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    original_builder = phase2_campaign_module.build_common_beta_seed_aggregate
+
+    def mutate_after_aggregate(*args: Any, **kwargs: Any) -> Any:
+        aggregate = original_builder(*args, **kwargs)
+        terminal = json.loads(terminals[0].read_text(encoding="utf-8"))
+        terminal["pre_oracle_safety_gate_passed"] = False
+        _write_json(terminals[0], terminal)
+        return aggregate
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "build_common_beta_seed_aggregate",
+        mutate_after_aggregate,
+    )
+    with pytest.raises(ValueError, match="terminal manifest changed during finalization"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            tmp_path / "toctou-campaign.json",
+            aggregate_output_json=tmp_path / "toctou-aggregate.json",
+        )
+    assert not (tmp_path / "toctou-campaign.json").exists()
+    assert not (tmp_path / "toctou-aggregate.json").exists()
+
+
+def test_campaign_finalizer_rehashes_rollouts_before_success_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    rollout_path = result_paths[0].with_name("result.rollouts.jsonl")
+    original_builder = phase2_campaign_module.build_common_beta_seed_aggregate
+
+    def mutate_after_aggregate(*args: Any, **kwargs: Any) -> Any:
+        aggregate = original_builder(*args, **kwargs)
+        with rollout_path.open("ab") as handle:
+            handle.write(b" ")
+        return aggregate
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "build_common_beta_seed_aggregate",
+        mutate_after_aggregate,
+    )
+    terminal_output = tmp_path / "rollout-toctou-campaign.json"
+    aggregate_output = tmp_path / "rollout-toctou-aggregate.json"
+    with pytest.raises(ValueError, match="rollout JSONL changed during finalization"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            terminal_output,
+            aggregate_output_json=aggregate_output,
+        )
+    assert not terminal_output.exists()
+    assert not aggregate_output.exists()
+
+
+def test_failed_seed_terminal_branch_rehashes_surviving_success_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    failed_index = 7
+    failed_seed = int(config["run"]["seeds"][failed_index])
+    failure_path = result_paths[failed_index].with_name("FAILED.json")
+    write_phase2_seed_failure_manifest(
+        config,
+        _failure_spec(failed_seed),
+        failure_path,
+    )
+    terminals[failed_index] = failure_path
+    original_validator = phase2_campaign_module._validate_campaign_job_id_uniqueness
+
+    def mutate_after_ledger_validation(*args: Any, **kwargs: Any) -> None:
+        original_validator(*args, **kwargs)
+        _mutate(result_paths[0], lambda value: value.__setitem__("toctou", True))
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "_validate_campaign_job_id_uniqueness",
+        mutate_after_ledger_validation,
+    )
+    with pytest.raises(ValueError, match="successful result changed during finalization"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            tmp_path / "failed-seed-toctou-campaign.json",
+            aggregate_output_json=tmp_path / "failed-seed-toctou-aggregate.json",
+        )
+    assert not (tmp_path / "failed-seed-toctou-campaign.json").exists()
+    assert not (tmp_path / "failed-seed-toctou-aggregate.json").exists()
+
+
+def test_failed_seed_terminal_branch_rehashes_surviving_rollouts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    failed_index = 7
+    failed_seed = int(config["run"]["seeds"][failed_index])
+    failure_path = result_paths[failed_index].with_name("FAILED.json")
+    write_phase2_seed_failure_manifest(
+        config,
+        _failure_spec(failed_seed),
+        failure_path,
+    )
+    terminals[failed_index] = failure_path
+    rollout_path = result_paths[0].with_name("result.rollouts.jsonl")
+    original_validator = phase2_campaign_module._validate_campaign_job_id_uniqueness
+
+    def mutate_after_ledger_validation(*args: Any, **kwargs: Any) -> None:
+        original_validator(*args, **kwargs)
+        with rollout_path.open("ab") as handle:
+            handle.write(b" ")
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "_validate_campaign_job_id_uniqueness",
+        mutate_after_ledger_validation,
+    )
+    terminal_output = tmp_path / "failed-seed-rollout-toctou-campaign.json"
+    aggregate_output = tmp_path / "failed-seed-rollout-toctou-aggregate.json"
+    with pytest.raises(ValueError, match="rollout JSONL changed during finalization"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            terminal_output,
+            aggregate_output_json=aggregate_output,
+        )
+    assert not terminal_output.exists()
+    assert not aggregate_output.exists()
+
+
+def test_aggregate_exception_branch_rehashes_success_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+
+    def mutate_then_fail(*args: Any, **kwargs: Any) -> Any:
+        _mutate(result_paths[0], lambda value: value.__setitem__("toctou", True))
+        raise ValueError("forced aggregate validation failure")
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "build_common_beta_seed_aggregate",
+        mutate_then_fail,
+    )
+    with pytest.raises(ValueError, match="successful result changed during finalization"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            tmp_path / "aggregate-exception-toctou-campaign.json",
+            aggregate_output_json=tmp_path / "aggregate-exception-toctou-aggregate.json",
+        )
+    assert not (tmp_path / "aggregate-exception-toctou-campaign.json").exists()
+    assert not (tmp_path / "aggregate-exception-toctou-aggregate.json").exists()
+
+
+def test_aggregate_exception_branch_rehashes_rollouts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    rollout_path = result_paths[0].with_name("result.rollouts.jsonl")
+
+    def mutate_then_fail(*args: Any, **kwargs: Any) -> Any:
+        with rollout_path.open("ab") as handle:
+            handle.write(b" ")
+        raise ValueError("forced aggregate validation failure")
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "build_common_beta_seed_aggregate",
+        mutate_then_fail,
+    )
+    terminal_output = tmp_path / "aggregate-exception-rollout-campaign.json"
+    aggregate_output = tmp_path / "aggregate-exception-rollout-aggregate.json"
+    with pytest.raises(ValueError, match="rollout JSONL changed during finalization"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            terminal_output,
+            aggregate_output_json=aggregate_output,
+        )
+    assert not terminal_output.exists()
+    assert not aggregate_output.exists()
+
+
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    [
+        (OSError, "transient aggregate filesystem failure"),
+        (ValueError, "deterministic aggregate validation failure"),
+    ],
+)
+def test_aggregate_errors_propagate_without_publishing_or_guessing_failed_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+
+    def fail_aggregate(*args: Any, **kwargs: Any) -> Any:
+        raise error_type(message)
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "build_common_beta_seed_aggregate",
+        fail_aggregate,
+    )
+    terminal_output = tmp_path / "aggregate-error-campaign.json"
+    aggregate_output = tmp_path / "aggregate-error-primary.json"
+    with pytest.raises(error_type, match=message):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            terminal_output,
+            aggregate_output_json=aggregate_output,
+        )
+    assert not terminal_output.exists()
+    assert not aggregate_output.exists()
+
+
+def test_positive_branch_rejects_disappeared_success_result_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
+    original_builder = phase2_campaign_module.build_common_beta_seed_aggregate
+
+    def remove_after_aggregate(*args: Any, **kwargs: Any) -> Any:
+        aggregate = original_builder(*args, **kwargs)
+        result_paths[0].unlink()
+        return aggregate
+
+    monkeypatch.setattr(
+        phase2_campaign_module,
+        "build_common_beta_seed_aggregate",
+        remove_after_aggregate,
+    )
+    with pytest.raises(ValueError, match="successful result is no longer a regular file"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            tmp_path / "missing-result-campaign.json",
+            aggregate_output_json=tmp_path / "missing-result-aggregate.json",
+        )
+    assert not (tmp_path / "missing-result-campaign.json").exists()
+    assert not (tmp_path / "missing-result-aggregate.json").exists()
+
+
 @pytest.mark.parametrize("failure_kind", ["identity", "safety"])
-def test_identity_or_safety_invalid_result_is_terminal_without_ci(
+def test_identity_or_safety_tamper_after_success_manifest_is_rejected(
     tmp_path: Path,
     failure_kind: str,
 ) -> None:
     config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
-    failed_seed = int(config["run"]["seeds"][2])
+    terminals = _success_terminals(config, result_paths)
 
     def invalidate(value: dict[str, object]) -> None:
         if failure_kind == "identity":
@@ -2478,18 +3304,14 @@ def test_identity_or_safety_invalid_result_is_terminal_without_ci(
     _mutate(result_paths[2], invalidate)
     terminal_output = tmp_path / f"{failure_kind}-terminal.json"
     aggregate_output = tmp_path / f"{failure_kind}-aggregate.json"
-    payload = write_phase2_campaign_terminal(
-        config,
-        result_paths,
-        terminal_output,
-        aggregate_output_json=aggregate_output,
-    )
-
-    assert payload["status"] == "not_passed_due_to_seed_failure"
-    assert payload["failed_seeds"] == [failed_seed]
-    assert payload["entries"][2]["terminal_status"] == "invalid_result"
-    assert payload["entries"][2]["validation_failure"]["scientific_result_published"] is False
-    assert payload["primary_ci_computed"] is False
+    with pytest.raises(ValueError, match="SHA-256 changed"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            terminal_output,
+            aggregate_output_json=aggregate_output,
+        )
+    assert not terminal_output.exists()
     assert not aggregate_output.exists()
 
 
@@ -2497,12 +3319,13 @@ def test_all_success_campaign_finalizer_is_the_only_path_that_computes_primary_c
     tmp_path: Path,
 ) -> None:
     config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
+    terminals = _success_terminals(config, result_paths)
     terminal_output = tmp_path / "campaign-terminal.json"
     aggregate_output = tmp_path / "primary-aggregate.json"
 
     payload = write_phase2_campaign_terminal(
         config,
-        result_paths,
+        terminals,
         terminal_output,
         aggregate_output_json=aggregate_output,
     )
@@ -2515,11 +3338,10 @@ def test_all_success_campaign_finalizer_is_the_only_path_that_computes_primary_c
     assert aggregate_output.exists()
 
 
-def test_invalid_success_result_becomes_authoritative_failure_without_ci(
+def test_invalid_success_result_aborts_finalization_without_guessing_seed_failure(
     tmp_path: Path,
 ) -> None:
     config, result_paths = _confirmatory_campaign(tmp_path / "campaign")
-    invalid_seed = int(config["run"]["seeds"][4])
 
     def fail_numeric_gate(value: dict[str, object]) -> None:
         convergence = value["head_training"]["audit"]["primary_heads"][BT_MLE][
@@ -2529,18 +3351,16 @@ def test_invalid_success_result_becomes_authoritative_failure_without_ci(
         convergence["final_gate"]["gradient_ratio_to_zero_initialization"] = 1.0
 
     _mutate(result_paths[4], fail_numeric_gate)
+    terminals = _success_terminals(config, result_paths)
     terminal_output = tmp_path / "invalid-terminal.json"
     aggregate_output = tmp_path / "invalid-aggregate.json"
-    payload = write_phase2_campaign_terminal(
-        config,
-        result_paths,
-        terminal_output,
-        aggregate_output_json=aggregate_output,
-    )
+    with pytest.raises(ValueError, match="failed the sustained outer-convergence gate"):
+        write_phase2_campaign_terminal(
+            config,
+            terminals,
+            terminal_output,
+            aggregate_output_json=aggregate_output,
+        )
 
-    assert payload["status"] == "not_passed_due_to_seed_failure"
-    assert payload["failed_seeds"] == [invalid_seed]
-    assert payload["aggregate_validation_failure"]["error_type"] == "ValueError"
-    assert payload["aggregate_validation_failure"]["scientific_result_published"] is False
-    assert payload["primary_ci_computed"] is False
+    assert not terminal_output.exists()
     assert not aggregate_output.exists()

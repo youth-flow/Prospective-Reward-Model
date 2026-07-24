@@ -802,6 +802,94 @@ def test_phase2_failure_manifest_cli_delegates_to_immutable_writer(
     }
 
 
+def test_phase2_success_manifest_cli_binds_result_and_attempt_spec(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    overlay_config = {"design": {"stage": "confirmatory"}}
+    bundle = SimpleNamespace(config=overlay_config)
+    spec = tmp_path / "success-spec.json"
+    result = tmp_path / "result.json"
+    output = tmp_path / "SUCCESS.json"
+    attempt_ledger = {"attempts": [{"attempt_index": 1}]}
+    observed: dict[str, object] = {}
+    monkeypatch.setitem(
+        sys.modules,
+        "smart_reward.phase2_config",
+        _fake_module(
+            "smart_reward.phase2_config",
+            load_phase2_config_bundle=lambda value: (
+                observed.__setitem__("overlay", value) or bundle
+            ),
+        ),
+    )
+
+    def load_spec(value: str) -> dict[str, object]:
+        observed["spec"] = value
+        return {"attempt_ledger": attempt_ledger}
+
+    def write_manifest(
+        config: object,
+        result_json: str,
+        ledger: object,
+        destination: str,
+    ) -> dict[str, object]:
+        observed["write"] = (config, result_json, ledger, destination)
+        Path(destination).write_text("{}\n", encoding="utf-8")
+        return {
+            "phase2_design_sha256": "d" * 64,
+            "seed": 20260901,
+            "result": {"sha256": "e" * 64},
+            "rollout": {"sha256": "f" * 64},
+            "attempt_ledger": attempt_ledger,
+        }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "smart_reward.phase2_campaign",
+        _fake_module(
+            "smart_reward.phase2_campaign",
+            load_phase2_seed_success_spec=load_spec,
+            write_phase2_seed_success_manifest=write_manifest,
+        ),
+    )
+
+    assert (
+        cli_module.main(
+            [
+                "phase2-success-manifest",
+                "overlay.yaml",
+                str(result),
+                str(spec),
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert observed == {
+        "overlay": "overlay.yaml",
+        "spec": str(spec),
+        "write": (
+            overlay_config,
+            str(result),
+            attempt_ledger,
+            str(output),
+        ),
+    }
+    assert json.loads(capsys.readouterr().out) == {
+        "attempt_count": 1,
+        "output": "SUCCESS.json",
+        "output_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        "phase2_design_sha256": "d" * 64,
+        "result_sha256": "e" * 64,
+        "rollout_sha256": "f" * 64,
+        "seed": 20260901,
+        "status": "successful_seed_terminal_recorded",
+        "supports_formal_claim": False,
+    }
+
+
 def test_phase2_campaign_finalize_cli_preserves_no_ci_failure_status(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
