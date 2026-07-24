@@ -566,6 +566,10 @@ The Phase 2 control-plane commands have the following positional contracts;
 phase2-config-check OVERLAY
 phase2-run OVERLAY ARTIFACT MANIFEST OUTPUT --seed SEED
 phase2-pilot-aggregate OVERLAY OUTPUT RESULT...
+  --aggregator-git-commit COMMIT --producer-git-commit COMMIT
+  --aggregation-image-sha256 SHA256
+  --aggregation-hf-inventory-sha256 SHA256
+  --validator-source-sha256 SHA256
 phase2-aggregate OVERLAY OUTPUT RESULT...
 phase2-sensitivity-run OVERLAY ARTIFACT MANIFEST PRIMARY_RESULT OUTPUT --seed SEED
 phase2-sensitivity-aggregate OVERLAY PRIMARY_AGGREGATE OUTPUT RESULT...
@@ -835,6 +839,15 @@ bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
   REPLACE_WITH_20260802_SUCCESS_DIR \
   REPLACE_WITH_20260803_SUCCESS_DIR
 ```
+
+The wrapper defaults the producer commit to the current aggregation commit.
+When a validator-only follow-up commit consumes already immutable seed outputs,
+pass `--producer-commit <exact-full-seed-producer-commit>`. The wrapper permits
+this only when that commit is an ancestor and the overlay, base config, and
+identity bytes are identical in both commits. The aggregate v2 record preserves
+the producer and aggregator identities separately and verifies each source
+result, diagnostic sidecar, run manifest, output-verification receipt, artifact
+metadata, and `SUCCESS` receipt before publication.
 
 For freeze and retry identities, both the GPU pilot submission and CPU
 aggregate submission bind the same required parent evidence. The first freeze

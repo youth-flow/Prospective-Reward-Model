@@ -28,15 +28,23 @@ for name in \
   PRORM_REPO_ROOT PRORM_PHASE2_OVERLAY_REL PRORM_PHASE2_BASE_REL \
   PRORM_PHASE2_OVERLAY_FILE_SHA256 PRORM_PHASE2_BASE_FILE_SHA256 \
   PRORM_IDENTITIES_FILE_SHA256 PRORM_PHASE2_DESIGN_SHA256 \
-  PRORM_PHASE2_BASE_CONFIG_HASH PRORM_GIT_COMMIT \
+  PRORM_PHASE2_BASE_CONFIG_HASH PRORM_PHASE2_AGGREGATOR_GIT_COMMIT \
+  PRORM_PHASE2_PRODUCER_GIT_COMMIT \
+  PRORM_PHASE2_AGGREGATE_VALIDATOR_SOURCE_SHA256 \
   PRORM_PHASE2_AGGREGATE_OUTPUT PRORM_PHASE2_BETA_SOURCE_AGGREGATE_PRESENT \
   PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_PRESENT \
   PRORM_PHASE2_RUN_DIR_0 PRORM_PHASE2_RESULT_SHA256_0 \
   PRORM_PHASE2_SIDECAR_SHA256_0 PRORM_PHASE2_SUCCESS_SHA256_0 \
+  PRORM_PHASE2_MANIFEST_SHA256_0 PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_0 \
+  PRORM_PHASE2_ARTIFACT_METADATA_SHA256_0 \
   PRORM_PHASE2_RUN_DIR_1 PRORM_PHASE2_RESULT_SHA256_1 \
   PRORM_PHASE2_SIDECAR_SHA256_1 PRORM_PHASE2_SUCCESS_SHA256_1 \
+  PRORM_PHASE2_MANIFEST_SHA256_1 PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_1 \
+  PRORM_PHASE2_ARTIFACT_METADATA_SHA256_1 \
   PRORM_PHASE2_RUN_DIR_2 PRORM_PHASE2_RESULT_SHA256_2 \
-  PRORM_PHASE2_SIDECAR_SHA256_2 PRORM_PHASE2_SUCCESS_SHA256_2; do
+  PRORM_PHASE2_SIDECAR_SHA256_2 PRORM_PHASE2_SUCCESS_SHA256_2 \
+  PRORM_PHASE2_MANIFEST_SHA256_2 PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_2 \
+  PRORM_PHASE2_ARTIFACT_METADATA_SHA256_2; do
   [[ -n "${!name:-}" ]] || die "${name} is required"
 done
 
@@ -83,6 +91,31 @@ require_file() {
   resolved="$(realpath -e -- "${raw}")" || die "${name} cannot be resolved"
   [[ -f "${resolved}" && ! -L "${raw}" && "${resolved}" = "${raw}" ]] \
     || die "${name} must be a canonical regular non-symlink file"
+}
+
+fsync_file_and_parent() {
+  local path="$1"
+  python3 -I -S - "${path}" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+path = Path(sys.argv[1])
+descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit("refusing to fsync a non-regular aggregate file")
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(parent)
+finally:
+    os.close(parent)
+PY
 }
 
 contained() {
@@ -133,13 +166,21 @@ for name in \
   PRORM_IDENTITIES_FILE_SHA256 PRORM_PHASE2_DESIGN_SHA256 \
   PRORM_PHASE2_BASE_CONFIG_HASH \
   PRORM_PHASE2_RESULT_SHA256_0 PRORM_PHASE2_SIDECAR_SHA256_0 \
-  PRORM_PHASE2_SUCCESS_SHA256_0 PRORM_PHASE2_RESULT_SHA256_1 \
+  PRORM_PHASE2_SUCCESS_SHA256_0 PRORM_PHASE2_MANIFEST_SHA256_0 \
+  PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_0 \
+  PRORM_PHASE2_ARTIFACT_METADATA_SHA256_0 PRORM_PHASE2_RESULT_SHA256_1 \
   PRORM_PHASE2_SIDECAR_SHA256_1 PRORM_PHASE2_SUCCESS_SHA256_1 \
-  PRORM_PHASE2_RESULT_SHA256_2 PRORM_PHASE2_SIDECAR_SHA256_2 \
-  PRORM_PHASE2_SUCCESS_SHA256_2; do
+  PRORM_PHASE2_MANIFEST_SHA256_1 PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_1 \
+  PRORM_PHASE2_ARTIFACT_METADATA_SHA256_1 PRORM_PHASE2_RESULT_SHA256_2 \
+  PRORM_PHASE2_SIDECAR_SHA256_2 PRORM_PHASE2_SUCCESS_SHA256_2 \
+  PRORM_PHASE2_MANIFEST_SHA256_2 PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_2 \
+  PRORM_PHASE2_ARTIFACT_METADATA_SHA256_2 \
+  PRORM_PHASE2_AGGREGATE_VALIDATOR_SOURCE_SHA256; do
   [[ "${!name}" =~ ^[0-9a-f]{64}$ ]] || die "${name} must be lowercase SHA256"
 done
-[[ "${PRORM_GIT_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]] || die "invalid Git commit"
+for name in PRORM_PHASE2_AGGREGATOR_GIT_COMMIT PRORM_PHASE2_PRODUCER_GIT_COMMIT; do
+  [[ "${!name}" =~ ^[0-9a-f]{40,64}$ ]] || die "${name} is an invalid Git commit"
+done
 [[ "${PRORM_HF_INVENTORY}" = \
   "${PRORM_HF_CACHE}/inventories/${PRORM_PHASE2_BASE_CONFIG_HASH}.json" ]] \
   || die "HF inventory is not addressed by the base identity"
@@ -180,7 +221,8 @@ validate_optional_aggregate \
   "horizon-parent aggregate"
 
 repo_head="$(git -C "${PRORM_REPO_ROOT}" rev-parse --verify HEAD)"
-[[ "${repo_head}" = "${PRORM_GIT_COMMIT}" ]] || die "repository HEAD changed after submission"
+[[ "${repo_head}" = "${PRORM_PHASE2_AGGREGATOR_GIT_COMMIT}" ]] \
+  || die "aggregation repository HEAD changed after submission"
 [[ -z "$(git -C "${PRORM_REPO_ROOT}" status --porcelain --untracked-files=normal)" ]] \
   || die "pilot aggregate repository is no longer clean"
 
@@ -192,6 +234,9 @@ for index in 0 1 2; do
   result_digest_name="PRORM_PHASE2_RESULT_SHA256_${index}"
   sidecar_digest_name="PRORM_PHASE2_SIDECAR_SHA256_${index}"
   success_digest_name="PRORM_PHASE2_SUCCESS_SHA256_${index}"
+  manifest_digest_name="PRORM_PHASE2_MANIFEST_SHA256_${index}"
+  output_verification_digest_name="PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_${index}"
+  artifact_metadata_digest_name="PRORM_PHASE2_ARTIFACT_METADATA_SHA256_${index}"
   run_dir="${!run_name}"
   require_directory "${run_name}"
   contained "${run_name}" "${run_dir}" "${PRORM_PROJECT_ROOT}"
@@ -203,7 +248,15 @@ for index in 0 1 2; do
   result="${run_dir}/phase2-pilot-diagnostics.json"
   sidecar="${run_dir}/phase2-pilot-diagnostics.diagnostics.jsonl"
   marker="${run_dir}/SUCCESS"
-  for path in "${result}" "${sidecar}" "${marker}"; do
+  manifest="${run_dir}/run-manifest.json"
+  output_verification="${run_dir}/phase2-output-verification.json"
+  artifact_link="${run_dir}/artifact"
+  [[ -L "${artifact_link}" && -d "${artifact_link}" ]] \
+    || die "pilot SUCCESS input lacks its bound artifact symlink"
+  artifact_metadata="${artifact_link}/metadata.json"
+  for path in \
+    "${result}" "${sidecar}" "${marker}" "${manifest}" \
+    "${output_verification}" "${artifact_metadata}"; do
     [[ -f "${path}" && ! -L "${path}" ]] || die "pilot SUCCESS input is incomplete"
   done
   printf '%s  %s\n' "${!result_digest_name}" "${result}" \
@@ -212,12 +265,18 @@ for index in 0 1 2; do
     | sha256sum --check --status || die "pilot sidecar SHA256 mismatch"
   printf '%s  %s\n' "${!success_digest_name}" "${marker}" \
     | sha256sum --check --status || die "pilot SUCCESS marker SHA256 mismatch"
+  printf '%s  %s\n' "${!manifest_digest_name}" "${manifest}" \
+    | sha256sum --check --status || die "pilot run manifest SHA256 mismatch"
+  printf '%s  %s\n' "${!output_verification_digest_name}" "${output_verification}" \
+    | sha256sum --check --status || die "pilot output verification SHA256 mismatch"
+  printf '%s  %s\n' "${!artifact_metadata_digest_name}" "${artifact_metadata}" \
+    | sha256sum --check --status || die "pilot artifact metadata SHA256 mismatch"
   grep -Fx 'status=SUCCESS' "${marker}" >/dev/null || die "pilot marker is not SUCCESS"
   grep -Fx "phase2_design_sha256=${PRORM_PHASE2_DESIGN_SHA256}" "${marker}" >/dev/null \
     || die "pilot SUCCESS design identity mismatch"
   grep -Fx "base_config_hash=${PRORM_PHASE2_BASE_CONFIG_HASH}" "${marker}" >/dev/null \
     || die "pilot SUCCESS base identity mismatch"
-  grep -Fx "git_commit=${PRORM_GIT_COMMIT}" "${marker}" >/dev/null \
+  grep -Fx "git_commit=${PRORM_PHASE2_PRODUCER_GIT_COMMIT}" "${marker}" >/dev/null \
     || die "pilot SUCCESS Git identity mismatch"
   run_dirs+=("${run_dir}")
   results+=("${result}")
@@ -225,6 +284,9 @@ for index in 0 1 2; do
     "${result}:${!result_digest_name}"
     "${sidecar}:${!sidecar_digest_name}"
     "${marker}:${!success_digest_name}"
+    "${manifest}:${!manifest_digest_name}"
+    "${output_verification}:${!output_verification_digest_name}"
+    "${artifact_metadata}:${!artifact_metadata_digest_name}"
   )
 done
 [[ "${run_dirs[0]}" != "${run_dirs[1]}" \
@@ -254,7 +316,8 @@ mkdir "${job_dir}"
 execution_repo="${job_dir}/source"
 git clone --quiet --no-hardlinks --no-checkout \
   "${PRORM_REPO_ROOT}" "${execution_repo}"
-git -C "${execution_repo}" checkout --quiet --detach "${PRORM_GIT_COMMIT}"
+git -C "${execution_repo}" checkout --quiet --detach \
+  "${PRORM_PHASE2_AGGREGATOR_GIT_COMMIT}"
 execution_overlay="${execution_repo}/${PRORM_PHASE2_OVERLAY_REL}"
 execution_base="${execution_repo}/${PRORM_PHASE2_BASE_REL}"
 execution_identities="${execution_repo}/configs/identities.json"
@@ -268,9 +331,18 @@ for binding in \
   printf '%s  %s\n' "${expected}" "${path}" \
     | sha256sum --check --status || die "detached identity input differs from submission"
 done
+execution_validator="${execution_repo}/src/smart_reward/phase2_pilot_aggregate.py"
+[[ -f "${execution_validator}" && ! -L "${execution_validator}" ]] \
+  || die "detached pilot aggregate validator source is missing"
+printf '%s  %s\n' \
+  "${PRORM_PHASE2_AGGREGATE_VALIDATOR_SOURCE_SHA256}" \
+  "${execution_validator}" \
+  | sha256sum --check --status \
+  || die "detached pilot aggregate validator source differs from submission"
 
 assert_execution_checkout() {
-  [[ "$(git -C "${execution_repo}" rev-parse --verify HEAD)" = "${PRORM_GIT_COMMIT}" \
+  [[ "$(git -C "${execution_repo}" rev-parse --verify HEAD)" = \
+      "${PRORM_PHASE2_AGGREGATOR_GIT_COMMIT}" \
     && -z "$(git -C "${execution_repo}" status --porcelain --untracked-files=normal)" ]] \
     || die "detached pilot aggregate checkout changed"
 }
@@ -335,12 +407,19 @@ fi
 assert_execution_checkout
 "${container[@]}" python -m smart_reward.cli phase2-pilot-aggregate \
   "${execution_overlay}" "${staged_output}" "${results[@]}" \
+  --aggregator-git-commit "${PRORM_PHASE2_AGGREGATOR_GIT_COMMIT}" \
+  --producer-git-commit "${PRORM_PHASE2_PRODUCER_GIT_COMMIT}" \
+  --aggregation-image-sha256 "${PRORM_IMAGE_SHA256}" \
+  --aggregation-hf-inventory-sha256 "${PRORM_HF_INVENTORY_SHA256}" \
+  --validator-source-sha256 "${PRORM_PHASE2_AGGREGATE_VALIDATOR_SOURCE_SHA256}" \
   "${aggregate_flags[@]}" | tee "${job_dir}/phase2-pilot-aggregate.log"
 
 python3 -I -S - \
   "${staged_output}" "${PRORM_PHASE2_DESIGN_SHA256}" \
-  "${PRORM_PHASE2_BASE_CONFIG_HASH}" "${PRORM_GIT_COMMIT}" \
-  "${PRORM_IMAGE_SHA256}" "${PRORM_HF_INVENTORY_SHA256}" <<'PY'
+  "${PRORM_PHASE2_BASE_CONFIG_HASH}" "${PRORM_PHASE2_PRODUCER_GIT_COMMIT}" \
+  "${PRORM_PHASE2_AGGREGATOR_GIT_COMMIT}" "${PRORM_IMAGE_SHA256}" \
+  "${PRORM_HF_INVENTORY_SHA256}" \
+  "${PRORM_PHASE2_AGGREGATE_VALIDATOR_SOURCE_SHA256}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -348,17 +427,26 @@ from pathlib import Path
 
 value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 environment = value.get("environment_identity")
+aggregation = value.get("aggregation_identity")
 boundary = value.get("information_boundary")
 if (
-    value.get("schema_version") != "common-beta-pilot-selection-aggregate/v1"
+    value.get("schema_version") != "common-beta-pilot-selection-aggregate/v2"
     or value.get("phase2_design_sha256") != sys.argv[2]
     or value.get("source_config_hash") != sys.argv[3]
     or not isinstance(value.get("sources"), list)
     or len(value["sources"]) != 3
     or not isinstance(environment, dict)
     or environment.get("git_commit") != sys.argv[4]
-    or environment.get("image_sha256") != sys.argv[5]
-    or environment.get("hf_inventory_sha256") != sys.argv[6]
+    or environment.get("image_sha256") != sys.argv[6]
+    or environment.get("hf_inventory_sha256") != sys.argv[7]
+    or not isinstance(aggregation, dict)
+    or aggregation.get("schema_version")
+    != "phase2-pilot-aggregation-identity/v1"
+    or aggregation.get("aggregator_git_commit") != sys.argv[5]
+    or aggregation.get("producer_git_commit") != sys.argv[4]
+    or aggregation.get("image_sha256") != sys.argv[6]
+    or aggregation.get("hf_inventory_sha256") != sys.argv[7]
+    or aggregation.get("validator_source_sha256") != sys.argv[8]
     or not isinstance(boundary, dict)
     or boundary.get("oracle_outcomes_consumed") is not False
     or boundary.get("formal_efficacy_evidence_produced") is not False
@@ -389,7 +477,8 @@ printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" \
 printf '%s  %s\n' "${PRORM_HF_INVENTORY_SHA256}" "${PRORM_HF_INVENTORY}" \
   | sha256sum --check --status || die "inventory changed during pilot aggregation"
 assert_execution_checkout
-[[ "$(git -C "${PRORM_REPO_ROOT}" rev-parse --verify HEAD)" = "${PRORM_GIT_COMMIT}" \
+[[ "$(git -C "${PRORM_REPO_ROOT}" rev-parse --verify HEAD)" = \
+    "${PRORM_PHASE2_AGGREGATOR_GIT_COMMIT}" \
   && -z "$(git -C "${PRORM_REPO_ROOT}" status --porcelain --untracked-files=normal)" ]] \
   || die "control-plane checkout changed during pilot aggregation"
 [[ ! -e "${output}" && ! -L "${output}" ]] \
@@ -399,6 +488,8 @@ assert_execution_checkout
 staged_output_sha256="$(sha256sum -- "${staged_output}" | awk '{print $1}')"
 [[ "${staged_output_sha256}" =~ ^[0-9a-f]{64}$ ]] \
   || die "failed to hash staged pilot aggregate"
+fsync_file_and_parent "${staged_output}" \
+  || die "failed to durably sync the staged pilot aggregate"
 if ! mv -T --no-clobber -- "${staged_output}" "${output}"; then
   die "atomic no-overwrite pilot aggregate publication failed"
 fi
@@ -409,5 +500,7 @@ fi
 printf '%s  %s\n' "${staged_output_sha256}" "${output}" \
   | sha256sum --check --status \
   || die "published pilot aggregate differs from the staged payload"
+fsync_file_and_parent "${output}" \
+  || die "failed to durably sync the published pilot aggregate"
 printf 'Phase-2 pilot aggregate published: %s sha256=%s\n' \
   "${output}" "${staged_output_sha256}"

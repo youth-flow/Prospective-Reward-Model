@@ -723,8 +723,13 @@ container=(
   apptainer exec --cleanenv --nv
   --no-mount home,cwd,bind-paths
   --pwd "${execution_repo}"
+  # The v2 accepted-freeze artifact is a Merkle-like manifest whose relative
+  # references cover predecessor aggregates, pilot seed results, sidecars,
+  # manifests, receipts, and content-addressed artifact metadata.  Mount the
+  # complete project evidence namespace read-only so the formal preflight can
+  # recursively revalidate those bytes before any Phase-2 model work.
+  --bind "${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}:ro"
   --bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}"
-  --bind "${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE}:${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE}"
   --env "PYTHONPATH=${execution_repo}/src"
   --env "PYTHONNOUSERSITE=1"
   --env "PYTHONDONTWRITEBYTECODE=1"

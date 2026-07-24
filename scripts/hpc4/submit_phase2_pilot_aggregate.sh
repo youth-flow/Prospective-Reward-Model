@@ -7,7 +7,7 @@ die() {
 }
 
 if [[ $# -lt 8 ]]; then
-  die "usage: $0 <overlay.yaml> <base.yaml> <output.json> <cpu-partition> <walltime> <run-dir-1> <run-dir-2> <run-dir-3> [--beta-source-aggregate <json>] [--horizon-parent-aggregate <json>]"
+  die "usage: $0 <overlay.yaml> <base.yaml> <output.json> <cpu-partition> <walltime> <run-dir-1> <run-dir-2> <run-dir-3> [--producer-commit <full-commit>] [--beta-source-aggregate <json>] [--horizon-parent-aggregate <json>]"
 fi
 
 overlay_input="$1"
@@ -19,8 +19,15 @@ run_inputs=("$6" "$7" "$8")
 shift 8
 beta_source_input=""
 horizon_parent_input=""
+producer_commit_input=""
 while (( $# )); do
   case "$1" in
+    --producer-commit)
+      [[ $# -ge 2 && -z "${producer_commit_input}" ]] \
+        || die "--producer-commit requires exactly one full commit"
+      producer_commit_input="$2"
+      shift 2
+      ;;
     --beta-source-aggregate)
       [[ $# -ge 2 && -z "${beta_source_input}" ]] \
         || die "--beta-source-aggregate requires exactly one path"
@@ -65,10 +72,24 @@ for command_name in git python3 realpath sbatch sha256sum awk grep; do
 done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-git_commit="$(git -C "${repo_root}" rev-parse --verify HEAD)"
-[[ "${git_commit}" =~ ^[0-9a-f]{40,64}$ ]] || die "invalid Git HEAD"
+aggregator_git_commit="$(git -C "${repo_root}" rev-parse --verify HEAD)"
+[[ "${aggregator_git_commit}" =~ ^[0-9a-f]{40,64}$ ]] || die "invalid Git HEAD"
 [[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=normal)" ]] \
   || die "pilot aggregate submission requires a clean committed worktree"
+if [[ -n "${producer_commit_input}" ]]; then
+  [[ "${producer_commit_input}" =~ ^[0-9a-f]{40,64}$ ]] \
+    || die "--producer-commit must be a full lowercase Git object ID"
+  producer_git_commit="$(
+    git -C "${repo_root}" rev-parse --verify "${producer_commit_input}^{commit}"
+  )" || die "producer commit cannot be resolved"
+  [[ "${producer_git_commit}" = "${producer_commit_input}" ]] \
+    || die "--producer-commit must be the exact full commit ID"
+else
+  producer_git_commit="${aggregator_git_commit}"
+fi
+git -C "${repo_root}" merge-base --is-ancestor \
+  "${producer_git_commit}" "${aggregator_git_commit}" \
+  || die "producer commit must be an ancestor of the aggregation commit"
 
 overlay="$(realpath -e -- "${overlay_input}")" || die "overlay cannot be resolved"
 base_config="$(realpath -e -- "${base_input}")" || die "base config cannot be resolved"
@@ -101,11 +122,28 @@ for binding in \
   expected="${binding#*:}"
   observed="$(
     git -C "${repo_root}" cat-file blob \
-      "${git_commit}:${relative}" | sha256sum | awk '{print $1}'
+      "${aggregator_git_commit}:${relative}" | sha256sum | awk '{print $1}'
   )"
   [[ "${observed}" = "${expected}" ]] \
     || die "worktree bytes differ from committed input: ${relative}"
+  producer_observed="$(
+    git -C "${repo_root}" cat-file blob \
+      "${producer_git_commit}:${relative}" | sha256sum | awk '{print $1}'
+  )"
+  [[ "${producer_observed}" = "${expected}" ]] \
+    || die "producer and aggregator commits do not bind identical input: ${relative}"
 done
+validator_relative="src/smart_reward/phase2_pilot_aggregate.py"
+validator_path="${repo_root}/${validator_relative}"
+[[ -f "${validator_path}" && ! -L "${validator_path}" ]] \
+  || die "pilot aggregate validator source is missing or unsafe"
+validator_source_sha="$(sha256sum -- "${validator_path}" | awk '{print $1}')"
+validator_committed_sha="$(
+  git -C "${repo_root}" cat-file blob \
+    "${aggregator_git_commit}:${validator_relative}" | sha256sum | awk '{print $1}'
+)"
+[[ "${validator_source_sha}" = "${validator_committed_sha}" ]] \
+  || die "pilot aggregate validator source differs from the aggregation commit"
 
 mapfile -t identities < <(
   python3 -I -S - \
@@ -213,6 +251,9 @@ run_dirs=()
 result_hashes=()
 sidecar_hashes=()
 marker_hashes=()
+manifest_hashes=()
+output_verification_hashes=()
+artifact_metadata_hashes=()
 for index in 0 1 2; do
   raw="${run_inputs[$index]}"
   if [[ "${raw}" != /* ]]; then raw="${project_root}/${raw}"; fi
@@ -223,9 +264,17 @@ for index in 0 1 2; do
     *) die "pilot run directory is outside the bound design identity" ;;
   esac
   marker="${run_dir}/SUCCESS"
-  result="${run_dir}/phase2-pilot-diagnostics.json"
   sidecar="${run_dir}/phase2-pilot-diagnostics.diagnostics.jsonl"
-  for path in "${marker}" "${result}" "${sidecar}"; do
+  result="${run_dir}/phase2-pilot-diagnostics.json"
+  manifest="${run_dir}/run-manifest.json"
+  output_verification="${run_dir}/phase2-output-verification.json"
+  artifact_link="${run_dir}/artifact"
+  [[ -L "${artifact_link}" && -d "${artifact_link}" ]] \
+    || die "pilot SUCCESS run lacks its bound artifact symlink"
+  artifact_metadata="${artifact_link}/metadata.json"
+  for path in \
+    "${marker}" "${result}" "${sidecar}" "${manifest}" \
+    "${output_verification}" "${artifact_metadata}"; do
     [[ -f "${path}" && ! -L "${path}" ]] || die "pilot SUCCESS run is incomplete"
   done
   grep -Fx 'status=SUCCESS' "${marker}" >/dev/null || die "run marker is not SUCCESS"
@@ -233,12 +282,19 @@ for index in 0 1 2; do
     || die "SUCCESS marker design identity mismatch"
   grep -Fx "base_config_hash=${base_hash}" "${marker}" >/dev/null \
     || die "SUCCESS marker base identity mismatch"
-  grep -Fx "git_commit=${git_commit}" "${marker}" >/dev/null \
+  grep -Fx "git_commit=${producer_git_commit}" "${marker}" >/dev/null \
     || die "SUCCESS marker Git identity mismatch"
   run_dirs+=("${run_dir}")
   marker_hashes+=("$(sha256sum -- "${marker}" | awk '{print $1}')")
   result_hashes+=("$(sha256sum -- "${result}" | awk '{print $1}')")
   sidecar_hashes+=("$(sha256sum -- "${sidecar}" | awk '{print $1}')")
+  manifest_hashes+=("$(sha256sum -- "${manifest}" | awk '{print $1}')")
+  output_verification_hashes+=(
+    "$(sha256sum -- "${output_verification}" | awk '{print $1}')"
+  )
+  artifact_metadata_hashes+=(
+    "$(sha256sum -- "${artifact_metadata}" | awk '{print $1}')"
+  )
 done
 [[ "${run_dirs[0]}" != "${run_dirs[1]}" \
   && "${run_dirs[0]}" != "${run_dirs[2]}" \
@@ -269,7 +325,7 @@ for value in \
   reject_delimiters "${value}"
 done
 
-[[ "$(git -C "${repo_root}" rev-parse --verify HEAD)" = "${git_commit}" \
+[[ "$(git -C "${repo_root}" rev-parse --verify HEAD)" = "${aggregator_git_commit}" \
   && -z "$(git -C "${repo_root}" status --porcelain --untracked-files=normal)" ]] \
   || die "submission checkout changed during validation"
 printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${image}" \
@@ -293,6 +349,21 @@ for index in 0 1 2; do
     "${run_dir}/SUCCESS" \
     | sha256sum --check --status \
     || die "pilot SUCCESS marker changed before submission"
+  printf '%s  %s\n' \
+    "${manifest_hashes[$index]}" \
+    "${run_dir}/run-manifest.json" \
+    | sha256sum --check --status \
+    || die "pilot run manifest changed before submission"
+  printf '%s  %s\n' \
+    "${output_verification_hashes[$index]}" \
+    "${run_dir}/phase2-output-verification.json" \
+    | sha256sum --check --status \
+    || die "pilot output verification changed before submission"
+  printf '%s  %s\n' \
+    "${artifact_metadata_hashes[$index]}" \
+    "${run_dir}/artifact/metadata.json" \
+    | sha256sum --check --status \
+    || die "pilot artifact metadata changed before submission"
 done
 if (( beta_present )); then
   printf '%s  %s\n' "${beta_sha}" "${beta_source}" \
@@ -315,9 +386,9 @@ for binding in \
     || die "committed identity input changed before submission"
 done
 
-export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha},PRORM_REPO_ROOT=${repo_root},PRORM_PHASE2_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_PHASE2_OVERLAY_FILE_SHA256=${overlay_sha},PRORM_PHASE2_BASE_FILE_SHA256=${base_sha},PRORM_IDENTITIES_FILE_SHA256=${identity_sha},PRORM_PHASE2_DESIGN_SHA256=${design_sha},PRORM_PHASE2_BASE_CONFIG_HASH=${base_hash},PRORM_GIT_COMMIT=${git_commit},PRORM_PHASE2_AGGREGATE_OUTPUT=${output},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_PRESENT=${beta_present},PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_PRESENT=${horizon_present}"
+export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha},PRORM_REPO_ROOT=${repo_root},PRORM_PHASE2_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_PHASE2_OVERLAY_FILE_SHA256=${overlay_sha},PRORM_PHASE2_BASE_FILE_SHA256=${base_sha},PRORM_IDENTITIES_FILE_SHA256=${identity_sha},PRORM_PHASE2_DESIGN_SHA256=${design_sha},PRORM_PHASE2_BASE_CONFIG_HASH=${base_hash},PRORM_PHASE2_AGGREGATOR_GIT_COMMIT=${aggregator_git_commit},PRORM_PHASE2_PRODUCER_GIT_COMMIT=${producer_git_commit},PRORM_PHASE2_AGGREGATE_VALIDATOR_SOURCE_SHA256=${validator_source_sha},PRORM_PHASE2_AGGREGATE_OUTPUT=${output},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_PRESENT=${beta_present},PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_PRESENT=${horizon_present}"
 for index in 0 1 2; do
-  export_spec+=",PRORM_PHASE2_RUN_DIR_${index}=${run_dirs[$index]},PRORM_PHASE2_RESULT_SHA256_${index}=${result_hashes[$index]},PRORM_PHASE2_SIDECAR_SHA256_${index}=${sidecar_hashes[$index]},PRORM_PHASE2_SUCCESS_SHA256_${index}=${marker_hashes[$index]}"
+  export_spec+=",PRORM_PHASE2_RUN_DIR_${index}=${run_dirs[$index]},PRORM_PHASE2_RESULT_SHA256_${index}=${result_hashes[$index]},PRORM_PHASE2_SIDECAR_SHA256_${index}=${sidecar_hashes[$index]},PRORM_PHASE2_SUCCESS_SHA256_${index}=${marker_hashes[$index]},PRORM_PHASE2_MANIFEST_SHA256_${index}=${manifest_hashes[$index]},PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_${index}=${output_verification_hashes[$index]},PRORM_PHASE2_ARTIFACT_METADATA_SHA256_${index}=${artifact_metadata_hashes[$index]}"
 done
 if (( beta_present )); then
   export_spec+=",PRORM_PHASE2_BETA_SOURCE_AGGREGATE=${beta_source},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_SHA256=${beta_sha}"

@@ -264,12 +264,21 @@ def test_phase2_pilot_aggregate_submit_is_static_cpu_control_plane() -> None:
     assert "status=SUCCESS" in submit
     assert "phase2_design_sha256=${design_sha}" in submit
     assert "base_config_hash=${base_hash}" in submit
-    assert "git_commit=${git_commit}" in submit
+    assert "git_commit=${producer_git_commit}" in submit
+    assert "--producer-commit" in submit
+    assert "producer commit must be an ancestor of the aggregation commit" in submit
+    assert "producer and aggregator commits do not bind identical input" in submit
     assert "phase2-pilot-diagnostics.json" in submit
     assert "phase2-pilot-diagnostics.diagnostics.jsonl" in submit
+    assert "run-manifest.json" in submit
+    assert "phase2-output-verification.json" in submit
+    assert "artifact/metadata.json" in submit
     assert "pilot result changed before submission" in submit
     assert "pilot sidecar changed before submission" in submit
     assert "pilot SUCCESS marker changed before submission" in submit
+    assert "pilot run manifest changed before submission" in submit
+    assert "pilot output verification changed before submission" in submit
+    assert "pilot artifact metadata changed before submission" in submit
     assert "--beta-source-aggregate" in submit
     assert "--horizon-parent-aggregate" in submit
     assert "beta-source aggregate changed before submission" in submit
@@ -278,12 +287,17 @@ def test_phase2_pilot_aggregate_submit_is_static_cpu_control_plane() -> None:
     assert "PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_SHA256=" in submit
     assert "PRORM_PHASE2_DESIGN_SHA256=" in submit
     assert "PRORM_PHASE2_BASE_CONFIG_HASH=" in submit
-    assert "PRORM_GIT_COMMIT=" in submit
+    assert "PRORM_PHASE2_AGGREGATOR_GIT_COMMIT=" in submit
+    assert "PRORM_PHASE2_PRODUCER_GIT_COMMIT=" in submit
+    assert "PRORM_PHASE2_AGGREGATE_VALIDATOR_SOURCE_SHA256=" in submit
     assert "PRORM_IMAGE_SHA256=" in submit
     assert "PRORM_HF_INVENTORY_SHA256=" in submit
     assert "PRORM_PHASE2_RESULT_SHA256_${index}=" in submit
     assert "PRORM_PHASE2_SIDECAR_SHA256_${index}=" in submit
     assert "PRORM_PHASE2_SUCCESS_SHA256_${index}=" in submit
+    assert "PRORM_PHASE2_MANIFEST_SHA256_${index}=" in submit
+    assert "PRORM_PHASE2_OUTPUT_VERIFICATION_SHA256_${index}=" in submit
+    assert "PRORM_PHASE2_ARTIFACT_METADATA_SHA256_${index}=" in submit
     assert "--account=sigroup" in submit
     assert '--partition="${partition}"' in submit
     assert "--gpus-per-node" not in submit
@@ -308,12 +322,18 @@ def test_phase2_pilot_aggregate_job_is_exact_three_detached_and_atomic() -> None
     assert "status=SUCCESS" in job
     assert "phase2_design_sha256=${PRORM_PHASE2_DESIGN_SHA256}" in job
     assert "base_config_hash=${PRORM_PHASE2_BASE_CONFIG_HASH}" in job
-    assert "git_commit=${PRORM_GIT_COMMIT}" in job
+    assert "git_commit=${PRORM_PHASE2_PRODUCER_GIT_COMMIT}" in job
     assert "pilot result SHA256 mismatch" in job
     assert "pilot sidecar SHA256 mismatch" in job
     assert "pilot SUCCESS marker SHA256 mismatch" in job
+    assert "pilot run manifest SHA256 mismatch" in job
+    assert "pilot output verification SHA256 mismatch" in job
+    assert "pilot artifact metadata SHA256 mismatch" in job
     assert "git clone --quiet --no-hardlinks --no-checkout" in job
-    assert 'checkout --quiet --detach "${PRORM_GIT_COMMIT}"' in job
+    assert '"${PRORM_PHASE2_AGGREGATOR_GIT_COMMIT}"' in job
+    assert "--producer-git-commit" in job
+    assert "--aggregator-git-commit" in job
+    assert "--validator-source-sha256" in job
     assert "apptainer exec --cleanenv" in job
     assert "--no-mount home,cwd,bind-paths" in job
     assert "phase2-config-check" in job
@@ -323,7 +343,8 @@ def test_phase2_pilot_aggregate_job_is_exact_three_detached_and_atomic() -> None
     assert '"${aggregate_flags[@]}"' in job
     assert "--beta-source-aggregate" in job
     assert "--horizon-parent-aggregate" in job
-    assert "common-beta-pilot-selection-aggregate/v1" in job
+    assert "common-beta-pilot-selection-aggregate/v2" in job
+    assert "phase2-pilot-aggregation-identity/v1" in job
     assert "oracle_outcomes_consumed" in job
     assert "formal_efficacy_evidence_produced" in job
     assert "pilot aggregate input changed during execution" in job
@@ -333,6 +354,11 @@ def test_phase2_pilot_aggregate_job_is_exact_three_detached_and_atomic() -> None
     assert "control-plane checkout changed during pilot aggregation" in job
     assert "staged_output_sha256=" in job
     assert 'mv -T --no-clobber -- "${staged_output}" "${output}"' in job
+    staged_sync = job.index('fsync_file_and_parent "${staged_output}"')
+    atomic_publish = job.index('mv -T --no-clobber -- "${staged_output}" "${output}"')
+    canonical_sync = job.index('fsync_file_and_parent "${output}"')
+    publication_log = job.index("Phase-2 pilot aggregate published:")
+    assert staged_sync < atomic_publish < canonical_sync < publication_log
     assert '[[ ! -e "${staged_output}" && ! -L "${staged_output}" ]]' in job
     assert '[[ -f "${output}" && ! -L "${output}" ]]' in job
     assert 'printf \'%s  %s\\n\' "${staged_output_sha256}" "${output}"' in job

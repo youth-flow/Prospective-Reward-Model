@@ -39,7 +39,11 @@ from .phase2_rollout import (
 )
 from .repro import atomic_write_json
 
-PHASE2_PILOT_AGGREGATE_SCHEMA = "common-beta-pilot-selection-aggregate/v1"
+PHASE2_PILOT_AGGREGATE_SCHEMA = "common-beta-pilot-selection-aggregate/v2"
+PHASE2_PILOT_AGGREGATION_IDENTITY_SCHEMA = "phase2-pilot-aggregation-identity/v1"
+_CALIBRATION_FORMAL_SELECTION_RULE = (
+    "maximum_pilot_seed_candidate_then_smallest_passing_frozen_kl_only_grid"
+)
 
 _HEX = frozenset("0123456789abcdef")
 _PILOT_RESULT_COMMON_KEYS = frozenset(
@@ -130,6 +134,137 @@ _SAFETY_THRESHOLDS = {
     "reached_max_length_rate_cap": 0.05,
 }
 _SAFETY_METRICS = tuple(key.removesuffix("_cap") for key in _SAFETY_THRESHOLDS)
+_AGGREGATION_IDENTITY_KEYS = frozenset(
+    {
+        "schema_version",
+        "aggregator_git_commit",
+        "producer_git_commit",
+        "image_sha256",
+        "hf_inventory_sha256",
+        "validator_source_sha256",
+    }
+)
+_PILOT_AGGREGATE_KEYS = frozenset(
+    {
+        "schema_version",
+        "pilot_phase",
+        "formal_eligibility",
+        "supports_formal_claim",
+        "evidence_role",
+        "source_config_hash",
+        "phase2_design_sha256",
+        "phase2_runtime_contract",
+        "phase2_runtime_contract_sha256",
+        "beta_source_aggregate_sha256",
+        "seeds",
+        "environment_identity",
+        "aggregation_identity",
+        "rollout_geometry",
+        "thresholds",
+        "horizon",
+        "predecessors",
+        "per_seed",
+        "selection",
+        "information_boundary",
+        "sources",
+    }
+)
+_AGGREGATE_SOURCE_KEYS = frozenset(
+    {
+        "seed",
+        "result",
+        "result_sha256",
+        "diagnostics_jsonl",
+        "diagnostics_sha256",
+        "artifact_metadata",
+        "artifact_metadata_sha256",
+        "run_manifest",
+        "run_manifest_sha256",
+        "output_verification",
+        "output_verification_sha256",
+        "success_receipt",
+        "success_receipt_sha256",
+    }
+)
+_AGGREGATE_PREDECESSOR_KEYS = frozenset({"beta_source_aggregate", "horizon_parent_aggregate"})
+_AGGREGATE_PREDECESSOR_REFERENCE_KEYS = frozenset({"path", "sha256"})
+_AGGREGATE_HORIZON_KEYS = frozenset(
+    {
+        "schema_version",
+        "candidate_horizon_tokens",
+        "allowed_horizon_sequence",
+        "horizon_grid_index",
+        "parent_pilot_aggregate_sha256",
+        "previous_horizon_failed_length_gate",
+        "all_seed_length_gates_passed",
+        "parent_binding_verified",
+    }
+)
+_AGGREGATE_INFORMATION_BOUNDARY_KEYS = frozenset(
+    {
+        "heldout_evaluator_called",
+        "final_oracle_session_opened",
+        "oracle_outcomes_consumed",
+        "prompt_or_response_text_consumed",
+        "formal_efficacy_evidence_produced",
+    }
+)
+_PROMPT_MATERIALIZATION_SUMMARY_KEYS = frozenset(
+    {
+        "schema_version",
+        "policy_chat_template_sha256",
+        "encoding",
+        "add_generation_prompt",
+        "truncation",
+        "fail_closed_above_max_prompt_tokens",
+        "max_prompt_tokens",
+        "num_prompts",
+        "minimum_policy_chat_token_count",
+        "maximum_policy_chat_token_count",
+        "mean_policy_chat_token_count",
+        "over_limit_prompt_count",
+        "truncated_prompt_count",
+        "raw_prompt_preserved_count",
+        "records_sha256",
+        "candidate_prefixes_verified",
+    }
+)
+_PROMPT_ROLLOUT_SUMMARY_KEYS = frozenset(
+    {
+        "schema_version",
+        "num_prompts",
+        "max_prompt_tokens",
+        "minimum_policy_chat_token_count",
+        "maximum_policy_chat_token_count",
+        "mean_policy_chat_token_count",
+        "over_limit_prompt_count",
+        "truncated_prompt_count",
+        "raw_prompt_preserved_count",
+        "matches_materialization_token_prefix_evidence",
+        "same_evidence_across_policy_arms",
+    }
+)
+_PROMPT_ORACLE_SUMMARY_KEYS = frozenset(
+    {
+        "input_text",
+        "rerendered_with_independent_oracle_chat_template",
+        "policy_chat_tokens_reused_by_oracle",
+        "policy_and_oracle_chat_template_sha256_distinct",
+        "policy_chat_template_sha256",
+        "oracle_chat_template_sha256",
+    }
+)
+_PROMPT_SEMANTICS_RECORD_KEYS = frozenset(
+    {
+        "prompt_id",
+        "raw_prompt_sha256",
+        "policy_chat_token_count",
+        "policy_prompt_token_ids_sha256",
+        "max_prompt_tokens",
+        "truncated",
+        "raw_prompt_preserved",
+    }
+)
 
 
 def _mapping(value: object, *, name: str) -> Mapping[str, object]:
@@ -162,6 +297,59 @@ def _digest(value: object, *, name: str) -> str:
     ):
         raise ValueError(f"{name} must be a lowercase SHA256 digest")
     return value
+
+
+def _git_commit(value: object, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) not in {40, 64}
+        or any(character not in _HEX for character in value)
+    ):
+        raise ValueError(f"{name} must be a full lowercase Git object ID")
+    return value
+
+
+def _validator_source_sha256() -> str:
+    return _sha256_bytes(Path(__file__).read_bytes())
+
+
+def _validate_aggregation_identity(
+    value: object,
+    *,
+    producer_environment: Mapping[str, object],
+    name: str,
+    require_current_validator: bool,
+) -> dict[str, object]:
+    identity = _exact_keys(
+        value,
+        name=name,
+        expected=_AGGREGATION_IDENTITY_KEYS,
+    )
+    if identity["schema_version"] != PHASE2_PILOT_AGGREGATION_IDENTITY_SCHEMA:
+        raise ValueError(f"{name}.schema_version is invalid")
+    _git_commit(identity["aggregator_git_commit"], name=f"{name}.aggregator_git_commit")
+    producer_commit = _git_commit(
+        identity["producer_git_commit"],
+        name=f"{name}.producer_git_commit",
+    )
+    image_sha = _digest(identity["image_sha256"], name=f"{name}.image_sha256")
+    inventory_sha = _digest(
+        identity["hf_inventory_sha256"],
+        name=f"{name}.hf_inventory_sha256",
+    )
+    validator_sha = _digest(
+        identity["validator_source_sha256"],
+        name=f"{name}.validator_source_sha256",
+    )
+    if (
+        producer_commit != producer_environment.get("git_commit")
+        or image_sha != producer_environment.get("image_sha256")
+        or inventory_sha != producer_environment.get("hf_inventory_sha256")
+    ):
+        raise ValueError(f"{name} does not bind the shared seed producer identity")
+    if require_current_validator and validator_sha != _validator_source_sha256():
+        raise ValueError(f"{name} does not bind the loaded pilot aggregate validator source")
+    return dict(identity)
 
 
 def _integer(value: object, *, name: str, minimum: int = 0) -> int:
@@ -197,6 +385,228 @@ def _canonical_sha256(value: object) -> str:
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _validate_artifact_prompt_semantics(
+    value: object,
+    *,
+    name: str,
+) -> dict[str, object]:
+    semantics = _exact_keys(
+        value,
+        name=name,
+        expected={
+            "schema_version",
+            "encoding",
+            "add_generation_prompt",
+            "truncation",
+            "fail_closed_above_max_prompt_tokens",
+            "max_prompt_tokens",
+            "num_prompts",
+            "records_sha256",
+            "records",
+        },
+    )
+    max_prompt_tokens = _integer(
+        semantics["max_prompt_tokens"],
+        name=f"{name}.max_prompt_tokens",
+        minimum=1,
+    )
+    num_prompts = _integer(
+        semantics["num_prompts"],
+        name=f"{name}.num_prompts",
+        minimum=1,
+    )
+    records_sha256 = _digest(
+        semantics["records_sha256"],
+        name=f"{name}.records_sha256",
+    )
+    records = semantics["records"]
+    if (
+        not isinstance(records, list)
+        or len(records) != num_prompts
+        or semantics["schema_version"] != "full-policy-prompt-semantics/v1"
+        or semantics["encoding"] != "policy_tokenizer_apply_chat_template"
+        or semantics["add_generation_prompt"] is not True
+        or semantics["truncation"] is not False
+        or semantics["fail_closed_above_max_prompt_tokens"] is not True
+    ):
+        raise ValueError(f"{name} does not contain the exact full-prompt record stream")
+    if _canonical_sha256(records) != records_sha256:
+        raise ValueError(f"{name}.records_sha256 differs from the canonical record bytes")
+
+    token_counts: list[int] = []
+    prompt_ids: set[str] = set()
+    raw_preserved = 0
+    for index, raw_record in enumerate(records):
+        record = _exact_keys(
+            raw_record,
+            name=f"{name}.records[{index}]",
+            expected=_PROMPT_SEMANTICS_RECORD_KEYS,
+        )
+        prompt_id = record["prompt_id"]
+        if not isinstance(prompt_id, str) or not prompt_id or prompt_id in prompt_ids:
+            raise ValueError(f"{name}.records[{index}].prompt_id is invalid or duplicated")
+        prompt_ids.add(prompt_id)
+        _digest(
+            record["raw_prompt_sha256"],
+            name=f"{name}.records[{index}].raw_prompt_sha256",
+        )
+        _digest(
+            record["policy_prompt_token_ids_sha256"],
+            name=f"{name}.records[{index}].policy_prompt_token_ids_sha256",
+        )
+        token_count = _integer(
+            record["policy_chat_token_count"],
+            name=f"{name}.records[{index}].policy_chat_token_count",
+            minimum=1,
+        )
+        record_cap = _integer(
+            record["max_prompt_tokens"],
+            name=f"{name}.records[{index}].max_prompt_tokens",
+            minimum=1,
+        )
+        if (
+            token_count > max_prompt_tokens
+            or record_cap != max_prompt_tokens
+            or record["truncated"] is not False
+            or record["raw_prompt_preserved"] is not True
+        ):
+            raise ValueError(f"{name}.records[{index}] violates the full-prompt contract")
+        token_counts.append(token_count)
+        raw_preserved += 1
+    return {
+        "schema_version": semantics["schema_version"],
+        "encoding": semantics["encoding"],
+        "add_generation_prompt": semantics["add_generation_prompt"],
+        "truncation": semantics["truncation"],
+        "fail_closed_above_max_prompt_tokens": semantics["fail_closed_above_max_prompt_tokens"],
+        "max_prompt_tokens": max_prompt_tokens,
+        "num_prompts": num_prompts,
+        "minimum_policy_chat_token_count": min(token_counts),
+        "maximum_policy_chat_token_count": max(token_counts),
+        "mean_policy_chat_token_count": sum(token_counts) / len(token_counts),
+        "over_limit_prompt_count": 0,
+        "truncated_prompt_count": 0,
+        "raw_prompt_preserved_count": raw_preserved,
+        "records_sha256": records_sha256,
+    }
+
+
+def _runtime_sequence(value: object, *, name: str) -> tuple[object, ...]:
+    if not isinstance(value, list):
+        raise TypeError(f"{name} must be a JSON array")
+    return tuple(value)
+
+
+def _optional_runtime_sequence(
+    value: object,
+    *,
+    name: str,
+) -> tuple[object, ...] | None:
+    if value is None:
+        return None
+    return _runtime_sequence(value, name=name)
+
+
+def _phase2_design_from_runtime(
+    value: object,
+    *,
+    expected_phase: str,
+    expected_sha256: str,
+    name: str,
+) -> Phase2Design:
+    runtime = _mapping(value, name=name)
+    scope = _exact_keys(
+        runtime.get("sensitivity_scope"),
+        name=f"{name}.sensitivity_scope",
+        expected={
+            "pilot_k_cal_candidates",
+            "frozen_global_beta_multipliers",
+            "sensitivity_step_rule",
+            "ridge_multipliers_configured",
+            "executed_by_this_runner_invocation",
+            "result_role",
+        },
+    )
+    max_length = _exact_keys(
+        runtime.get("max_length_gate"),
+        name=f"{name}.max_length_gate",
+        expected={"formal_gate", "formal_threshold", "measure_only"},
+    )
+    try:
+        design = Phase2Design(
+            stage=runtime["stage"],  # type: ignore[arg-type]
+            formal_eligibility=runtime["formal_eligibility"],  # type: ignore[arg-type]
+            pilot_phase=runtime["pilot_phase"],  # type: ignore[arg-type]
+            common_beta_rule=runtime["common_beta_rule"],  # type: ignore[arg-type]
+            common_beta_calibration_split=runtime[  # type: ignore[arg-type]
+                "common_beta_calibration_split"
+            ],
+            common_beta_source=runtime["common_beta_source"],  # type: ignore[arg-type]
+            frozen_global_beta=runtime["frozen_global_beta"],  # type: ignore[arg-type]
+            beta_source_aggregate_sha256=runtime[  # type: ignore[arg-type]
+                "beta_source_aggregate_sha256"
+            ],
+            target_oracle_quadratic_kl=runtime[  # type: ignore[arg-type]
+                "target_oracle_quadratic_kl"
+            ],
+            measured_kl_safety_cap=runtime["measured_kl_safety_cap"],  # type: ignore[arg-type]
+            prompt_mean_p95_kl_cap=runtime["prompt_mean_p95_kl_cap"],  # type: ignore[arg-type]
+            prompt_mean_p99_kl_cap=runtime["prompt_mean_p99_kl_cap"],  # type: ignore[arg-type]
+            prompt_mean_maximum_kl_cap=runtime[  # type: ignore[arg-type]
+                "prompt_mean_maximum_kl_cap"
+            ],
+            per_sequence_maximum_kl_cap=runtime[  # type: ignore[arg-type]
+                "per_sequence_maximum_kl_cap"
+            ],
+            max_response_tokens=runtime["max_response_tokens"],  # type: ignore[arg-type]
+            allowed_horizon_sequence=_runtime_sequence(
+                runtime["allowed_horizon_sequence"],
+                name=f"{name}.allowed_horizon_sequence",
+            ),  # type: ignore[arg-type]
+            horizon_grid_index=runtime["horizon_grid_index"],  # type: ignore[arg-type]
+            parent_pilot_aggregate_sha256=runtime[  # type: ignore[arg-type]
+                "parent_pilot_aggregate_sha256"
+            ],
+            previous_horizon_failed_length_gate=runtime[  # type: ignore[arg-type]
+                "previous_horizon_failed_length_gate"
+            ],
+            rollout_candidates_per_prompt=runtime[  # type: ignore[arg-type]
+                "rollout_candidates_per_prompt"
+            ],
+            relative_damping=runtime["relative_damping"],  # type: ignore[arg-type]
+            pcg_dtype=runtime["pcg_dtype"],  # type: ignore[arg-type]
+            pcg_max_iterations=runtime["pcg_max_iterations"],  # type: ignore[arg-type]
+            pcg_tolerance=runtime["pcg_tolerance"],  # type: ignore[arg-type]
+            oracle_batch_size=runtime["oracle_batch_size"],  # type: ignore[arg-type]
+            kl_token_chunk_size=runtime["kl_token_chunk_size"],  # type: ignore[arg-type]
+            k_cal_sensitivity_values=_optional_runtime_sequence(
+                scope["pilot_k_cal_candidates"],
+                name=f"{name}.sensitivity_scope.pilot_k_cal_candidates",
+            ),  # type: ignore[arg-type]
+            frozen_global_beta_sensitivity_multipliers=_optional_runtime_sequence(
+                scope["frozen_global_beta_multipliers"],
+                name=f"{name}.sensitivity_scope.frozen_global_beta_multipliers",
+            ),  # type: ignore[arg-type]
+            ridge_sensitivity_multipliers=_runtime_sequence(
+                scope["ridge_multipliers_configured"],
+                name=f"{name}.sensitivity_scope.ridge_multipliers_configured",
+            ),  # type: ignore[arg-type]
+            max_length_formal_gate=max_length["formal_gate"],  # type: ignore[arg-type]
+            max_length_formal_threshold=max_length["formal_threshold"],  # type: ignore[arg-type]
+        )
+    except KeyError as error:
+        raise ValueError(f"{name} is missing runtime field {error.args[0]!r}") from error
+    if (
+        dict(runtime) != design.to_dict()
+        or design.stage != "pilot"
+        or design.formal_eligibility
+        or design.pilot_phase != expected_phase
+        or design.sha256 != expected_sha256
+    ):
+        raise ValueError(f"{name} is not the exact declared pilot runtime contract")
+    return design
 
 
 def _read_regular(path: Path, *, name: str, max_bytes: int) -> bytes:
@@ -621,8 +1031,33 @@ def _validate_pre_oracle_gate(
     return passed
 
 
-def _validate_information_boundary(value: object, *, name: str) -> None:
-    boundary = _mapping(value, name=name)
+def _validate_information_boundary(
+    value: object,
+    *,
+    pilot_phase: str,
+    materialized_prompts: int,
+    rollout_prompts: int,
+    max_prompt_tokens: int,
+    name: str,
+) -> None:
+    boundary = _exact_keys(
+        value,
+        name=name,
+        expected={
+            "calibration_split",
+            "new_rollout_prompts_used_for_calibration",
+            "final_oracle_session_opened",
+            "rollout_responses_oracle_scored",
+            "heldout_evaluator_called",
+            "oracle_outcomes_serialized",
+            "prompt_or_response_text_serialized",
+            "token_ids_or_response_masks_serialized",
+            "source_artifact_format",
+            "source_artifact_may_contain_prior_heldout_candidate_scores",
+            "source_artifact_heldout_targets_exposed_by_phase2_prepared_inputs",
+            "prompt_semantics",
+        },
+    )
     required_false = {
         "new_rollout_prompts_used_for_calibration",
         "final_oracle_session_opened",
@@ -633,9 +1068,167 @@ def _validate_information_boundary(value: object, *, name: str) -> None:
         "token_ids_or_response_masks_serialized",
         "source_artifact_heldout_targets_exposed_by_phase2_prepared_inputs",
     }
-    missing = required_false - set(boundary)
-    if missing or any(boundary[field] is not False for field in required_false):
+    expected_split = (
+        "train_only" if pilot_phase == "calibration" else "excluded_pilot_calibration_outputs_only"
+    )
+    if (
+        any(boundary[field] is not False for field in required_false)
+        or boundary["calibration_split"] != expected_split
+        or boundary["source_artifact_format"] != "phase1_bridge"
+        or boundary["source_artifact_may_contain_prior_heldout_candidate_scores"] is not True
+    ):
         raise ValueError(f"{name} does not prove the target-free information boundary")
+    prompt_semantics = _exact_keys(
+        boundary["prompt_semantics"],
+        name=f"{name}.prompt_semantics",
+        expected={"schema_version", "materialization", "rollout", "oracle"},
+    )
+    if prompt_semantics["schema_version"] != "phase2-full-prompt-continuity/v1":
+        raise ValueError(f"{name}.prompt_semantics has the wrong schema")
+    materialization = _exact_keys(
+        prompt_semantics["materialization"],
+        name=f"{name}.prompt_semantics.materialization",
+        expected=_PROMPT_MATERIALIZATION_SUMMARY_KEYS,
+    )
+    rollout = _exact_keys(
+        prompt_semantics["rollout"],
+        name=f"{name}.prompt_semantics.rollout",
+        expected=_PROMPT_ROLLOUT_SUMMARY_KEYS,
+    )
+    oracle = _exact_keys(
+        prompt_semantics["oracle"],
+        name=f"{name}.prompt_semantics.oracle",
+        expected=_PROMPT_ORACLE_SUMMARY_KEYS,
+    )
+
+    materialized_count = _integer(
+        materialization["num_prompts"],
+        name=f"{name}.prompt_semantics.materialization.num_prompts",
+        minimum=1,
+    )
+    materialized_cap = _integer(
+        materialization["max_prompt_tokens"],
+        name=f"{name}.prompt_semantics.materialization.max_prompt_tokens",
+        minimum=1,
+    )
+    materialized_minimum = _integer(
+        materialization["minimum_policy_chat_token_count"],
+        name=f"{name}.prompt_semantics.materialization.minimum_policy_chat_token_count",
+        minimum=1,
+    )
+    materialized_maximum = _integer(
+        materialization["maximum_policy_chat_token_count"],
+        name=f"{name}.prompt_semantics.materialization.maximum_policy_chat_token_count",
+        minimum=1,
+    )
+    materialized_mean = _finite(
+        materialization["mean_policy_chat_token_count"],
+        name=f"{name}.prompt_semantics.materialization.mean_policy_chat_token_count",
+    )
+    if (
+        materialization["schema_version"] != "full-policy-prompt-semantics/v1"
+        or materialization["encoding"] != "policy_tokenizer_apply_chat_template"
+        or materialization["add_generation_prompt"] is not True
+        or materialization["truncation"] is not False
+        or materialization["fail_closed_above_max_prompt_tokens"] is not True
+        or materialization["candidate_prefixes_verified"] is not True
+        or materialized_count != materialized_prompts
+        or materialized_cap != max_prompt_tokens
+        or _integer(
+            materialization["over_limit_prompt_count"],
+            name=f"{name}.prompt_semantics.materialization.over_limit_prompt_count",
+        )
+        != 0
+        or _integer(
+            materialization["truncated_prompt_count"],
+            name=f"{name}.prompt_semantics.materialization.truncated_prompt_count",
+        )
+        != 0
+        or _integer(
+            materialization["raw_prompt_preserved_count"],
+            name=f"{name}.prompt_semantics.materialization.raw_prompt_preserved_count",
+        )
+        != materialized_count
+        or not (
+            materialized_minimum <= materialized_mean <= materialized_maximum <= materialized_cap
+        )
+    ):
+        raise ValueError(f"{name}.prompt_semantics.materialization is invalid")
+    materialization_policy_template = _digest(
+        materialization["policy_chat_template_sha256"],
+        name=f"{name}.prompt_semantics.materialization.policy_chat_template_sha256",
+    )
+    _digest(
+        materialization["records_sha256"],
+        name=f"{name}.prompt_semantics.materialization.records_sha256",
+    )
+
+    rollout_count = _integer(
+        rollout["num_prompts"],
+        name=f"{name}.prompt_semantics.rollout.num_prompts",
+        minimum=1,
+    )
+    rollout_cap = _integer(
+        rollout["max_prompt_tokens"],
+        name=f"{name}.prompt_semantics.rollout.max_prompt_tokens",
+        minimum=1,
+    )
+    rollout_minimum = _integer(
+        rollout["minimum_policy_chat_token_count"],
+        name=f"{name}.prompt_semantics.rollout.minimum_policy_chat_token_count",
+        minimum=1,
+    )
+    rollout_maximum = _integer(
+        rollout["maximum_policy_chat_token_count"],
+        name=f"{name}.prompt_semantics.rollout.maximum_policy_chat_token_count",
+        minimum=1,
+    )
+    rollout_mean = _finite(
+        rollout["mean_policy_chat_token_count"],
+        name=f"{name}.prompt_semantics.rollout.mean_policy_chat_token_count",
+    )
+    if (
+        rollout["schema_version"] != materialization["schema_version"]
+        or rollout_count != rollout_prompts
+        or rollout_cap != materialized_cap
+        or _integer(
+            rollout["over_limit_prompt_count"],
+            name=f"{name}.prompt_semantics.rollout.over_limit_prompt_count",
+        )
+        != 0
+        or _integer(
+            rollout["truncated_prompt_count"],
+            name=f"{name}.prompt_semantics.rollout.truncated_prompt_count",
+        )
+        != 0
+        or _integer(
+            rollout["raw_prompt_preserved_count"],
+            name=f"{name}.prompt_semantics.rollout.raw_prompt_preserved_count",
+        )
+        != rollout_count
+        or rollout["matches_materialization_token_prefix_evidence"] is not True
+        or rollout["same_evidence_across_policy_arms"] is not True
+        or not (rollout_minimum <= rollout_mean <= rollout_maximum <= rollout_cap)
+    ):
+        raise ValueError(f"{name}.prompt_semantics.rollout is invalid")
+
+    oracle_policy_template = _digest(
+        oracle["policy_chat_template_sha256"],
+        name=f"{name}.prompt_semantics.oracle.policy_chat_template_sha256",
+    )
+    oracle_template = _digest(
+        oracle["oracle_chat_template_sha256"],
+        name=f"{name}.prompt_semantics.oracle.oracle_chat_template_sha256",
+    )
+    if (
+        oracle["input_text"] != "same_raw_prompt_plus_assistant_response"
+        or oracle["rerendered_with_independent_oracle_chat_template"] is not True
+        or oracle["policy_chat_tokens_reused_by_oracle"] is not False
+        or oracle["policy_and_oracle_chat_template_sha256_distinct"] is not True
+        or oracle_policy_template != materialization_policy_template
+        or oracle_template == oracle_policy_template
+    ):
+        raise ValueError(f"{name}.prompt_semantics.oracle is invalid")
 
 
 def _validate_beta_evidence(
@@ -669,6 +1262,7 @@ def _validate_beta_evidence(
             or evidence["frozen_global_beta"] is not None
             or evidence["calibration_split"] != "train_only"
             or evidence["formal_beta_selected"] is not False
+            or evidence["formal_selection_rule"] != _CALIBRATION_FORMAL_SELECTION_RULE
             or evidence["learner_specific_rescaling"] is not False
         ):
             raise ValueError(f"{name} has an invalid calibration-candidate contract")
@@ -687,6 +1281,21 @@ def _validate_beta_evidence(
             evidence["predicted_oracle_quadratic_kl"],
             name=f"{name}.predicted_oracle_quadratic_kl",
         )
+        if target <= 0.0:
+            raise ValueError(f"{name}.target_oracle_quadratic_kl must be strictly positive")
+        expected_beta = math.sqrt(curvature / (2.0 * target))
+        if not math.isclose(
+            predicted,
+            target,
+            rel_tol=2.0e-12,
+            abs_tol=1.0e-15,
+        ) or not math.isclose(
+            beta,
+            expected_beta,
+            rel_tol=2.0e-12,
+            abs_tol=1.0e-15,
+        ):
+            raise ValueError(f"{name} violates the calibration target/beta closed-form identity")
     else:
         evidence = _exact_keys(
             value,
@@ -781,6 +1390,358 @@ def _validate_environment(value: object, *, name: str) -> dict[str, object]:
     return environment
 
 
+def _fixed_sibling(
+    result_path: Path,
+    reference: object,
+    *,
+    field: str,
+    expected_name: str,
+) -> Path:
+    if reference != expected_name:
+        raise ValueError(
+            f"{result_path}:{field} must equal the fixed sibling name {expected_name!r}"
+        )
+    sibling = result_path.parent / expected_name
+    if sibling.parent.resolve() != result_path.parent.resolve():
+        raise ValueError(f"{result_path}:{field} escapes its result directory")
+    return sibling
+
+
+def _parse_success_receipt(path: Path) -> tuple[Mapping[str, object], bytes]:
+    raw = _read_regular(path, name="pilot SUCCESS receipt", max_bytes=64 * 1024)
+    if not raw or not raw.endswith(b"\n"):
+        raise ValueError(f"{path} must be a non-empty newline-terminated receipt")
+    fields: dict[str, object] = {}
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{path} is not UTF-8") from error
+    for line_number, line in enumerate(lines, start=1):
+        if not line or "=" not in line:
+            raise ValueError(f"{path}:{line_number} is not a key=value receipt line")
+        key, value = line.split("=", 1)
+        if not key or key in fields:
+            raise ValueError(f"{path}:{line_number} has an invalid or duplicate key")
+        fields[key] = value
+    return (
+        _exact_keys(
+            fields,
+            name=str(path),
+            expected={
+                "schema_version",
+                "status",
+                "workload_exit_code",
+                "final_exit_code",
+                "array_job_id",
+                "array_task_id",
+                "seed",
+                "phase2_design_sha256",
+                "base_config_hash",
+                "git_commit",
+                "beta_source_aggregate_present",
+                "beta_source_aggregate_sha256",
+                "horizon_parent_aggregate_present",
+                "horizon_parent_aggregate_sha256",
+                "created_at_utc",
+            },
+        ),
+        raw,
+    )
+
+
+def _manifest_environment(
+    value: Mapping[str, object],
+    *,
+    expected_source_config_hash: str,
+    seed: int,
+    name: str,
+) -> dict[str, object]:
+    manifest = _exact_keys(
+        value,
+        name=name,
+        expected={
+            "schema_version",
+            "created_at_utc",
+            "config_hash",
+            "normalized_config",
+            "seed",
+            "selected_seed",
+            "named_seeds",
+            "git",
+            "python",
+            "platform",
+            "torch",
+            "revisions",
+            "packages",
+            "slurm",
+        },
+    )
+    if (
+        manifest["schema_version"] != "smart-reward-run/v1"
+        or manifest["config_hash"] != expected_source_config_hash
+        or manifest["selected_seed"] != seed
+    ):
+        raise ValueError(f"{name} does not bind the pilot base identity and selected seed")
+    git = _exact_keys(
+        manifest["git"],
+        name=f"{name}.git",
+        expected={"commit", "dirty"},
+    )
+    commit = git["commit"]
+    if (
+        not isinstance(commit, str)
+        or len(commit) not in {40, 64}
+        or any(character not in _HEX for character in commit)
+        or git["dirty"] is not False
+    ):
+        raise ValueError(f"{name} does not bind a clean producer Git commit")
+    slurm = _mapping(manifest["slurm"], name=f"{name}.slurm")
+    torch_state = _mapping(manifest["torch"], name=f"{name}.torch")
+    gpus = torch_state.get("gpus")
+    gpu_models = (
+        [gpu.get("name") for gpu in gpus if isinstance(gpu, Mapping)]
+        if isinstance(gpus, list)
+        else []
+    )
+    environment = {
+        "formal": (
+            slurm.get("PRORM_GIT_COMMIT") == commit
+            and slurm.get("SLURM_JOB_ACCOUNT") == "sigroup"
+            and slurm.get("SLURM_JOB_PARTITION") == "gpu-l20"
+            and torch_state.get("cuda_available") is True
+            and torch_state.get("gpu_count") == 1
+            and len(gpu_models) == 1
+            and isinstance(gpu_models[0], str)
+            and bool(gpu_models[0])
+        ),
+        "git_commit": commit,
+        "image_sha256": slurm.get("PRORM_IMAGE_SHA256"),
+        "hf_inventory_sha256": slurm.get("PRORM_HF_INVENTORY_SHA256"),
+        "account": slurm.get("SLURM_JOB_ACCOUNT"),
+        "partition": slurm.get("SLURM_JOB_PARTITION"),
+        "gpu_models": gpu_models,
+    }
+    return _validate_environment(environment, name=f"{name}.environment_identity")
+
+
+def _validate_seed_provenance(
+    result_path: Path,
+    result: Mapping[str, object],
+    *,
+    seed: int,
+    expected_design_sha256: str,
+    expected_source_config_hash: str,
+    pilot_phase: str,
+    environment: Mapping[str, object],
+    diagnostics_sha256: str,
+    diagnostic_records: int,
+    safety_passed: bool,
+    design: Phase2Design,
+) -> dict[str, object]:
+    artifact_reference = result["artifact_dir"]
+    if artifact_reference != "artifact":
+        raise ValueError(f"{result_path}:artifact_dir must equal the fixed sibling 'artifact'")
+    artifact_dir = result_path.parent / "artifact"
+    if not artifact_dir.is_dir():
+        raise FileNotFoundError(f"{result_path}:artifact_dir is not a directory")
+    metadata_path = artifact_dir / "metadata.json"
+    metadata_raw = _read_regular(
+        metadata_path,
+        name="pilot artifact metadata",
+        max_bytes=16 * 1024 * 1024,
+    )
+    metadata_sha256 = _sha256_bytes(metadata_raw)
+    if metadata_sha256 != result["artifact_metadata_sha256"]:
+        raise ValueError(f"{result_path} artifact metadata SHA256 mismatch")
+    metadata = _exact_keys(
+        _strict_json_bytes(metadata_raw, path=metadata_path),
+        name=str(metadata_path),
+        expected={
+            "schema",
+            "config_hash",
+            "seed",
+            "splits",
+            "tensors",
+            "tensor_sha256",
+            "evidence",
+        },
+    )
+    evidence = _mapping(metadata["evidence"], name=f"{metadata_path}:evidence")
+    producer = _exact_keys(
+        evidence.get("producer"),
+        name=f"{metadata_path}:evidence.producer",
+        expected={"git_commit", "image_sha256", "hf_inventory_sha256"},
+    )
+    expected_producer = {
+        "git_commit": environment["git_commit"],
+        "image_sha256": environment["image_sha256"],
+        "hf_inventory_sha256": environment["hf_inventory_sha256"],
+    }
+    if (
+        metadata["schema"] != "controlled-feature-artifact/v1"
+        or metadata["config_hash"] != expected_source_config_hash
+        or metadata["seed"] != seed
+        or dict(producer) != expected_producer
+    ):
+        raise ValueError(f"{metadata_path} does not bind the seed/base/producer identity")
+    prompt_semantics = _mapping(
+        _mapping(
+            result["information_boundary"],
+            name=f"{result_path}:information_boundary",
+        )["prompt_semantics"],
+        name=f"{result_path}:information_boundary.prompt_semantics",
+    )
+    materialization_semantics = _mapping(
+        prompt_semantics["materialization"],
+        name=f"{result_path}:information_boundary.prompt_semantics.materialization",
+    )
+    oracle_semantics = _mapping(
+        prompt_semantics["oracle"],
+        name=f"{result_path}:information_boundary.prompt_semantics.oracle",
+    )
+    artifact_policy_template = _digest(
+        evidence.get("chat_template_sha256"),
+        name=f"{metadata_path}:evidence.chat_template_sha256",
+    )
+    artifact_oracle_template = _digest(
+        evidence.get("oracle_chat_template_sha256"),
+        name=f"{metadata_path}:evidence.oracle_chat_template_sha256",
+    )
+    artifact_prompt_semantics = _validate_artifact_prompt_semantics(
+        evidence.get("policy_prompt_semantics"),
+        name=f"{metadata_path}:evidence.policy_prompt_semantics",
+    )
+    if (
+        materialization_semantics["policy_chat_template_sha256"] != artifact_policy_template
+        or oracle_semantics["policy_chat_template_sha256"] != artifact_policy_template
+        or oracle_semantics["oracle_chat_template_sha256"] != artifact_oracle_template
+        or any(
+            materialization_semantics[field] != expected
+            for field, expected in artifact_prompt_semantics.items()
+        )
+    ):
+        raise ValueError(
+            f"{result_path} prompt-continuity evidence differs from its bound artifact metadata"
+        )
+
+    manifest_path = _fixed_sibling(
+        result_path,
+        result["run_manifest"],
+        field="run_manifest",
+        expected_name="run-manifest.json",
+    )
+    manifest_raw = _read_regular(
+        manifest_path,
+        name="pilot run manifest",
+        max_bytes=64 * 1024 * 1024,
+    )
+    manifest_sha256 = _sha256_bytes(manifest_raw)
+    if manifest_sha256 != result["run_manifest_sha256"]:
+        raise ValueError(f"{result_path} run manifest SHA256 mismatch")
+    manifest = _strict_json_bytes(manifest_raw, path=manifest_path)
+    manifest_environment = _manifest_environment(
+        manifest,
+        expected_source_config_hash=expected_source_config_hash,
+        seed=seed,
+        name=str(manifest_path),
+    )
+    if manifest_environment != environment:
+        raise ValueError(f"{result_path} environment identity differs from its run manifest")
+
+    verification_path = result_path.parent / "phase2-output-verification.json"
+    verification_raw = _read_regular(
+        verification_path,
+        name="pilot output verification",
+        max_bytes=16 * 1024 * 1024,
+    )
+    verification = _exact_keys(
+        _strict_json_bytes(verification_raw, path=verification_path),
+        name=str(verification_path),
+        expected={
+            "schema_version",
+            "status",
+            "seed",
+            "source_config_hash",
+            "phase2_design_sha256",
+            "pilot_phase",
+            "diagnostic_records",
+            "diagnostics_sha256",
+            "kl_gate_passed",
+            "kl_measure_only",
+            "kl_violations",
+            "pre_oracle_gate_passed",
+            "pre_oracle_violations",
+            "environment_identity",
+        },
+    )
+    measured = _mapping(
+        result["measured_kl_safety"],
+        name=f"{result_path}:measured_kl_safety",
+    )
+    pre_oracle = _mapping(
+        result["pre_oracle_safety_gate"],
+        name=f"{result_path}:pre_oracle_safety_gate",
+    )
+    if (
+        verification["schema_version"] != "prorm-phase2-output-verification/v1"
+        or verification["status"] != "passed"
+        or verification["seed"] != seed
+        or verification["source_config_hash"] != expected_source_config_hash
+        or verification["phase2_design_sha256"] != expected_design_sha256
+        or verification["pilot_phase"] != pilot_phase
+        or verification["diagnostic_records"] != diagnostic_records
+        or verification["diagnostics_sha256"] != diagnostics_sha256
+        or verification["kl_gate_passed"] is not measured.get("passed")
+        or verification["kl_measure_only"] is not True
+        or verification["kl_violations"] != measured.get("violations")
+        or verification["pre_oracle_gate_passed"] is not safety_passed
+        or verification["pre_oracle_violations"] != pre_oracle.get("violations")
+        or verification["environment_identity"] != environment
+    ):
+        raise ValueError(f"{verification_path} does not bind the verified pilot result")
+
+    success_path = result_path.parent / "SUCCESS"
+    success, success_raw = _parse_success_receipt(success_path)
+    beta_source = design.beta_source_aggregate_sha256
+    horizon_parent = design.parent_pilot_aggregate_sha256
+    expected_beta_present = "1" if beta_source is not None else "0"
+    expected_horizon_present = "1" if horizon_parent is not None else "0"
+    array_job_id = str(success["array_job_id"])
+    array_task_id = str(success["array_task_id"])
+    if (
+        success["schema_version"] != "prorm-phase2-run-status/v1"
+        or success["status"] != "SUCCESS"
+        or success["workload_exit_code"] != "0"
+        or success["final_exit_code"] != "0"
+        or success["seed"] != str(seed)
+        or success["phase2_design_sha256"] != expected_design_sha256
+        or success["base_config_hash"] != expected_source_config_hash
+        or success["git_commit"] != environment["git_commit"]
+        or success["beta_source_aggregate_present"] != expected_beta_present
+        or success["beta_source_aggregate_sha256"] != (beta_source or "none")
+        or success["horizon_parent_aggregate_present"] != expected_horizon_present
+        or success["horizon_parent_aggregate_sha256"] != (horizon_parent or "none")
+        or not array_job_id.isdigit()
+        or array_job_id.startswith("0")
+        or not array_task_id.isdigit()
+        or int(array_task_id) != seed - min(PHASE2_PILOT_SEEDS)
+        or result_path.parent.name != f"job-{array_job_id}_{array_task_id}"
+        or not success["created_at_utc"]
+    ):
+        raise ValueError(f"{success_path} does not bind the successful pilot attempt")
+
+    return {
+        "artifact_metadata_path": metadata_path,
+        "artifact_metadata_sha256": metadata_sha256,
+        "run_manifest_path": manifest_path,
+        "run_manifest_sha256": manifest_sha256,
+        "output_verification_path": verification_path,
+        "output_verification_sha256": _sha256_bytes(verification_raw),
+        "success_receipt_path": success_path,
+        "success_receipt_sha256": _sha256_bytes(success_raw),
+    }
+
+
 def _load_seed(
     raw_path: str | os.PathLike[str],
     *,
@@ -790,8 +1751,10 @@ def _load_seed(
     expected_source_config_hash: str,
     expected_pilot_phase: str,
     design: Phase2Design,
+    materialized_prompts: int,
     prompts: int,
     candidates: int,
+    max_prompt_tokens: int,
 ) -> dict[str, object]:
     path = Path(raw_path).resolve()
     raw = _read_regular(path, name="pilot result", max_bytes=64 * 1024 * 1024)
@@ -885,6 +1848,10 @@ def _load_seed(
     )
     _validate_information_boundary(
         value["information_boundary"],
+        pilot_phase=expected_pilot_phase,
+        materialized_prompts=materialized_prompts,
+        rollout_prompts=prompts,
+        max_prompt_tokens=max_prompt_tokens,
         name=f"{path}:information_boundary",
     )
     head = _mapping(value["head_training"], name=f"{path}:head_training")
@@ -895,6 +1862,19 @@ def _load_seed(
         or head.get("test_data_accessed") is not False
     ):
         raise ValueError(f"{path} head-training boundary is invalid")
+    provenance = _validate_seed_provenance(
+        path,
+        value,
+        seed=seed,
+        expected_design_sha256=expected_design_sha256,
+        expected_source_config_hash=expected_source_config_hash,
+        pilot_phase=expected_pilot_phase,
+        environment=environment,
+        diagnostics_sha256=sidecar_sha,
+        diagnostic_records=len(rows),
+        safety_passed=safety_passed,
+        design=design,
+    )
     return {
         "seed": seed,
         "beta_common": beta,
@@ -906,22 +1886,479 @@ def _load_seed(
         "result_sha256": result_sha,
         "sidecar_path": sidecar,
         "sidecar_sha256": sidecar_sha,
+        **provenance,
     }
+
+
+def _selection_from_loaded_seeds(
+    *,
+    pilot_phase: str,
+    design: Phase2Design,
+    declared_seeds: Sequence[int],
+    loaded: Mapping[int, Mapping[str, object]],
+    source_binding: Mapping[str, object] | None,
+) -> tuple[dict[str, float], bool, bool, bool, dict[str, object]]:
+    beta_by_seed = {str(seed): float(loaded[seed]["beta_common"]) for seed in declared_seeds}
+    all_safety_passed = all(bool(loaded[seed]["safety_passed"]) for seed in declared_seeds)
+    all_length_passed = all(
+        float(
+            _mapping(
+                _mapping(
+                    loaded[seed]["observed_by_arm"],
+                    name=f"seed-{seed}.observed_by_arm",
+                )[arm],
+                name=f"seed-{seed}.observed_by_arm.{arm}",
+            )["reached_max_length_rate"]
+        )
+        <= _SAFETY_THRESHOLDS["reached_max_length_rate_cap"]
+        for seed in declared_seeds
+        for arm in PHASE2_ARM_ORDER
+    )
+    all_non_length_safety_passed = all(
+        float(
+            _mapping(
+                _mapping(
+                    loaded[seed]["observed_by_arm"],
+                    name=f"seed-{seed}.observed_by_arm",
+                )[arm],
+                name=f"seed-{seed}.observed_by_arm.{arm}",
+            )[metric]
+        )
+        <= _SAFETY_THRESHOLDS[f"{metric}_cap"]
+        for seed in declared_seeds
+        for arm in PHASE2_ARM_ORDER
+        for metric in _SAFETY_METRICS
+        if metric != "reached_max_length_rate"
+    )
+    next_horizon = (
+        design.allowed_horizon_sequence[design.horizon_grid_index + 1]
+        if design.horizon_grid_index + 1 < len(design.allowed_horizon_sequence)
+        else None
+    )
+    if pilot_phase == "calibration":
+        recommended = max(beta_by_seed.values())
+        selection: dict[str, object] = {
+            "schema_version": "pilot-calibration-selection/v1",
+            "candidate_beta_by_seed": beta_by_seed,
+            "aggregation_rule": "maximum_across_excluded_pilot_seeds",
+            "recommended_pilot_freeze_beta": recommended,
+            "freeze_validation_required": all_length_passed,
+            "beta_grid": "recommended_beta_times_two_to_nonnegative_integer",
+            "calibration_safety_diagnostics_passed": all_safety_passed,
+            "calibration_safety_diagnostics_are_measure_only": True,
+            "horizon_accepted": all_length_passed,
+            "next_horizon_tokens": (
+                design.max_response_tokens if all_length_passed else next_horizon
+            ),
+            "selection_accepted": None,
+            "next_action": (
+                "issue_pilot_freeze_identity_at_recommended_beta"
+                if all_length_passed
+                else (
+                    "issue_new_calibration_identity_at_next_horizon"
+                    if next_horizon is not None
+                    else "stop_and_revise_horizon_protocol"
+                )
+            ),
+        }
+    else:
+        frozen = float(design.frozen_global_beta)
+        if any(beta != frozen for beta in beta_by_seed.values()):
+            raise ValueError("pilot freeze seeds did not all use the exact same global beta")
+        if source_binding is None:
+            raise ValueError("pilot freeze lacks its validated beta-source aggregate binding")
+        selection_accepted = all_length_passed and all_non_length_safety_passed
+        if not all_length_passed:
+            next_action = (
+                "issue_new_calibration_identity_at_next_horizon"
+                if next_horizon is not None
+                else "stop_and_revise_horizon_protocol"
+            )
+            next_global_beta: float | None = None
+        elif not all_non_length_safety_passed:
+            next_action = "issue_new_pilot_freeze_identity_at_double_beta"
+            next_global_beta = 2.0 * frozen
+        else:
+            next_action = "freeze_confirmatory_design_identity"
+            next_global_beta = frozen
+        selection = {
+            "schema_version": "pilot-freeze-selection/v1",
+            "frozen_global_beta": frozen,
+            "all_seeds_and_arms_used_same_beta": True,
+            "beta_grid_index": source_binding["beta_grid_index"],
+            "all_pre_oracle_safety_gates_passed": all_safety_passed,
+            "all_length_gates_passed": all_length_passed,
+            "all_non_length_safety_gates_passed": all_non_length_safety_passed,
+            "selection_accepted": selection_accepted,
+            "accepted_for_confirmatory_identity": selection_accepted,
+            "next_horizon_tokens": (
+                design.max_response_tokens if all_length_passed else next_horizon
+            ),
+            "next_global_beta": next_global_beta,
+            "next_action": next_action,
+        }
+    return (
+        beta_by_seed,
+        all_safety_passed,
+        all_length_passed,
+        all_non_length_safety_passed,
+        selection,
+    )
+
+
+def _resolved_aggregate_reference(
+    aggregate_path: Path,
+    reference: object,
+    *,
+    name: str,
+) -> Path:
+    if not isinstance(reference, str) or not reference:
+        raise ValueError(f"{name} must be a non-empty relative POSIX path")
+    pure = PurePosixPath(reference)
+    if pure.is_absolute() or "\\" in reference or not pure.parts:
+        raise ValueError(f"{name} must be a relative POSIX path")
+    resolved = (aggregate_path.parent / Path(*pure.parts)).resolve()
+    if relative_posix_reference(resolved, base=aggregate_path.parent) != reference:
+        raise ValueError(f"{name} is not a canonical relative reference")
+    return resolved
+
+
+def _validate_thresholds(value: object, *, name: str) -> dict[str, float]:
+    thresholds = _exact_keys(
+        value,
+        name=name,
+        expected=set(_SAFETY_THRESHOLDS),
+    )
+    validated: dict[str, float] = {}
+    for field, expected in _SAFETY_THRESHOLDS.items():
+        observed = _finite(thresholds[field], name=f"{name}.{field}")
+        if not _close(observed, expected, tolerance=1.0e-12):
+            raise ValueError(f"{name}.{field} differs from the preregistered threshold")
+        validated[field] = observed
+    return validated
+
+
+def _validate_aggregate_information_boundary(value: object, *, name: str) -> None:
+    boundary = _exact_keys(
+        value,
+        name=name,
+        expected=_AGGREGATE_INFORMATION_BOUNDARY_KEYS,
+    )
+    if any(boundary[field] is not False for field in _AGGREGATE_INFORMATION_BOUNDARY_KEYS):
+        raise ValueError(f"{name} is not a strictly target-free aggregate boundary")
+
+
+def _load_predecessor_reference(
+    aggregate_path: Path,
+    value: object,
+    *,
+    expected_sha256: str | None,
+    name: str,
+    cache: dict[tuple[Path, str], Mapping[str, object]],
+    active: set[Path],
+) -> tuple[Path, str, Mapping[str, object]] | None:
+    if expected_sha256 is None:
+        if value is not None:
+            raise ValueError(f"{name} must be null when the runtime declares no predecessor")
+        return None
+    reference = _exact_keys(
+        value,
+        name=name,
+        expected=_AGGREGATE_PREDECESSOR_REFERENCE_KEYS,
+    )
+    digest = _digest(reference["sha256"], name=f"{name}.sha256")
+    if digest != expected_sha256:
+        raise ValueError(f"{name}.sha256 differs from the runtime predecessor identity")
+    path = _resolved_aggregate_reference(
+        aggregate_path,
+        reference["path"],
+        name=f"{name}.path",
+    )
+    return _load_source_aggregate(
+        path,
+        expected_sha256=digest,
+        _cache=cache,
+        _active=active,
+    )
+
+
+def _validate_phase2_pilot_aggregate(
+    path: Path,
+    value: Mapping[str, object],
+    *,
+    cache: dict[tuple[Path, str], Mapping[str, object]],
+    active: set[Path],
+) -> None:
+    aggregate = _exact_keys(
+        value,
+        name=str(path),
+        expected=_PILOT_AGGREGATE_KEYS,
+    )
+    pilot_phase = aggregate["pilot_phase"]
+    if (
+        aggregate["schema_version"] != PHASE2_PILOT_AGGREGATE_SCHEMA
+        or pilot_phase not in {"calibration", "freeze"}
+        or aggregate["formal_eligibility"] is not False
+        or aggregate["supports_formal_claim"] is not False
+        or aggregate["evidence_role"] != "target_free_design_selection_only"
+    ):
+        raise ValueError(f"{path} is not a formally ineligible Phase-2 pilot aggregate")
+    source_config_hash = _digest(
+        aggregate["source_config_hash"],
+        name=f"{path}:source_config_hash",
+    )
+    design_sha = _digest(
+        aggregate["phase2_design_sha256"],
+        name=f"{path}:phase2_design_sha256",
+    )
+    runtime_sha = _digest(
+        aggregate["phase2_runtime_contract_sha256"],
+        name=f"{path}:phase2_runtime_contract_sha256",
+    )
+    design = _phase2_design_from_runtime(
+        aggregate["phase2_runtime_contract"],
+        expected_phase=str(pilot_phase),
+        expected_sha256=runtime_sha,
+        name=f"{path}:phase2_runtime_contract",
+    )
+    if aggregate["beta_source_aggregate_sha256"] != design.beta_source_aggregate_sha256:
+        raise ValueError(f"{path} beta-source identity differs from its runtime contract")
+    if design.beta_source_aggregate_sha256 is not None:
+        _digest(
+            aggregate["beta_source_aggregate_sha256"],
+            name=f"{path}:beta_source_aggregate_sha256",
+        )
+
+    declared_seeds = aggregate["seeds"]
+    if declared_seeds != list(PHASE2_PILOT_SEEDS):
+        raise ValueError(f"{path} must declare the exact ordered excluded pilot seeds")
+    environment = _validate_environment(
+        aggregate["environment_identity"],
+        name=f"{path}:environment_identity",
+    )
+    _validate_aggregation_identity(
+        aggregate["aggregation_identity"],
+        producer_environment=environment,
+        name=f"{path}:aggregation_identity",
+        require_current_validator=False,
+    )
+    geometry = _exact_keys(
+        aggregate["rollout_geometry"],
+        name=f"{path}:rollout_geometry",
+        expected={
+            "materialized_prompts",
+            "test_prompts",
+            "candidates_per_prompt",
+            "max_prompt_tokens",
+        },
+    )
+    materialized_prompts = _integer(
+        geometry["materialized_prompts"],
+        name=f"{path}:rollout_geometry.materialized_prompts",
+        minimum=1,
+    )
+    prompts = _integer(
+        geometry["test_prompts"],
+        name=f"{path}:rollout_geometry.test_prompts",
+        minimum=1,
+    )
+    candidates = _integer(
+        geometry["candidates_per_prompt"],
+        name=f"{path}:rollout_geometry.candidates_per_prompt",
+        minimum=1,
+    )
+    max_prompt_tokens = _integer(
+        geometry["max_prompt_tokens"],
+        name=f"{path}:rollout_geometry.max_prompt_tokens",
+        minimum=1,
+    )
+    if (
+        materialized_prompts != 2048
+        or prompts != 256
+        or candidates != design.rollout_candidates_per_prompt
+        or max_prompt_tokens != 1024
+    ):
+        raise ValueError(f"{path} rollout geometry differs from its runtime contract")
+    _validate_thresholds(aggregate["thresholds"], name=f"{path}:thresholds")
+
+    predecessors = _exact_keys(
+        aggregate["predecessors"],
+        name=f"{path}:predecessors",
+        expected=_AGGREGATE_PREDECESSOR_KEYS,
+    )
+    beta_predecessor = _load_predecessor_reference(
+        path,
+        predecessors["beta_source_aggregate"],
+        expected_sha256=design.beta_source_aggregate_sha256,
+        name=f"{path}:predecessors.beta_source_aggregate",
+        cache=cache,
+        active=active,
+    )
+    horizon_predecessor = _load_predecessor_reference(
+        path,
+        predecessors["horizon_parent_aggregate"],
+        expected_sha256=design.parent_pilot_aggregate_sha256,
+        name=f"{path}:predecessors.horizon_parent_aggregate",
+        cache=cache,
+        active=active,
+    )
+    source_binding = _beta_source_binding_for_design(
+        design,
+        expected_source_config_hash=source_config_hash,
+        predecessor=beta_predecessor,
+    )
+    horizon_binding = _horizon_parent_binding_for_design(
+        design,
+        predecessor=horizon_predecessor,
+    )
+
+    raw_sources = aggregate["sources"]
+    if not isinstance(raw_sources, list) or len(raw_sources) != len(PHASE2_PILOT_SEEDS):
+        raise ValueError(f"{path}:sources must contain exactly three ordered seed records")
+    loaded: dict[int, dict[str, object]] = {}
+    for expected_seed, raw_source in zip(PHASE2_PILOT_SEEDS, raw_sources, strict=True):
+        source = _exact_keys(
+            raw_source,
+            name=f"{path}:sources.seed-{expected_seed}",
+            expected=_AGGREGATE_SOURCE_KEYS,
+        )
+        if source["seed"] != expected_seed:
+            raise ValueError(f"{path}:sources are not in the exact declared seed order")
+        result_path = _resolved_aggregate_reference(
+            path,
+            source["result"],
+            name=f"{path}:sources.seed-{expected_seed}.result",
+        )
+        loaded_seed = _load_seed(
+            result_path,
+            expected_design_sha256=design_sha,
+            expected_runtime=design.to_dict(),
+            expected_runtime_sha256=runtime_sha,
+            expected_source_config_hash=source_config_hash,
+            expected_pilot_phase=str(pilot_phase),
+            design=design,
+            materialized_prompts=materialized_prompts,
+            prompts=prompts,
+            candidates=candidates,
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        if loaded_seed["seed"] != expected_seed:
+            raise ValueError(f"{path}:source result seed differs from its source record")
+        expected_source = {
+            "seed": expected_seed,
+            "result": relative_posix_reference(
+                loaded_seed["result_path"],
+                base=path.parent,
+            ),
+            "result_sha256": loaded_seed["result_sha256"],
+            "diagnostics_jsonl": relative_posix_reference(
+                loaded_seed["sidecar_path"],
+                base=path.parent,
+            ),
+            "diagnostics_sha256": loaded_seed["sidecar_sha256"],
+            "artifact_metadata": relative_posix_reference(
+                loaded_seed["artifact_metadata_path"],
+                base=path.parent,
+            ),
+            "artifact_metadata_sha256": loaded_seed["artifact_metadata_sha256"],
+            "run_manifest": relative_posix_reference(
+                loaded_seed["run_manifest_path"],
+                base=path.parent,
+            ),
+            "run_manifest_sha256": loaded_seed["run_manifest_sha256"],
+            "output_verification": relative_posix_reference(
+                loaded_seed["output_verification_path"],
+                base=path.parent,
+            ),
+            "output_verification_sha256": loaded_seed["output_verification_sha256"],
+            "success_receipt": relative_posix_reference(
+                loaded_seed["success_receipt_path"],
+                base=path.parent,
+            ),
+            "success_receipt_sha256": loaded_seed["success_receipt_sha256"],
+        }
+        if dict(source) != expected_source:
+            raise ValueError(f"{path}:source provenance differs from the referenced seed bytes")
+        if loaded_seed["environment_identity"] != environment:
+            raise ValueError(f"{path}:source seed producer identity is inconsistent")
+        loaded[expected_seed] = loaded_seed
+
+    (
+        _,
+        _,
+        all_length_passed,
+        _,
+        expected_selection,
+    ) = _selection_from_loaded_seeds(
+        pilot_phase=str(pilot_phase),
+        design=design,
+        declared_seeds=PHASE2_PILOT_SEEDS,
+        loaded=loaded,
+        source_binding=source_binding,
+    )
+    if aggregate["selection"] != expected_selection:
+        raise ValueError(f"{path}:selection differs from recomputed source evidence")
+    expected_per_seed = {
+        str(seed): {
+            "beta_common": loaded[seed]["beta_common"],
+            "pre_oracle_safety_passed": loaded[seed]["safety_passed"],
+            "observed_by_arm": loaded[seed]["observed_by_arm"],
+        }
+        for seed in PHASE2_PILOT_SEEDS
+    }
+    if aggregate["per_seed"] != expected_per_seed:
+        raise ValueError(f"{path}:per_seed differs from recomputed source evidence")
+    expected_horizon = {
+        "schema_version": "pilot-horizon-selection/v1",
+        "candidate_horizon_tokens": design.max_response_tokens,
+        "allowed_horizon_sequence": list(design.allowed_horizon_sequence),
+        "horizon_grid_index": design.horizon_grid_index,
+        "parent_pilot_aggregate_sha256": design.parent_pilot_aggregate_sha256,
+        "previous_horizon_failed_length_gate": design.previous_horizon_failed_length_gate,
+        "all_seed_length_gates_passed": all_length_passed,
+        "parent_binding_verified": (
+            design.parent_pilot_aggregate_sha256 is None or horizon_binding is not None
+        ),
+    }
+    if aggregate["horizon"] != expected_horizon:
+        raise ValueError(f"{path}:horizon differs from recomputed source evidence")
+    _validate_aggregate_information_boundary(
+        aggregate["information_boundary"],
+        name=f"{path}:information_boundary",
+    )
 
 
 def _load_source_aggregate(
     raw_path: str | os.PathLike[str],
     *,
     expected_sha256: str,
+    _cache: dict[tuple[Path, str], Mapping[str, object]] | None = None,
+    _active: set[Path] | None = None,
 ) -> tuple[Path, str, Mapping[str, object]]:
     path = Path(raw_path).resolve()
-    raw = _read_regular(path, name="beta source aggregate", max_bytes=16 * 1024 * 1024)
+    raw = _read_regular(path, name="pilot predecessor aggregate", max_bytes=64 * 1024 * 1024)
     observed_sha = _sha256_bytes(raw)
     if observed_sha != expected_sha256:
-        raise ValueError("beta source aggregate SHA256 differs from the design identity")
+        raise ValueError("pilot predecessor aggregate SHA256 differs from the design identity")
+    cache = {} if _cache is None else _cache
+    active = set() if _active is None else _active
+    key = (path, observed_sha)
+    if key in cache:
+        return path, observed_sha, cache[key]
+    if path in active:
+        raise ValueError("pilot predecessor aggregate graph contains a cycle")
     value = _strict_json_bytes(raw, path=path)
-    if value.get("schema_version") != PHASE2_PILOT_AGGREGATE_SCHEMA:
-        raise ValueError("beta source aggregate has the wrong schema")
+    active.add(path)
+    try:
+        _validate_phase2_pilot_aggregate(
+            path,
+            value,
+            cache=cache,
+            active=active,
+        )
+    finally:
+        active.remove(path)
+    cache[key] = value
     return path, observed_sha, value
 
 
@@ -935,31 +2372,31 @@ def _power_of_two_grid_index(value: float, base: float) -> int:
     return exponent
 
 
-def verify_beta_source_aggregate(
-    overlay_config: Mapping[str, object],
-    source_aggregate: str | os.PathLike[str] | None,
+def _beta_source_binding_for_design(
+    design: Phase2Design,
+    *,
+    expected_source_config_hash: str,
+    predecessor: tuple[Path, str, Mapping[str, object]] | None,
 ) -> dict[str, object] | None:
-    """Verify the predecessor selection record bound into a freeze/formal design."""
-
-    config = validate_phase2_config(overlay_config)
-    design = Phase2Design.from_phase2_config(config)
     expected_sha = design.beta_source_aggregate_sha256
     if design.pilot_phase == "calibration":
-        if source_aggregate is not None or expected_sha is not None:
+        if predecessor is not None or expected_sha is not None:
             raise ValueError("pilot calibration must not consume a beta source aggregate")
         return None
-    if source_aggregate is None or expected_sha is None:
+    if predecessor is None or expected_sha is None:
         raise ValueError("this design requires its identity-bound beta source aggregate")
-    path, observed_sha, value = _load_source_aggregate(
-        source_aggregate,
-        expected_sha256=expected_sha,
-    )
-    design_config = _mapping(config["design"], name="design")
+
+    path, observed_sha, value = predecessor
+    if observed_sha != expected_sha:
+        raise ValueError("pilot predecessor aggregate SHA256 differs from the design identity")
     if (
         value.get("formal_eligibility") is not False
         or value.get("supports_formal_claim") is not False
         or value.get("evidence_role") != "target_free_design_selection_only"
-        or value.get("source_config_hash") != design_config["source_config_hash"]
+        or (
+            design.pilot_phase == "freeze"
+            and value.get("source_config_hash") != expected_source_config_hash
+        )
     ):
         raise ValueError(
             "beta source aggregate is not a target-free pilot artifact for the same base config"
@@ -1030,6 +2467,7 @@ def verify_beta_source_aggregate(
             "base_beta": base,
             "beta_grid_index": grid_index,
         }
+
     if value.get("pilot_phase") != "freeze":
         raise ValueError("confirmatory beta must be sourced from a freeze aggregate")
     if selection.get("selection_accepted") is not True:
@@ -1048,25 +2486,48 @@ def verify_beta_source_aggregate(
     }
 
 
-def verify_horizon_parent_aggregate(
+def verify_beta_source_aggregate(
     overlay_config: Mapping[str, object],
-    parent_aggregate: str | os.PathLike[str] | None,
+    source_aggregate: str | os.PathLike[str] | None,
 ) -> dict[str, object] | None:
-    """Verify the aggregate that authorized the current response horizon."""
+    """Verify the predecessor selection record bound into a freeze/formal design."""
 
     config = validate_phase2_config(overlay_config)
     design = Phase2Design.from_phase2_config(config)
+    design_config = _mapping(config["design"], name="design")
+    expected_sha = design.beta_source_aggregate_sha256
+    if source_aggregate is None:
+        predecessor = None
+    elif expected_sha is None:
+        raise ValueError("pilot calibration must not consume a beta source aggregate")
+    else:
+        predecessor = _load_source_aggregate(
+            source_aggregate,
+            expected_sha256=expected_sha,
+        )
+    return _beta_source_binding_for_design(
+        design,
+        expected_source_config_hash=str(design_config["source_config_hash"]),
+        predecessor=predecessor,
+    )
+
+
+def _horizon_parent_binding_for_design(
+    design: Phase2Design,
+    *,
+    predecessor: tuple[Path, str, Mapping[str, object]] | None,
+) -> dict[str, object] | None:
     expected_sha = design.parent_pilot_aggregate_sha256
     if expected_sha is None:
-        if parent_aggregate is not None:
+        if predecessor is not None:
             raise ValueError("the initial calibration horizon has no parent aggregate")
         return None
-    if parent_aggregate is None:
+    if predecessor is None:
         raise ValueError("this horizon requires its identity-bound parent pilot aggregate")
-    path, observed_sha, value = _load_source_aggregate(
-        parent_aggregate,
-        expected_sha256=expected_sha,
-    )
+
+    path, observed_sha, value = predecessor
+    if observed_sha != expected_sha:
+        raise ValueError("pilot predecessor aggregate SHA256 differs from the design identity")
     horizon = _mapping(value.get("horizon"), name=f"{path}:horizon")
     source_tokens = _integer(
         horizon.get("candidate_horizon_tokens"),
@@ -1112,10 +2573,35 @@ def verify_horizon_parent_aggregate(
     }
 
 
+def verify_horizon_parent_aggregate(
+    overlay_config: Mapping[str, object],
+    parent_aggregate: str | os.PathLike[str] | None,
+) -> dict[str, object] | None:
+    """Verify the aggregate that authorized the current response horizon."""
+
+    config = validate_phase2_config(overlay_config)
+    design = Phase2Design.from_phase2_config(config)
+    expected_sha = design.parent_pilot_aggregate_sha256
+    if parent_aggregate is None:
+        predecessor = None
+    elif expected_sha is None:
+        raise ValueError("the initial calibration horizon has no parent aggregate")
+    else:
+        predecessor = _load_source_aggregate(
+            parent_aggregate,
+            expected_sha256=expected_sha,
+        )
+    return _horizon_parent_binding_for_design(
+        design,
+        predecessor=predecessor,
+    )
+
+
 def build_phase2_pilot_aggregate(
     overlay_config: Mapping[str, object],
     result_jsons: Sequence[str | os.PathLike[str]],
     *,
+    aggregation_identity: Mapping[str, object],
     reference_base: str | os.PathLike[str] | None = None,
     beta_source_aggregate: str | os.PathLike[str] | None = None,
     horizon_parent_aggregate: str | os.PathLike[str] | None = None,
@@ -1140,6 +2626,7 @@ def build_phase2_pilot_aggregate(
     if len(result_jsons) != len(declared_seeds):
         raise ValueError("pilot aggregate requires exactly one result for every declared seed")
     data = _mapping(config["data"], name="data")
+    policy = _mapping(config["policy"], name="policy")
     split_sizes = _mapping(run["split_sizes"], name="run.split_sizes")
     loaded: dict[int, dict[str, object]] = {}
     for path in result_jsons:
@@ -1151,8 +2638,10 @@ def build_phase2_pilot_aggregate(
             expected_source_config_hash=str(design_mapping["source_config_hash"]),
             expected_pilot_phase=str(pilot_phase),
             design=design,
+            materialized_prompts=int(run["num_prompts"]),
             prompts=int(split_sizes["test"]),
             candidates=int(data["num_candidates"]),
+            max_prompt_tokens=int(policy["max_prompt_tokens"]),
         )
         seed = int(seed_result["seed"])
         if seed not in declared_seeds:
@@ -1165,6 +2654,15 @@ def build_phase2_pilot_aggregate(
     environment = loaded[declared_seeds[0]]["environment_identity"]
     if any(loaded[seed]["environment_identity"] != environment for seed in declared_seeds):
         raise ValueError("pilot seeds do not share one execution environment identity")
+    validated_aggregation_identity = _validate_aggregation_identity(
+        aggregation_identity,
+        producer_environment=_mapping(
+            environment,
+            name="shared seed producer environment identity",
+        ),
+        name="aggregation_identity",
+        require_current_validator=True,
+    )
 
     source_binding = verify_beta_source_aggregate(config, beta_source_aggregate)
     parent_input = (
@@ -1173,89 +2671,32 @@ def build_phase2_pilot_aggregate(
         else horizon_parent_aggregate
     )
     horizon_binding = verify_horizon_parent_aggregate(config, parent_input)
-    beta_by_seed = {str(seed): float(loaded[seed]["beta_common"]) for seed in declared_seeds}
-    all_safety_passed = all(bool(loaded[seed]["safety_passed"]) for seed in declared_seeds)
-    all_length_passed = all(
-        float(loaded[seed]["observed_by_arm"][arm]["reached_max_length_rate"])
-        <= _SAFETY_THRESHOLDS["reached_max_length_rate_cap"]
-        for seed in declared_seeds
-        for arm in PHASE2_ARM_ORDER
+    _, _, all_length_passed, _, selection = _selection_from_loaded_seeds(
+        pilot_phase=str(pilot_phase),
+        design=design,
+        declared_seeds=declared_seeds,
+        loaded=loaded,
+        source_binding=source_binding,
     )
-    all_non_length_safety_passed = all(
-        float(loaded[seed]["observed_by_arm"][arm][metric]) <= _SAFETY_THRESHOLDS[f"{metric}_cap"]
-        for seed in declared_seeds
-        for arm in PHASE2_ARM_ORDER
-        for metric in _SAFETY_METRICS
-        if metric != "reached_max_length_rate"
-    )
-    next_horizon = (
-        design.allowed_horizon_sequence[design.horizon_grid_index + 1]
-        if design.horizon_grid_index + 1 < len(design.allowed_horizon_sequence)
-        else None
-    )
-    if pilot_phase == "calibration":
-        recommended = max(beta_by_seed.values())
-        selection = {
-            "schema_version": "pilot-calibration-selection/v1",
-            "candidate_beta_by_seed": beta_by_seed,
-            "aggregation_rule": "maximum_across_excluded_pilot_seeds",
-            "recommended_pilot_freeze_beta": recommended,
-            "freeze_validation_required": all_length_passed,
-            "beta_grid": "recommended_beta_times_two_to_nonnegative_integer",
-            "calibration_safety_diagnostics_passed": all_safety_passed,
-            "calibration_safety_diagnostics_are_measure_only": True,
-            "horizon_accepted": all_length_passed,
-            "next_horizon_tokens": (
-                design.max_response_tokens if all_length_passed else next_horizon
-            ),
-            "selection_accepted": None,
-            "next_action": (
-                "issue_pilot_freeze_identity_at_recommended_beta"
-                if all_length_passed
-                else (
-                    "issue_new_calibration_identity_at_next_horizon"
-                    if next_horizon is not None
-                    else "stop_and_revise_horizon_protocol"
-                )
-            ),
-        }
-    else:
-        frozen = float(design.frozen_global_beta)
-        if any(beta != frozen for beta in beta_by_seed.values()):
-            raise ValueError("pilot freeze seeds did not all use the exact same global beta")
-        if source_binding is None:
-            raise RuntimeError("pilot freeze lost its source aggregate binding")
-        selection_accepted = all_length_passed and all_non_length_safety_passed
-        if not all_length_passed:
-            next_action = (
-                "issue_new_calibration_identity_at_next_horizon"
-                if next_horizon is not None
-                else "stop_and_revise_horizon_protocol"
-            )
-            next_global_beta: float | None = None
-        elif not all_non_length_safety_passed:
-            next_action = "issue_new_pilot_freeze_identity_at_double_beta"
-            next_global_beta = 2.0 * frozen
-        else:
-            next_action = "freeze_confirmatory_design_identity"
-            next_global_beta = frozen
-        selection = {
-            "schema_version": "pilot-freeze-selection/v1",
-            "frozen_global_beta": frozen,
-            "all_seeds_and_arms_used_same_beta": True,
-            "beta_grid_index": source_binding["beta_grid_index"],
-            "all_pre_oracle_safety_gates_passed": all_safety_passed,
-            "all_length_gates_passed": all_length_passed,
-            "all_non_length_safety_gates_passed": all_non_length_safety_passed,
-            "selection_accepted": selection_accepted,
-            "accepted_for_confirmatory_identity": selection_accepted,
-            "next_horizon_tokens": (
-                design.max_response_tokens if all_length_passed else next_horizon
-            ),
-            "next_global_beta": next_global_beta,
-            "next_action": next_action,
-        }
     base = Path(reference_base).resolve() if reference_base is not None else Path.cwd().resolve()
+    predecessors = {
+        "beta_source_aggregate": (
+            None
+            if source_binding is None
+            else {
+                "path": relative_posix_reference(source_binding["path"], base=base),
+                "sha256": source_binding["sha256"],
+            }
+        ),
+        "horizon_parent_aggregate": (
+            None
+            if horizon_binding is None
+            else {
+                "path": relative_posix_reference(horizon_binding["path"], base=base),
+                "sha256": horizon_binding["sha256"],
+            }
+        ),
+    }
     sources = [
         {
             "seed": seed,
@@ -1269,6 +2710,26 @@ def build_phase2_pilot_aggregate(
                 base=base,
             ),
             "diagnostics_sha256": loaded[seed]["sidecar_sha256"],
+            "artifact_metadata": relative_posix_reference(
+                loaded[seed]["artifact_metadata_path"],
+                base=base,
+            ),
+            "artifact_metadata_sha256": loaded[seed]["artifact_metadata_sha256"],
+            "run_manifest": relative_posix_reference(
+                loaded[seed]["run_manifest_path"],
+                base=base,
+            ),
+            "run_manifest_sha256": loaded[seed]["run_manifest_sha256"],
+            "output_verification": relative_posix_reference(
+                loaded[seed]["output_verification_path"],
+                base=base,
+            ),
+            "output_verification_sha256": loaded[seed]["output_verification_sha256"],
+            "success_receipt": relative_posix_reference(
+                loaded[seed]["success_receipt_path"],
+                base=base,
+            ),
+            "success_receipt_sha256": loaded[seed]["success_receipt_sha256"],
         }
         for seed in declared_seeds
     ]
@@ -1280,10 +2741,18 @@ def build_phase2_pilot_aggregate(
         "evidence_role": "target_free_design_selection_only",
         "source_config_hash": design_mapping["source_config_hash"],
         "phase2_design_sha256": design_sha,
+        "phase2_runtime_contract": runtime,
         "phase2_runtime_contract_sha256": runtime_sha,
         "beta_source_aggregate_sha256": design.beta_source_aggregate_sha256,
         "seeds": list(declared_seeds),
         "environment_identity": environment,
+        "aggregation_identity": validated_aggregation_identity,
+        "rollout_geometry": {
+            "materialized_prompts": int(run["num_prompts"]),
+            "test_prompts": int(split_sizes["test"]),
+            "candidates_per_prompt": int(data["num_candidates"]),
+            "max_prompt_tokens": int(policy["max_prompt_tokens"]),
+        },
         "thresholds": dict(_SAFETY_THRESHOLDS),
         "horizon": {
             "schema_version": "pilot-horizon-selection/v1",
@@ -1297,6 +2766,7 @@ def build_phase2_pilot_aggregate(
                 design.parent_pilot_aggregate_sha256 is None or horizon_binding is not None
             ),
         },
+        "predecessors": predecessors,
         "per_seed": {
             str(seed): {
                 "beta_common": loaded[seed]["beta_common"],
@@ -1322,6 +2792,7 @@ def write_phase2_pilot_aggregate(
     result_jsons: Sequence[str | os.PathLike[str]],
     output_json: str | os.PathLike[str],
     *,
+    aggregation_identity: Mapping[str, object],
     beta_source_aggregate: str | os.PathLike[str] | None = None,
     horizon_parent_aggregate: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
@@ -1334,6 +2805,7 @@ def write_phase2_pilot_aggregate(
     payload = build_phase2_pilot_aggregate(
         overlay_config,
         result_jsons,
+        aggregation_identity=aggregation_identity,
         reference_base=destination.parent,
         beta_source_aggregate=beta_source_aggregate,
         horizon_parent_aggregate=horizon_parent_aggregate,
@@ -1344,6 +2816,7 @@ def write_phase2_pilot_aggregate(
 
 __all__ = [
     "PHASE2_PILOT_AGGREGATE_SCHEMA",
+    "PHASE2_PILOT_AGGREGATION_IDENTITY_SCHEMA",
     "build_phase2_pilot_aggregate",
     "verify_beta_source_aggregate",
     "verify_horizon_parent_aggregate",

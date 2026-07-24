@@ -614,6 +614,9 @@ mkdir -p "${aggregate_dir}"
 run_seed_1=REPLACE_WITH_20260801_SUCCESS_DIR
 run_seed_2=REPLACE_WITH_20260802_SUCCESS_DIR
 run_seed_3=REPLACE_WITH_20260803_SUCCESS_DIR
+# 只有 validator-only 后续 commit 消费既有 immutable seeds 时才设置；
+# 同一 commit 生产并聚合时省略 --producer-commit。
+producer_commit=REPLACE_WITH_EXACT_FULL_SEED_PRODUCER_COMMIT
 
 aggregate_job="$(
   bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
@@ -621,12 +624,22 @@ aggregate_job="$(
     configs/common_beta_pilot_base.yaml \
     "${aggregate_dir}/calibration.json" \
     amd 01:00:00 \
-    "${run_seed_1}" "${run_seed_2}" "${run_seed_3}"
+    "${run_seed_1}" "${run_seed_2}" "${run_seed_3}" \
+    --producer-commit "${producer_commit}"
 )"
 aggregate_job="${aggregate_job%%;*}"
 test -n "${aggregate_job}"
 squeue -j "${aggregate_job}"
 ```
+
+`--producer-commit` 不允许模糊引用或自动猜测。它必须是完整 commit，必须是当前 aggregation
+commit 的祖先，而且 overlay、base 与 `configs/identities.json` 在两个 commits 中逐字相同。
+wrapper/compute job 分别绑定 seed producer 与 aggregator validator：前者必须同时匹配三个
+`SUCCESS` receipts、result environment、run manifests 和 artifact metadata；后者只执行当前
+committed validator。若 seed 与 aggregate 来自同一 commit，省略该参数即可。发布的
+`common-beta-pilot-selection-aggregate/v2` 另外保存两套 Git identity、validator source
+SHA256，并逐一保存和复验 result、sidecar、manifest、output-verification、artifact metadata
+与 success receipt hashes。
 
 任务离开队列后，要求 `COMPLETED`、`ExitCode=0:0`，并验证原子发布的 JSON：
 

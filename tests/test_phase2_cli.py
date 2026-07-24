@@ -609,6 +609,7 @@ def test_phase2_pilot_aggregate_delegates_to_target_free_aggregator(
         result_jsons: list[str],
         output_json: str,
         *,
+        aggregation_identity: dict[str, object],
         beta_source_aggregate: str | None,
         horizon_parent_aggregate: str | None,
     ) -> dict[str, object]:
@@ -616,6 +617,7 @@ def test_phase2_pilot_aggregate_delegates_to_target_free_aggregator(
             config,
             result_jsons,
             output_json,
+            aggregation_identity,
             beta_source_aggregate,
             horizon_parent_aggregate,
         )
@@ -654,6 +656,16 @@ def test_phase2_pilot_aggregate_delegates_to_target_free_aggregator(
                 overlay,
                 str(output),
                 *results,
+                "--aggregator-git-commit",
+                "a" * 40,
+                "--producer-git-commit",
+                "b" * 40,
+                "--aggregation-image-sha256",
+                "c" * 64,
+                "--aggregation-hf-inventory-sha256",
+                "d" * 64,
+                "--validator-source-sha256",
+                "f" * 64,
                 "--beta-source-aggregate",
                 source,
             ]
@@ -666,6 +678,14 @@ def test_phase2_pilot_aggregate_delegates_to_target_free_aggregator(
         overlay_config,
         results,
         str(output),
+        {
+            "schema_version": "phase2-pilot-aggregation-identity/v1",
+            "aggregator_git_commit": "a" * 40,
+            "producer_git_commit": "b" * 40,
+            "image_sha256": "c" * 64,
+            "hf_inventory_sha256": "d" * 64,
+            "validator_source_sha256": "f" * 64,
+        },
         source,
         None,
     )

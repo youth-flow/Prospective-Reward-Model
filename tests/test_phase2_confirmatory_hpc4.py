@@ -99,7 +99,8 @@ def test_submit_requires_one_accepted_freeze_for_beta_and_horizon() -> None:
     assert "parent_pilot_aggregate_sha256" in submit
     assert "confirmatory beta and horizon must bind the same accepted freeze aggregate" in submit
     assert "accepted freeze aggregate bytes do not match the confirmatory design binding" in submit
-    assert "common-beta-pilot-selection-aggregate/v1" in submit
+    assert "common-beta-pilot-selection-aggregate/v2" in submit
+    assert "phase2-pilot-aggregation-identity/v1" in submit
     assert "pilot-freeze-selection/v1" in submit
     for required_gate in (
         "selection_accepted",
@@ -271,6 +272,15 @@ def test_job_is_detached_offline_and_rechecks_formal_compute_identity() -> None:
     assert 'partition != "gpu-l20" or "l20" not in name.lower()' in job
     assert "apptainer exec --cleanenv --nv" in job
     assert "--no-mount home,cwd,bind-paths" in job
+    project_evidence_bind = '--bind "${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}:ro"'
+    cache_bind = '--bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}"'
+    assert project_evidence_bind in job
+    assert job.index(project_evidence_bind) < job.index(cache_bind)
+    assert (
+        '--bind "${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE}:'
+        '${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE}"'
+    ) not in job
+    assert "recursively revalidate those bytes" in job
     assert '--env "HF_HUB_OFFLINE=1"' in job
     assert '--env "TRANSFORMERS_OFFLINE=1"' in job
     assert '--env "HF_DATASETS_OFFLINE=1"' in job

@@ -1537,6 +1537,14 @@ def _phase2_pilot_aggregate(arguments: argparse.Namespace) -> int:
         bundle.config,
         arguments.results,
         arguments.output,
+        aggregation_identity={
+            "schema_version": "phase2-pilot-aggregation-identity/v1",
+            "aggregator_git_commit": arguments.aggregator_git_commit,
+            "producer_git_commit": arguments.producer_git_commit,
+            "image_sha256": arguments.aggregation_image_sha256,
+            "hf_inventory_sha256": arguments.aggregation_hf_inventory_sha256,
+            "validator_source_sha256": arguments.validator_source_sha256,
+        },
         beta_source_aggregate=arguments.beta_source_aggregate,
         horizon_parent_aggregate=arguments.horizon_parent_aggregate,
     )
@@ -1993,6 +2001,31 @@ def build_parser() -> argparse.ArgumentParser:
         "results",
         nargs="+",
         help="one target-free pilot result JSON for every declared pilot seed",
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "--aggregator-git-commit",
+        required=True,
+        help="exact commit executing and validating this aggregate",
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "--producer-git-commit",
+        required=True,
+        help="exact commit that produced all three immutable pilot seeds",
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "--aggregation-image-sha256",
+        required=True,
+        help="validated SIF digest used by the producer and aggregation job",
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "--aggregation-hf-inventory-sha256",
+        required=True,
+        help="validated base-config HF inventory digest",
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "--validator-source-sha256",
+        required=True,
+        help="SHA256 of the committed pilot aggregate validator source",
     )
     phase2_pilot_aggregate_parser.add_argument(
         "--beta-source-aggregate",

@@ -428,11 +428,24 @@ value = json.loads(
     ),
 )
 selection = value.get("selection")
+aggregation = value.get("aggregation_identity")
 if (
-    value.get("schema_version") != "common-beta-pilot-selection-aggregate/v1"
+    value.get("schema_version") != "common-beta-pilot-selection-aggregate/v2"
     or value.get("pilot_phase") != "freeze"
     or value.get("formal_eligibility") is not False
     or value.get("supports_formal_claim") is not False
+    or not isinstance(aggregation, dict)
+    or set(aggregation)
+    != {
+        "schema_version",
+        "aggregator_git_commit",
+        "producer_git_commit",
+        "image_sha256",
+        "hf_inventory_sha256",
+        "validator_source_sha256",
+    }
+    or aggregation.get("schema_version")
+    != "phase2-pilot-aggregation-identity/v1"
     or not isinstance(selection, dict)
     or selection.get("schema_version") != "pilot-freeze-selection/v1"
     or selection.get("selection_accepted") is not True
