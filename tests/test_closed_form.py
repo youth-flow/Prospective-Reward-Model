@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from smart_reward.closed_form import (
@@ -16,12 +18,17 @@ from smart_reward.closed_form import (
     exact_true_regret_derivative,
     expected_reward,
     fisher_from_reference_policy,
+    fixed_kl_learned_theta,
+    fixed_kl_local_regret,
+    fixed_kl_target_theta,
     learned_policy,
     learned_theta,
+    local_fisher_kl,
     local_prorm_regret,
     ordered_iid_pair_distribution,
     pair_fisher,
     pair_reward_moment,
+    policy_from_theta,
     population_nll,
     reward_vector,
     score_mean,
@@ -152,6 +159,47 @@ def test_exact_policy_regret_and_nll_regret_ranking_reversal() -> None:
         (true_regret_reduction, bt_aux_nll_reduction, prorm_aux_nll_reduction),
         (0.2894505666897933, 0.37123108252602244, 0.2941306801816247),
     )
+
+
+def test_fixed_kl_normalization_erases_the_closed_form_scale_advantage() -> None:
+    """The original example separates methods only under a common beta."""
+
+    kl_budget = 0.01
+    bt_w = bt_rm_optimal_w()
+    bt_theta = fixed_kl_learned_theta(bt_w, kl_budget=kl_budget)
+    prorm_theta = fixed_kl_learned_theta(3.0, kl_budget=kl_budget)
+
+    _assert_vector_close(bt_theta, prorm_theta)
+    _assert_vector_close(
+        bt_theta,
+        (math.sqrt(2.0 * kl_budget), math.sqrt(2.0 * kl_budget)),
+    )
+    _assert_vector_close(
+        fixed_kl_target_theta(kl_budget=kl_budget),
+        (2.0 * math.sqrt(kl_budget), 0.0),
+    )
+    _assert_vector_close(policy_from_theta(bt_theta), policy_from_theta(prorm_theta))
+    assert local_fisher_kl(bt_theta) == pytest.approx(kl_budget)
+    assert local_fisher_kl(prorm_theta) == pytest.approx(kl_budget)
+    assert local_fisher_kl(fixed_kl_target_theta(kl_budget=kl_budget)) == pytest.approx(kl_budget)
+    assert fixed_kl_local_regret(bt_w, kl_budget=kl_budget) == pytest.approx(
+        fixed_kl_local_regret(3.0, kl_budget=kl_budget)
+    )
+
+    # In contrast, the theorem's common-beta objective retains reward scale.
+    assert local_prorm_regret(3.0) < local_prorm_regret(bt_w)
+
+
+@pytest.mark.parametrize("w", [0.0, float("nan"), float("inf")])
+def test_fixed_kl_rejects_invalid_reward_scale(w: float) -> None:
+    with pytest.raises(ValueError):
+        fixed_kl_learned_theta(w, kl_budget=0.01)
+
+
+@pytest.mark.parametrize("kl_budget", [0.0, -1.0, float("nan"), float("inf")])
+def test_fixed_kl_rejects_invalid_budget(kl_budget: float) -> None:
+    with pytest.raises(ValueError):
+        fixed_kl_target_theta(kl_budget=kl_budget)
 
 
 def test_exact_regret_matches_original_target_objective_gap() -> None:

@@ -444,6 +444,357 @@ class NaturalDirectionMetrics:
     target_fisher_norm: torch.Tensor
 
 
+@dataclass(frozen=True)
+class FixedBetaLocalResult:
+    """Target utility of one deployed displacement under a fixed KL penalty.
+
+    All directions are represented in the identifiable Fisher range.  Components
+    of the supplied displacement in ``Null(F)`` are discarded because they have
+    zero reward moment and zero quadratic KL under the required range condition.
+    """
+
+    beta: float
+    effective_deployed_direction: torch.Tensor
+    target_optimal_direction: torch.Tensor
+    deployed_target_utility: torch.Tensor
+    optimal_target_utility: torch.Tensor
+    regret: torch.Tensor
+    deployed_quadratic_kl: torch.Tensor
+    optimal_quadratic_kl: torch.Tensor
+
+
+@dataclass(frozen=True)
+class FixedKNormalizedLocalResult:
+    """Target regret after normalizing a deployed ray to a Fisher-KL budget."""
+
+    kappa: float
+    normalized_deployed_direction: torch.Tensor
+    target_optimal_direction: torch.Tensor
+    deployed_target_improvement: torch.Tensor
+    optimal_target_improvement: torch.Tensor
+    regret: torch.Tensor
+    deployed_quadratic_kl: torch.Tensor
+    optimal_quadratic_kl: torch.Tensor
+    fisher_cosine: torch.Tensor
+    deployed_direction_has_zero_fisher_norm: bool
+    target_moment_is_zero: bool
+
+
+@dataclass(frozen=True)
+class _DenseFisherGeometry:
+    fisher_matrix: torch.Tensor
+    range_basis: torch.Tensor
+    positive_eigenvalues: torch.Tensor
+    rcond: float
+
+    def project_to_range(self, vector: torch.Tensor) -> torch.Tensor:
+        if self.range_basis.shape[1] == 0:
+            return torch.zeros_like(vector)
+        return self.range_basis @ (self.range_basis.mT @ vector)
+
+    def pseudoinverse_matvec(self, vector: torch.Tensor) -> torch.Tensor:
+        if self.range_basis.shape[1] == 0:
+            return torch.zeros_like(vector)
+        coefficients = self.range_basis.mT @ vector
+        return self.range_basis @ (coefficients / self.positive_eigenvalues)
+
+
+def _validate_dense_local_geometry(
+    fisher_matrix: torch.Tensor,
+    target_moment: torch.Tensor,
+    deployed_direction: torch.Tensor,
+    *,
+    rcond: float | None,
+) -> _DenseFisherGeometry:
+    tensors = {
+        "fisher_matrix": fisher_matrix,
+        "target_moment": target_moment,
+        "deployed_direction": deployed_direction,
+    }
+    for name, value in tensors.items():
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if not value.is_floating_point():
+            raise TypeError(f"{name} must have a floating-point dtype")
+        if value.dtype not in (torch.float32, torch.float64):
+            raise TypeError(f"{name} must use torch.float32 or torch.float64")
+        if not bool(torch.isfinite(value).all()):
+            raise ValueError(f"{name} must be finite")
+
+    if target_moment.ndim != 1 or target_moment.numel() < 1:
+        raise ValueError("target_moment must be a non-empty one-dimensional tensor")
+    if deployed_direction.shape != target_moment.shape:
+        raise ValueError("deployed_direction must have the same shape as target_moment")
+    dimension = target_moment.numel()
+    if fisher_matrix.shape != (dimension, dimension):
+        raise ValueError(f"fisher_matrix must have shape ({dimension}, {dimension})")
+    if (
+        fisher_matrix.dtype != target_moment.dtype
+        or deployed_direction.dtype != target_moment.dtype
+    ):
+        raise ValueError("all local-geometry tensors must share dtype")
+    if (
+        fisher_matrix.device != target_moment.device
+        or deployed_direction.device != target_moment.device
+    ):
+        raise ValueError("all local-geometry tensors must share device")
+
+    epsilon = torch.finfo(fisher_matrix.dtype).eps
+    rcond_value = dimension * epsilon if rcond is None else float(rcond)
+    if not math.isfinite(rcond_value) or rcond_value <= 0.0 or rcond_value >= 1.0:
+        raise ValueError("rcond must be finite and lie strictly between zero and one")
+
+    matrix_scale = max(1.0, float(torch.linalg.matrix_norm(fisher_matrix, ord=2).item()))
+    symmetry_tolerance = 32.0 * rcond_value * matrix_scale
+    if not torch.allclose(
+        fisher_matrix,
+        fisher_matrix.mT,
+        rtol=32.0 * rcond_value,
+        atol=symmetry_tolerance,
+    ):
+        raise ValueError("fisher_matrix must be symmetric")
+    symmetric_fisher = 0.5 * (fisher_matrix + fisher_matrix.mT)
+    eigenvalues, eigenvectors = torch.linalg.eigh(symmetric_fisher)
+    maximum_eigenvalue = max(0.0, float(eigenvalues[-1].item()))
+    psd_tolerance = 32.0 * rcond_value * max(1.0, maximum_eigenvalue)
+    if float(eigenvalues[0].item()) < -psd_tolerance:
+        raise ValueError("fisher_matrix must be positive semidefinite")
+
+    cutoff = rcond_value * maximum_eigenvalue
+    positive = eigenvalues > cutoff
+    range_basis = eigenvectors[:, positive]
+    positive_eigenvalues = eigenvalues[positive]
+    geometry = _DenseFisherGeometry(
+        fisher_matrix=symmetric_fisher,
+        range_basis=range_basis,
+        positive_eigenvalues=positive_eigenvalues,
+        rcond=rcond_value,
+    )
+
+    projected_target = geometry.project_to_range(target_moment)
+    range_residual = torch.linalg.vector_norm(target_moment - projected_target)
+    target_scale = max(1.0, float(torch.linalg.vector_norm(target_moment).item()))
+    range_tolerance = 32.0 * rcond_value * target_scale
+    if float(range_residual.item()) > range_tolerance:
+        raise ValueError(
+            "target_moment must lie in Range(fisher_matrix); otherwise the "
+            "local policy objective is unbounded along a Fisher-null direction"
+        )
+    return geometry
+
+
+def _validate_positive_scalar(name: str, value: float, *, allow_zero: bool) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0 or (not allow_zero and result == 0.0):
+        qualifier = "non-negative" if allow_zero else "strictly positive"
+        raise ValueError(f"{name} must be finite and {qualifier}")
+    return result
+
+
+def _checked_nonnegative(
+    value: torch.Tensor,
+    *,
+    name: str,
+    scale: float,
+) -> torch.Tensor:
+    if value.ndim != 0 or not bool(torch.isfinite(value)):
+        raise FloatingPointError(f"{name} must be a finite scalar")
+    tolerance = 64.0 * torch.finfo(value.dtype).eps * max(1.0, scale)
+    if float(value.item()) < -tolerance:
+        raise FloatingPointError(f"{name} is negative beyond numerical tolerance")
+    return value.clamp_min(0.0)
+
+
+def fixed_beta_deployed_direction_regret(
+    fisher_matrix: torch.Tensor,
+    target_moment: torch.Tensor,
+    deployed_direction: torch.Tensor,
+    *,
+    beta: float,
+    rcond: float | None = None,
+) -> FixedBetaLocalResult:
+    """Evaluate a deployed displacement for the fixed-``beta`` local objective.
+
+    This function evaluates the actual displacement supplied by the caller:
+
+    ``G_*(delta) = g_*.T delta - beta * delta.T F delta / 2``.
+
+    It is deliberately distinct from fixed-K normalization.  The minimum-norm
+    target optimum is ``F^dagger g_* / beta``.  A singular Fisher is supported
+    when ``g_*`` lies in its range; otherwise the quadratic objective is
+    unbounded and the function rejects the input.
+    """
+
+    beta_value = _validate_positive_scalar("beta", beta, allow_zero=False)
+    geometry = _validate_dense_local_geometry(
+        fisher_matrix,
+        target_moment,
+        deployed_direction,
+        rcond=rcond,
+    )
+    effective_deployed = geometry.project_to_range(deployed_direction)
+    target_natural_direction = geometry.pseudoinverse_matvec(target_moment)
+    target_optimal_direction = target_natural_direction / beta_value
+
+    fisher_deployed = geometry.fisher_matrix @ effective_deployed
+    fisher_optimal = geometry.fisher_matrix @ target_optimal_direction
+    deployed_quadratic = _checked_nonnegative(
+        0.5 * torch.dot(effective_deployed, fisher_deployed),
+        name="deployed quadratic KL",
+        scale=float(torch.linalg.vector_norm(effective_deployed).item()) ** 2,
+    )
+    optimal_quadratic = _checked_nonnegative(
+        0.5 * torch.dot(target_optimal_direction, fisher_optimal),
+        name="optimal quadratic KL",
+        scale=float(torch.linalg.vector_norm(target_optimal_direction).item()) ** 2,
+    )
+    deployed_utility = (
+        torch.dot(target_moment, effective_deployed) - beta_value * deployed_quadratic
+    )
+    optimal_utility = 0.5 * torch.dot(target_moment, target_natural_direction) / beta_value
+    if not bool(torch.isfinite(deployed_utility)) or not bool(torch.isfinite(optimal_utility)):
+        raise FloatingPointError("fixed-beta local utilities must be finite")
+    regret = _checked_nonnegative(
+        optimal_utility - deployed_utility,
+        name="fixed-beta local regret",
+        scale=max(abs(float(optimal_utility.item())), abs(float(deployed_utility.item()))),
+    )
+    return FixedBetaLocalResult(
+        beta=beta_value,
+        effective_deployed_direction=effective_deployed,
+        target_optimal_direction=target_optimal_direction,
+        deployed_target_utility=deployed_utility,
+        optimal_target_utility=optimal_utility,
+        regret=regret,
+        deployed_quadratic_kl=deployed_quadratic,
+        optimal_quadratic_kl=optimal_quadratic,
+    )
+
+
+def fixed_k_normalized_local_regret(
+    fisher_matrix: torch.Tensor,
+    target_moment: torch.Tensor,
+    deployed_direction: torch.Tensor,
+    *,
+    kappa: float,
+    rcond: float | None = None,
+) -> FixedKNormalizedLocalResult:
+    """Evaluate a deployed ray after Fisher normalization to budget ``kappa``.
+
+    For a nonzero deployed ray ``d``, the effective displacement is
+
+    ``sqrt(2 kappa / (d.T F d)) * d``.
+
+    The target comparator independently solves the same constrained local
+    problem.  Consequently this regret is invariant to positive rescaling of
+    the deployed ray and is generally *not* the fixed-beta quadratic regret.
+    A zero-Fisher-norm deployed ray deterministically means no effective update;
+    a zero target moment has zero optimal improvement and zero regret.
+    """
+
+    kappa_value = _validate_positive_scalar("kappa", kappa, allow_zero=True)
+    geometry = _validate_dense_local_geometry(
+        fisher_matrix,
+        target_moment,
+        deployed_direction,
+        rcond=rcond,
+    )
+    effective_ray = geometry.project_to_range(deployed_direction)
+    target_natural_direction = geometry.pseudoinverse_matvec(target_moment)
+    fisher_ray = geometry.fisher_matrix @ effective_ray
+    fisher_target = geometry.fisher_matrix @ target_natural_direction
+    ray_squared_norm = _checked_nonnegative(
+        torch.dot(effective_ray, fisher_ray),
+        name="deployed Fisher squared norm",
+        scale=float(torch.linalg.vector_norm(effective_ray).item()) ** 2,
+    )
+    target_squared_norm = _checked_nonnegative(
+        torch.dot(target_natural_direction, fisher_target),
+        name="target Fisher squared norm",
+        scale=float(torch.linalg.vector_norm(target_natural_direction).item()) ** 2,
+    )
+
+    raw_ray_norm = float(torch.linalg.vector_norm(deployed_direction).item())
+    effective_ray_norm = float(torch.linalg.vector_norm(effective_ray).item())
+    deployed_is_zero = raw_ray_norm == 0.0 or (
+        effective_ray_norm <= 32.0 * geometry.rcond * raw_ray_norm
+    )
+    # Scale invariance requires every nonzero target moment in the identifiable
+    # range to remain nonzero, however small its cardinal reward scale is.
+    target_is_zero = not bool(torch.count_nonzero(target_moment))
+
+    if kappa_value == 0.0 or deployed_is_zero:
+        normalized_deployed = torch.zeros_like(effective_ray)
+    else:
+        deployed_scale = math.sqrt(2.0 * kappa_value / float(ray_squared_norm.item()))
+        normalized_deployed = effective_ray * deployed_scale
+
+    if kappa_value == 0.0 or target_is_zero:
+        target_optimal_direction = torch.zeros_like(target_natural_direction)
+    else:
+        target_scale = math.sqrt(2.0 * kappa_value / float(target_squared_norm.item()))
+        target_optimal_direction = target_natural_direction * target_scale
+
+    deployed_quadratic = _checked_nonnegative(
+        0.5
+        * torch.dot(
+            normalized_deployed,
+            geometry.fisher_matrix @ normalized_deployed,
+        ),
+        name="deployed quadratic KL",
+        scale=max(1.0, 2.0 * kappa_value),
+    )
+    optimal_quadratic = _checked_nonnegative(
+        0.5
+        * torch.dot(
+            target_optimal_direction,
+            geometry.fisher_matrix @ target_optimal_direction,
+        ),
+        name="optimal quadratic KL",
+        scale=max(1.0, 2.0 * kappa_value),
+    )
+    deployed_improvement = torch.dot(target_moment, normalized_deployed)
+    optimal_improvement = torch.dot(target_moment, target_optimal_direction)
+    if not bool(torch.isfinite(deployed_improvement)) or not bool(
+        torch.isfinite(optimal_improvement)
+    ):
+        raise FloatingPointError("fixed-K local improvements must be finite")
+    regret = _checked_nonnegative(
+        optimal_improvement - deployed_improvement,
+        name="fixed-K normalized local regret",
+        scale=max(
+            abs(float(optimal_improvement.item())),
+            abs(float(deployed_improvement.item())),
+        ),
+    )
+
+    if deployed_is_zero or target_is_zero:
+        cosine = torch.full(
+            (),
+            float("nan"),
+            dtype=target_moment.dtype,
+            device=target_moment.device,
+        )
+    else:
+        cosine = (
+            torch.dot(effective_ray, fisher_target)
+            / torch.sqrt(ray_squared_norm * target_squared_norm)
+        ).clamp(min=-1.0, max=1.0)
+    return FixedKNormalizedLocalResult(
+        kappa=kappa_value,
+        normalized_deployed_direction=normalized_deployed,
+        target_optimal_direction=target_optimal_direction,
+        deployed_target_improvement=deployed_improvement,
+        optimal_target_improvement=optimal_improvement,
+        regret=regret,
+        deployed_quadratic_kl=deployed_quadratic,
+        optimal_quadratic_kl=optimal_quadratic,
+        fisher_cosine=cosine,
+        deployed_direction_has_zero_fisher_norm=deployed_is_zero,
+        target_moment_is_zero=target_is_zero,
+    )
+
+
 def natural_direction_metrics(
     score_matrix: torch.Tensor,
     predicted_rewards: torch.Tensor,
@@ -550,8 +901,12 @@ def natural_direction_metrics(
 
 
 __all__ = [
+    "FixedBetaLocalResult",
+    "FixedKNormalizedLocalResult",
     "NaturalDirectionMetrics",
     "empirical_fisher_matrix",
+    "fixed_beta_deployed_direction_regret",
+    "fixed_k_normalized_local_regret",
     "gauge_center",
     "local_regret",
     "natural_direction",

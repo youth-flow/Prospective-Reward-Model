@@ -165,26 +165,26 @@ def select_causal_response_logits(
     return SelectedResponseLogits(selected, sequence_indices, batch_size)
 
 
-def selected_causal_forward_kl(
-    reference: SelectedResponseLogits,
-    updated: SelectedResponseLogits,
+def _selected_causal_kl_per_sequence(
+    numerator: SelectedResponseLogits,
+    denominator: SelectedResponseLogits,
     *,
     token_chunk_size: int = 8,
 ) -> torch.Tensor:
-    """Compute exact vocabulary KL in small chunks of selected token rows."""
+    """Compute per-sequence exact KL in small chunks of selected token rows."""
 
-    if not isinstance(reference, SelectedResponseLogits) or not isinstance(
-        updated, SelectedResponseLogits
+    if not isinstance(numerator, SelectedResponseLogits) or not isinstance(
+        denominator, SelectedResponseLogits
     ):
-        raise TypeError("reference and updated must be SelectedResponseLogits")
-    if reference.logits.shape != updated.logits.shape:
-        raise ValueError("reference and updated selected logits must share shape")
-    if reference.logits.device != updated.logits.device:
-        raise ValueError("reference and updated selected logits must share a device")
-    if reference.batch_size != updated.batch_size or not torch.equal(
-        reference.sequence_indices, updated.sequence_indices
+        raise TypeError("numerator and denominator must be SelectedResponseLogits")
+    if numerator.logits.shape != denominator.logits.shape:
+        raise ValueError("numerator and denominator selected logits must share shape")
+    if numerator.logits.device != denominator.logits.device:
+        raise ValueError("numerator and denominator selected logits must share a device")
+    if numerator.batch_size != denominator.batch_size or not torch.equal(
+        numerator.sequence_indices, denominator.sequence_indices
     ):
-        raise ValueError("reference and updated response positions must be identical")
+        raise ValueError("numerator and denominator response positions must be identical")
     if (
         isinstance(token_chunk_size, bool)
         or not isinstance(token_chunk_size, int)
@@ -194,37 +194,93 @@ def selected_causal_forward_kl(
 
     compute_dtype = (
         torch.float64
-        if reference.logits.dtype == torch.float64 and updated.logits.dtype == torch.float64
+        if numerator.logits.dtype == torch.float64 and denominator.logits.dtype == torch.float64
         else torch.float32
     )
     sequence_kl = torch.zeros(
-        reference.batch_size,
+        numerator.batch_size,
         dtype=compute_dtype,
-        device=reference.logits.device,
+        device=numerator.logits.device,
     )
-    for start in range(0, reference.logits.shape[0], token_chunk_size):
-        stop = min(start + token_chunk_size, reference.logits.shape[0])
-        reference_chunk = reference.logits[start:stop].to(compute_dtype)
-        updated_chunk = updated.logits[start:stop].to(compute_dtype)
-        if not bool(torch.isfinite(reference_chunk).all()) or not bool(
-            torch.isfinite(updated_chunk).all()
+    for start in range(0, numerator.logits.shape[0], token_chunk_size):
+        stop = min(start + token_chunk_size, numerator.logits.shape[0])
+        numerator_chunk = numerator.logits[start:stop].to(compute_dtype)
+        denominator_chunk = denominator.logits[start:stop].to(compute_dtype)
+        if not bool(torch.isfinite(numerator_chunk).all()) or not bool(
+            torch.isfinite(denominator_chunk).all()
         ):
             raise ValueError("selected logits must be finite")
-        reference_log_probs = reference_chunk.log_softmax(dim=-1)
-        updated_log_probs = updated_chunk.log_softmax(dim=-1)
-        token_kl = (reference_log_probs.exp() * (reference_log_probs - updated_log_probs)).sum(
+        numerator_log_probs = numerator_chunk.log_softmax(dim=-1)
+        denominator_log_probs = denominator_chunk.log_softmax(dim=-1)
+        token_kl = (numerator_log_probs.exp() * (numerator_log_probs - denominator_log_probs)).sum(
             dim=-1
         )
         sequence_kl.index_add_(
             0,
-            reference.sequence_indices[start:stop],
+            numerator.sequence_indices[start:stop],
             token_kl,
         )
-    value = sequence_kl.mean()
-    tolerance = 64.0 * torch.finfo(value.dtype).eps
-    if float(value.item()) < -tolerance:
+    tolerance = 64.0 * torch.finfo(sequence_kl.dtype).eps
+    if float(sequence_kl.min().item()) < -tolerance:
         raise FloatingPointError("measured forward KL is numerically negative")
-    return value.clamp_min(0.0)
+    return sequence_kl.clamp_min(0.0)
+
+
+def selected_causal_forward_kl(
+    reference: SelectedResponseLogits,
+    updated: SelectedResponseLogits,
+    *,
+    token_chunk_size: int = 8,
+) -> torch.Tensor:
+    """Compute mean sequence ``KL(pi_reference || pi_updated)``."""
+
+    return _selected_causal_kl_per_sequence(
+        reference,
+        updated,
+        token_chunk_size=token_chunk_size,
+    ).mean()
+
+
+def selected_causal_updated_to_reference_kl_per_sequence(
+    updated: SelectedResponseLogits,
+    reference: SelectedResponseLogits,
+    *,
+    token_chunk_size: int = 8,
+) -> torch.Tensor:
+    """Return one ``KL(pi_updated || pi_reference)`` sum per sequence.
+
+    The vector has shape ``(batch_size,)`` and retains the logits' device.  It
+    is suitable for prompt-level reward-minus-beta-KL aggregation.  It is an
+    on-policy Monte Carlo quantity only when histories come from ``updated``.
+    """
+
+    return _selected_causal_kl_per_sequence(
+        updated,
+        reference,
+        token_chunk_size=token_chunk_size,
+    )
+
+
+def selected_causal_updated_to_reference_kl(
+    updated: SelectedResponseLogits,
+    reference: SelectedResponseLogits,
+    *,
+    token_chunk_size: int = 8,
+) -> torch.Tensor:
+    """Compute ``KL(pi_updated || pi_reference)`` on selected histories.
+
+    The token KLs are summed within each sequence and the sequence totals are
+    averaged across the batch.  This is an on-policy Monte Carlo estimate of
+    ``KL(pi_updated || pi_reference)`` only when the selected histories were
+    sampled from ``pi_updated``.  The source of those histories cannot be
+    inferred from logits and is therefore an explicit caller responsibility.
+    """
+
+    return selected_causal_updated_to_reference_kl_per_sequence(
+        updated,
+        reference,
+        token_chunk_size=token_chunk_size,
+    ).mean()
 
 
 def masked_causal_forward_kl(
@@ -254,6 +310,65 @@ def masked_causal_forward_kl(
     return selected_causal_forward_kl(
         reference,
         updated,
+        token_chunk_size=token_chunk_size,
+    )
+
+
+def masked_causal_updated_to_reference_kl(
+    updated_logits: torch.Tensor,
+    reference_logits: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    token_chunk_size: int = 8,
+) -> torch.Tensor:
+    """Compute sequence ``KL(pi_updated || pi_reference)`` on given histories.
+
+    ``response_mask`` marks response tokens, including EOS when EOS is part of
+    the sampled response.  At every corresponding causal prediction position,
+    this computes the exact vocabulary KL from the updated distribution to the
+    reference distribution.  Token KLs are summed per sequence and sequence
+    totals are averaged over the batch.
+
+    To estimate the on-policy divergence
+    ``E_{y ~ pi_updated} sum_t KL(pi_updated(.|h_t) || pi_reference(.|h_t))``,
+    callers must supply histories sampled from ``pi_updated`` and evaluate both
+    policies on those same histories.  Histories sampled from the reference
+    policy do not estimate that quantity.
+    """
+
+    return masked_causal_updated_to_reference_kl_per_sequence(
+        updated_logits,
+        reference_logits,
+        response_mask,
+        token_chunk_size=token_chunk_size,
+    ).mean()
+
+
+def masked_causal_updated_to_reference_kl_per_sequence(
+    updated_logits: torch.Tensor,
+    reference_logits: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    token_chunk_size: int = 8,
+) -> torch.Tensor:
+    """Return per-sequence updated-to-reference KL on the supplied histories.
+
+    Histories must be sampled from the updated policy for this vector to be an
+    on-policy Monte Carlo estimate.  Both policies must be evaluated on those
+    exact same token histories.
+    """
+
+    if not isinstance(updated_logits, torch.Tensor) or not isinstance(
+        reference_logits, torch.Tensor
+    ):
+        raise TypeError("logits must be torch.Tensor objects")
+    if updated_logits.shape != reference_logits.shape:
+        raise ValueError("logits must share shape (batch, sequence_length, vocabulary_size)")
+    updated = select_causal_response_logits(updated_logits, response_mask)
+    reference = select_causal_response_logits(reference_logits, response_mask)
+    return selected_causal_updated_to_reference_kl_per_sequence(
+        updated,
+        reference,
         token_chunk_size=token_chunk_size,
     )
 
@@ -387,8 +502,12 @@ __all__ = [
     "fisher_quadratic",
     "line_search_measured_kl",
     "masked_causal_forward_kl",
+    "masked_causal_updated_to_reference_kl",
+    "masked_causal_updated_to_reference_kl_per_sequence",
     "select_causal_response_logits",
     "selected_causal_forward_kl",
+    "selected_causal_updated_to_reference_kl",
+    "selected_causal_updated_to_reference_kl_per_sequence",
     "set_tangent_update_",
     "step_size_for_kl_budget",
     "unflatten_tangent_vector",

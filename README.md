@@ -29,12 +29,34 @@ therefore an ideal target, not a separately implemented baseline or an ablation 
 Python package retain `Smart-Reward-Model` and `smart_reward` as compatibility infrastructure; public
 method terminology is ProRM/ProRM+.
 
+## Estimand contract
+
+The repository separates three questions that must not be collapsed into one metric:
+
+| Role | Estimand | What it preserves |
+|---|---|---|
+| **Primary** | Fixed-`beta` ProRM regret, with the same `beta` for every reward model | Direction angle **and** natural-gradient norm calibration |
+| **Secondary** | Fixed-`K` constrained regret and Fisher cosine | Direction angle after each method is normalized to the same local KL radius |
+| **Transfer endpoint** | Finite policy rollout under a declared update rule | Whether local geometry survives an actual policy update |
+
+For `u_r=F_0^\dagger A_0r`, the primary estimand is
+
+$$
+\mathcal R_\beta(r_\phi)
+=\frac{1}{2\beta}\|u_{r_\phi}-u_*\|_{F_0}^2.
+$$
+
+At a fixed local KL radius `K`, the constrained update normalizes
+`u_r` by its own Fisher norm, and its target-reward regret is proportional to
+`1-cos_F(u_r,u_*)`. Fixed-`K` matching therefore discards norm-calibration error and is a useful
+secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
+
 ## Current status
 
 | Item | Status |
 |---|---|
 | Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
-| Automated test suite | Implemented; synthetic runs validate the pipeline, not an effect claim |
+| Automated test suite | `334 passed, 2 skipped` locally; synthetic runs validate the pipeline, not an effect claim |
 | Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
@@ -46,6 +68,7 @@ method terminology is ProRM/ProRM+.
 | Five-seed accepted main experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
 | Formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
+| Post-Phase-1 repair | Fixed-`beta`/fixed-`K` and optimization audits, common-`beta` primitives, policy-to-reference KL, oracle-direction and `R=4` label primitives implemented; new HPC4 campaign not yet run |
 
 The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
 manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
@@ -57,12 +80,12 @@ five-seed campaign. The replacement campaign completed without numerical failure
 All differences below are `ProRM+ − BT-MLE`. The intervals are paired-bootstrap engineering decision
 intervals over the five locked seeds, not population confidence intervals or p-values.
 
-| Primary metric | Favorable sign | Paired mean | 95% engineering interval | Gate |
-|---|---:|---:|---:|---|
-| Held-out local regret | `< 0` | `-0.0091789` | `[-0.0765277, 0.0615383]` | Fail |
-| Squared Fisher direction error | `< 0` | `-0.0183622` | `[-0.1529629, 0.1230318]` | Fail |
-| Fisher cosine | `> 0` | `+0.0416380` | `[-0.0529131, 0.1316971]` | Pass under the locked mean-sign rule |
-| Matched-KL rollout improvement | `> 0` | `-0.0037335` | `[-0.0074192, -0.0006188]` | Fail |
+| Preregistered metric | Estimand role | Favorable sign | Paired mean | 95% engineering interval | Gate |
+|---|---|---:|---:|---:|---|
+| Held-out local regret | Fixed-`beta` primary | `< 0` | `-0.0091789` | `[-0.0765277, 0.0615383]` | Fail |
+| Squared Fisher direction error | Fixed-`beta` geometry | `< 0` | `-0.0183622` | `[-0.1529629, 0.1230318]` | Fail |
+| Fisher cosine | Fixed-`K` secondary | `> 0` | `+0.0416380` | `[-0.0529131, 0.1316971]` | Pass under the locked mean-sign rule |
+| Matched-KL rollout improvement | Fixed-`K` transfer | `> 0` | `-0.0037335` | `[-0.0074192, -0.0006188]` | Fail |
 
 The campaign is an engineering success and a valid negative scientific result. ProRM+ has slightly
 favorable mean local-regret and Fisher-error estimates, but they are heterogeneous across seeds and their
@@ -70,6 +93,25 @@ intervals cross zero. Its matched-KL rollout difference is unfavorable and the e
 lies below zero. The repository therefore does **not** claim that ProRM+ outperforms BT-MLE under this
 locked Phase-1 setting. Exact identities, per-seed values, sensitivity evidence and interpretation are in
 [docs/phase1_results.md](docs/phase1_results.md).
+
+This estimand clarification does not reopen the experiment: the authoritative Phase-1 status remains
+`not_passed`.
+
+One additional finite-sample audit is decisive. Under the locked
+`gamma=0.9` estimator and `p in [0.25,0.75]`,
+`sd(h | p)` ranges from approximately `0.841` to `0.935`; the Phase-1
+train-only node-centered oracle RMS is only about `0.24`. Unbiasedness is
+therefore intact, but one randomized estimate per edge has low signal-to-noise.
+The next design includes an exact-margin positive control and averages four
+independent `gamma=0.9` estimates per pair. The average remains exactly
+unbiased and halves conditional standard deviation; labels are never clipped
+or silently truncated.
+
+The original `128`-token horizon was also active for roughly `74%–80%` of
+accepted candidates. Those are valid samples from the declared capped action
+space, but they limit external validity. The new design uses a frozen
+`256`-token horizon and reports EOS, length-limit rate and token-length
+distributions separately for every policy arm.
 
 ## 1. From future policy utility to a reward-model loss
 
@@ -83,6 +125,12 @@ $$
 D_{\mathrm{KL}}(\pi_\theta(\cdot|x)\Vert\pi_0(\cdot|x))
 \right\}.
 $$
+
+The theoretical regularizer is explicitly **policy-to-reference**,
+`KL(pi_theta || pi_0)`. The locked Phase-1 line search instead measures
+**reference-to-updated** `KL(pi_0 || pi_updated)` on fixed reference histories. The two orientations
+share the same Fisher expansion at `pi_0`, but they are not equal at a finite step; the Phase-1 quantity
+is therefore an operational fixed-`K` budget, not the exact finite-step theoretical regularizer.
 
 The globally correct reward-model criterion is the target-reward utility lost because the optimizer was
 given `r_phi` rather than `r*`. That definition is prospective but bilevel and unobservable. ProRM is its
@@ -259,9 +307,9 @@ MultiPref prompts
                                                   |          |
                                                BT-MLE      ProRM+
                                                   \          /
-                                           held-out geometry
+                                           held-out re-solve geometry
                                                     |
-                                      matched measured-KL rollouts
+                                  deployed train direction + rollouts
 ```
 
 | Component | Locked design |
@@ -278,13 +326,19 @@ MultiPref prompts
 | Reward optimization | FP32 head/gradient/AdamW; one explicit FP64-to-FP32 envelope-weight cast |
 | PCG gate | True relative residual `1e-5`; main cap `8192`, smoke cap `2048` |
 | Training | 720 fixed steps; identical optimization budget |
-| Evaluation | Held-out Fisher geometry plus measured sequence-KL `0.01 ± 5%` rollout |
+| Evaluation | Held-out re-solved Fisher geometry plus deployed train-direction, measured sequence-KL `0.01 ± 5%` rollout |
 | Statistics | Five paired seeds; fixed main damping plus two sensitivity settings |
 
 The capacity bottleneck does not logically guarantee misspecification. The immutable artifact therefore
 records a train-only, prompt-centered linear projection residual under
 `train_reward_class_projection`. It is descriptive mechanism evidence and cannot select a checkpoint,
 damping or conclusion.
+
+Held-out geometry and rollout do not use the same solved vector. With a frozen learned head, held-out
+metrics recompute both predicted and target directions from that split's moment, Fisher and damping.
+The policy rollout instead deploys the direction solved only from train moment/Fisher; test geometry
+never re-solves or modifies it. A difference between held-out ordering and rollout ordering is therefore
+a transfer failure, not an inconsistency in one direction.
 
 ## 5. Evidence required for a positive result
 
@@ -314,6 +368,54 @@ not a population confidence interval or p-value.
 
 The completed campaign has preregistered status `not_passed`; no positive mechanism claim is made.
 
+### Next experiment: common-beta deployment
+
+The next experiment has a new design identity. For each seed, define the
+train-only damped oracle natural direction
+
+$$
+u_*^{\mathrm{tr}}
+=(F_{\mathrm{tr}}+\lambda I)^{-1}g_*^{\mathrm{tr}},
+$$
+
+and freeze
+
+$$
+\boxed{
+\beta_{\mathrm{common}}
+=
+\sqrt{
+\frac{(u_*^{\mathrm{tr}})^\top F_{\mathrm{tr}}u_*^{\mathrm{tr}}}
+{2K_{\mathrm{cal}}}
+}},
+\qquad K_{\mathrm{cal}}=0.003.
+$$
+
+This produces one seed-specific scalar shared by every policy arm; it is not a
+learner-specific beta. The primary chain is:
+
+1. use only train operational-oracle rewards and train Fisher to calibrate one
+   `beta_common` by the formula above;
+2. freeze that value before reading validation/test oracle metrics;
+3. deploy `u_BT/beta_common` and `u_ProRM+/beta_common` directly, with no learner-specific line search
+   or norm normalization, and deploy `u_oracle/beta_common` as a positive control;
+4. estimate `KL(pi_updated || pi_0)` on trajectories sampled from each updated policy and evaluate
+   `J*=E[r*]-beta_common*KL(pi_updated || pi_0)`; retain fixed-history
+   `KL(pi_0 || pi_updated)` only as a secondary diagnostic;
+5. apply a prespecified measured policy-to-reference KL safety cap of `0.02`; a violation fails closed
+   and never retunes beta;
+6. treat fixed-`beta` regret and common-`beta` target utility as primary, while fixed-`K` constrained regret,
+   Fisher cosine and matched-KL rollout remain secondary diagnostics.
+
+`K_cal=0.001` and `0.01` are scale-sensitivity arms, not alternative primary endpoints. Candidate KL is
+kept per sequence, candidates are averaged within prompt, and uncertainty is computed over prompt
+clusters and seeds. The existing five seeds are used only for a clearly labeled post-Phase-1 estimand
+audit. A confirmatory claim requires a frozen fresh ten-seed run after the oracle/exact-margin positive
+controls pass. Its noisy-label primary arm averages four independent `gamma=0.9` unbiased `h`
+replicates per pair; an all-six-pairs arm reuses the four already generated candidates as a prompt-level
+U-statistic. BT-MLE receives every underlying Bernoulli label in the corresponding arm. This design does
+not modify or supersede the locked Phase-1 `not_passed` result.
+
 ## 6. Local verification
 
 ```bash
@@ -322,6 +424,9 @@ prorm config-check configs/smoke.yaml
 prorm config-check configs/main.yaml
 prorm closed-form-check --output outputs/closed-form.json
 prorm synthetic-check --seed 0 --output outputs/synthetic.json
+# With downloaded Phase-1 artifacts:
+# prorm estimand-audit CONFIG ARTIFACT COMPARISON ROLLOUT OUTPUT --seed SEED
+# prorm optimization-audit CONFIG ARTIFACT COMPARISON OUTPUT --seed SEED
 pytest -q
 ruff check .
 ruff format --check .

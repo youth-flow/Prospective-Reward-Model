@@ -305,6 +305,11 @@ def test_closed_form_check_writes_complete_audit(
     assert payload["natural_q0_identity"] is True
     assert payload["three_edge_identity"] is False
     assert payload["population_example_only"] is True
+    assert payload["fixed_k_estimand_audit"]["directions_equal"] is True
+    assert payload["fixed_k_estimand_audit"]["regrets_equal"] is True
+    assert payload["fixed_k_estimand_audit"]["bt_theta"] == pytest.approx(
+        payload["fixed_k_estimand_audit"]["prorm_theta"]
+    )
     assert [row["beta"] for row in payload["beta_grid_local_approximation"]] == [
         4.0,
         8.0,

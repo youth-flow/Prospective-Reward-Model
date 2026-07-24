@@ -55,6 +55,35 @@ experiment。代码和 synthetic benchmark 通过只说明实现自洽，不构�
 “保留 sensitivity failure”不表示忽略失败：它必须写入 `damping_evidence`，并使预注册主结论
 不通过。这样既不丢失负面数值证据，也不把失败 seed 静默排除后聚合。
 
+### 1.2 Estimand 与 KL 方向契约
+
+本协议涉及三个相关但不同的对象：
+
+| 层级 | 定义 | 作用 |
+|---|---|---|
+| 主 estimand | 所有 reward model 共用同一 `beta` 的 ProRM local regret | 同时评价 natural direction 的角度和范数校准 |
+| 次级 estimand | 每个 direction 归一化到同一局部 KL 半径 `K` 后的 constrained regret / Fisher cosine | 只评价 fixed-K 边界上的方向角度 |
+| finite-update endpoint | 对真正更新后 policy 做 operational-oracle rollout | 检验局部几何能否传递到有限更新 |
+
+固定 `beta` 的主 estimand 是
+
+$$
+\mathcal R_\beta(r_\phi)
+=\frac{1}{2\beta}
+\|A_0(r_\phi-r^*)\|_{F_0^\dagger}^2.
+$$
+
+固定 `K` 时，每个 natural direction 都被自身 Fisher norm 归一化；对应 constrained regret
+与 `1-\cos_F` 成正比。因此 fixed-K/cosine 是有意义的次级机制指标，但不能替代 ProRM
+主 estimand。
+
+理论 policy objective 中的正则项方向是
+$D_{\mathrm{KL}}(\pi_\theta\Vert\pi_0)$。锁定 Phase 1 line search 实测的是固定
+reference histories 上的
+$D_{\mathrm{KL}}(\pi_0\Vert\pi_{\alpha d})$。它们在 zero-B reference 处共享同一 Fisher
+二阶项，有限步长下并不相等。Phase 1 的 matched-KL rollout 因此严格解释为 code-locked
+fixed-K transfer test；这一澄清不改变冻结协议、已有数值或 `not_passed` 判定。
+
 ## 2. 预注册身份
 
 ### 2.1 Main config
@@ -340,14 +369,14 @@ $$
 $\lambda=c\operatorname{mean}(\operatorname{diag}F)$，并继承同一
 `pcg_dtype/tolerance/cap/true-residual` contract。主指标为：
 
-1. held-out ridge local regret
+1. **fixed-beta 主 estimand**：held-out ridge local regret
 
    $$
    \frac1{2\beta}m_{error}^\top(F+\lambda I)^{-1}m_{error};
    $$
 
 2. predicted/target damped natural direction 之间的 undamped-Fisher squared error；
-3. 同两方向的 Fisher cosine。
+3. **fixed-K 次级 estimand**：同两方向的 Fisher cosine。
 
 Fisher cosine 定义为
 
@@ -358,6 +387,18 @@ $$
 
 若任一方向的 Fisher norm 为零，该指标未定义；内部 NaN 在 JSON 中记录为 `null`，聚合器随后
 拒绝该输入。不得加 epsilon 伪造 cosine，对应 seed/criterion 必须失败。
+
+这些 metric 是 **held-out re-solve**：reward head 保持冻结，但 evaluator 分别用 validation
+或 test 的 moment、node Fisher 和 split-specific damping 重新求解 predicted/target
+directions，
+
+$$
+u_\phi^H=(F_H+\lambda_HI)^{-1}g_\phi^H,\qquad
+u_*^H=(F_H+\lambda_HI)^{-1}g_*^H.
+$$
+
+它们不是下一阶段真正写入 policy 的 train direction。不得把 test re-solved direction
+用于 rollout 或反向调整训练 head。
 
 Prediction diagnostics 对四 candidates 的全部无序 pair 计算。令
 
@@ -386,11 +427,16 @@ local regret/direction。它们用于检验“preference fit 与 downstream poli
 ## 8. Phase 1E：matched measured-KL rollout
 
 只使用主阻尼 `c=1e-3` 的两个训练后 head。由 train 的全部四 candidate 在同一 FP64
-policy geometry 中构造
+policy geometry 中构造实际部署方向
 
 $$
-d_\phi=\beta^{-1}(F_{train}+\lambda I)^{-1}\widehat g_{r_\phi}.
+d_\phi^{deploy}
+=\beta^{-1}(F_{train}+\lambda I)^{-1}\widehat g_{r_\phi}^{train}.
 $$
+
+该方向在读取任何 test moment/Fisher 之前已经由 train quantities 唯一确定。Phase 1E
+不会在 held-out split 上重新求解 direction；上一节的 held-out re-solve 只是一组 geometry
+diagnostics。
 
 重新加载相同 revision、相同 named seed 的 fixed-A/zero-B Qwen，并验证 A SHA256、B layout
 和 chat-template SHA256 与 artifact 一致。KL probe 是 train 保存 candidate 的共享、
@@ -399,13 +445,18 @@ $$
 Fisher approximation 以 FP64 `d/F` 给出 `sqrt(2*kappa/(d^T F d))` 作为 line-search 初值，
 但不得用于接受更新。direction 仅在真正写入 FP32 LoRA-B parameter 时按 parameter dtype
 转换。每个 trial 从 zero-B 坐标原点覆盖 `alpha*d`，并在保存的完整 token history 上
-计算全 vocabulary 的 **sequence-level** forward KL：
+计算全 vocabulary 的 **reference-to-updated sequence-level KL**：
 
 $$
 \widehat{KL}=\frac1B\sum_{b=1}^{B}\sum_{t\in response_b}
 KL\!\left(\pi_0(\cdot\mid h_t)\,\|\,
 \pi_{\alpha d}(\cdot\mid h_t)\right).
 $$
+
+参数顺序明确为 reference-to-updated：
+$D_{\mathrm{KL}}(\pi_0\Vert\pi_{\alpha d})$。它不是理论正则项
+$D_{\mathrm{KL}}(\pi_{\alpha d}\Vert\pi_0)$ 的有限步长无偏估计；两者只在 reference
+附近共享二阶 Fisher。
 
 即每个 response 内先对 token 求和，再对 batch 中 sequence 求均值；禁止除以总 response
 token 数。这样 `kappa=0.01` 与 sequence log-prob score/Fisher 的尺度一致。
@@ -615,3 +666,83 @@ objective。该阶段检验现实鲁棒性，不证明 Phase 1 的 population th
 锁定的 Phase 1 结果为 `not_passed`，因此 CoVal 不作为本协议的 confirmatory continuation
 启动。后续 CoVal、容量扩大或新 KL 预算实验必须明确标为 exploratory，或以新的 design identity
 重新预注册。
+
+## 13. 下一实验规格概要：common-beta + train-only oracle
+
+下一实验必须建立新 design identity；它不追加、覆盖或重新聚合 Phase 1。核心变化是把
+fixed-beta ProRM 对齐为主 deployment，而把 matched-KL 保留为次级分析。
+
+1. **Train-only calibration。** 只用 train operational-oracle rewards、train candidate
+   graph 与 train Fisher 构造
+   $u_*^{tr}=(F_{\rm train}+\lambda I)^{-1}g_*^{tr}$。主尺度固定
+   `K_cal=0.003`，并解析设定
+
+   $$
+   \beta_{\rm common}
+   =
+   \sqrt{
+   \frac{(u_*^{tr})^\top F_{\rm train}u_*^{tr}}
+   {2K_{\rm cal}}
+   }.
+   $$
+
+   这是“每个 seed 一个、所有 policy arms 共享”的 scalar；校准规则跨 seed 固定，实际值允许
+   随 train sample 改变。选择过程不得读取 validation/test oracle reward、held-out geometry
+   或 rollout。
+2. **一个共同 beta。** `beta_common` 在 learner 训练结果和 held-out endpoint 打开前冻结，
+   并对 BT-MLE、ProRM+ 和 oracle calibration direction 完全相同。禁止为两个 learner
+   分别 line-search、分别选择 beta 或按各自 norm 归一化。
+3. **Train direction 直接部署。**
+
+   $$
+   d_\ell^{deploy}
+   =\frac1{\beta_{\mathrm{common}}}
+   (F_{\mathrm{train}}+\lambda I)^{-1}g_{\ell}^{\mathrm{train}},
+   \qquad \ell\in\{\mathrm{BT},\mathrm{ProRM+}\}.
+   $$
+
+   test Fisher/moment 不进入该式。
+4. **KL 只测量，不回调。** 每个 updated policy 生成自己的 trajectories，在这些 histories
+   上逐 token 计算完整 vocabulary
+   $D_{\mathrm{KL}}(\pi_{d_\ell}(\cdot|h)\Vert\pi_0(\cdot|h))$，按 sequence 求和并保留
+   per-sequence 值；它进入
+
+   $$
+   J_\ell^*=\mathbb E[r^*]-\beta_{\rm common}
+   D_{\rm KL}(\pi_{d_\ell}\Vert\pi_0).
+   $$
+
+   固定 reference histories 上的
+   $D_{\mathrm{KL}}(\pi_0\Vert\pi_{d_\ell})$ 继续作为 secondary diagnostic。主 safety cap
+   固定为 policy-to-reference KL `0.02`；超过即 fail closed，不得根据 learner 身份重调
+   `beta_common`。
+5. **Endpoint 层级。** fixed-beta held-out regret 与 common-beta rollout 是主 endpoint；
+   fixed-K constrained regret、Fisher cosine 和 learner-specific matched-KL rollout 是
+   次级机制/尺度诊断。held-out oracle 只能在 `beta_common`、heads 和 deployed directions
+   全部冻结后用于 evaluation。
+6. **正控与统计。** 同时部署 train-oracle direction 作为 local-to-finite-policy positive
+   control；其 gap 只能称为 oracle-step reference gap，不是 global optimum regret。候选先在
+   prompt 内平均，prompt 才是 rollout 实验单位。`K_cal={0.001,0.01}` 只作 sensitivity。
+   已观察过的五个 Phase-1 seeds 只作 estimand audit；confirmatory 主张必须使用新冻结的十
+   seed campaign。
+7. **Repeated-label variance control。** 新 noisy-label 主臂对每条 edge 独立生成
+   `R=4` 份 `gamma=0.9` randomized estimates 并取均值。该均值仍严格无偏，conditional
+   variance 为单份的四分之一；BT-MLE 使用对应的全部 raw Bernoulli labels。不得把四份
+   labels 合并后按一个 truncation level 重算 `h`。同时运行 `h=Delta r*` 的
+   zero-noise positive control。
+8. **Natural-pair efficiency arm。** 四个现有 iid candidates 给出六条无序 pair。all-six
+   arm 与 `R=4` 首轮分开运行，在不增加 generation/oracle forward 的前提下使用完整
+   prompt-level U-statistic；annotation 数约六倍，reward-head edge work 约六倍，
+   Fisher nodes/PCG 维度不变。六条边共享 nodes，统计上必须按 prompt 聚类，不能宣称六倍
+   独立样本。
+9. **Response horizon。** 新 design 的 candidate 与 rollout 上限固定为
+   `max_response_tokens=256`，并逐 arm 报告 EOS、达到上限的比例和 response-token
+   分布。旧 Phase 1 的 `128` token action space 保持原样，不用新上限重写旧结果。
+10. **Ridge positive control。** 主 full tangent 继续共享同一
+    $H_\lambda=F_{\rm train}+\lambda I$；另加一个 `d<n_F` 的低维 tangent arm，检验
+    $\lambda\to0$ ordering。有限 rollout 的 oracle arm 只称 `oracle-step reference`，
+    因为主 utility 不含显式 parameter-space ridge。
+
+以上 calibration、KL 方向、主尺度和 safety cap 已冻结。正式提交前还需把新的十个 seed、
+源 artifact identity、聚合判据和 positive-control gate 写入新 config；
+这些值不能从新 campaign 的 test rollout 反向选择。

@@ -17,6 +17,7 @@ from smart_reward.rollout import (
     match_fixed_a_measured_kl,
     oracle_rollout_improvement,
     policy_direction_from_head,
+    policy_direction_from_node_rewards,
 )
 from smart_reward.scores import ParameterLayout
 
@@ -123,6 +124,138 @@ def test_policy_direction_promotes_fp32_geometry_to_fp64(
 
     assert observed_rhs_dtypes == [torch.float64]
     assert result.direction.dtype == torch.float64
+
+
+def test_node_reward_direction_is_identical_to_linear_head_direction() -> None:
+    train = _training_data()
+    head_weight = torch.tensor([0.7, -0.2], dtype=torch.float64)
+    node_rewards = (train.reward_features @ head_weight).detach()
+    solve_options = {
+        "relative_damping": 0.3,
+        "beta": 1.7,
+        "pcg_tolerance": 1.0e-13,
+        "pcg_absolute_tolerance": 1.0e-14,
+    }
+
+    from_head = policy_direction_from_head(train, head_weight, **solve_options)
+    from_nodes = policy_direction_from_node_rewards(train, node_rewards, **solve_options)
+
+    torch.testing.assert_close(from_nodes.direction, from_head.direction, rtol=0.0, atol=0.0)
+    assert from_nodes.to_dict() == from_head.to_dict()
+
+
+def test_node_reward_direction_is_invariant_to_prompt_constant_gauge() -> None:
+    train = _training_data()
+    node_rewards = torch.tensor(
+        [[0.75, -0.5, 1.25], [-1.0, 0.25, 0.5]],
+        dtype=torch.float64,
+    )
+    prompt_constants = torch.tensor([[8.0], [-3.0]], dtype=torch.float64)
+    options = {
+        "relative_damping": 0.3,
+        "beta": 1.0,
+        "pcg_tolerance": 1.0e-13,
+        "pcg_absolute_tolerance": 1.0e-14,
+    }
+
+    original = policy_direction_from_node_rewards(train, node_rewards, **options)
+    shifted = policy_direction_from_node_rewards(
+        train,
+        node_rewards + prompt_constants,
+        **options,
+    )
+
+    torch.testing.assert_close(shifted.direction, original.direction, rtol=1.0e-12, atol=1.0e-13)
+    assert shifted.moment_norm == pytest.approx(original.moment_norm, rel=1.0e-13)
+    assert shifted.fisher_curvature == pytest.approx(
+        original.fisher_curvature,
+        rel=1.0e-12,
+    )
+
+
+def test_node_reward_direction_fails_closed_when_pcg_does_not_converge() -> None:
+    train = _training_data()
+    node_rewards = torch.tensor(
+        [[0.75, -0.5, 1.25], [-1.0, 0.25, 0.5]],
+        dtype=torch.float64,
+    )
+
+    with pytest.raises(RuntimeError, match="PCG did not converge"):
+        policy_direction_from_node_rewards(
+            train,
+            node_rewards,
+            relative_damping=0.3,
+            pcg_max_iterations=1,
+            pcg_tolerance=0.0,
+            pcg_absolute_tolerance=0.0,
+            require_pcg_convergence=True,
+        )
+
+
+def test_node_reward_direction_requires_exact_frozen_training_geometry() -> None:
+    train = _training_data()
+    valid = torch.zeros(
+        train.num_prompts,
+        train.num_candidates,
+        dtype=train.policy_scores.dtype,
+        device=train.policy_scores.device,
+    )
+
+    with pytest.raises(TypeError, match="torch.Tensor"):
+        policy_direction_from_node_rewards(  # type: ignore[arg-type]
+            train,
+            [[0.0] * train.num_candidates] * train.num_prompts,
+            relative_damping=0.3,
+        )
+    with pytest.raises(ValueError, match="shape"):
+        policy_direction_from_node_rewards(
+            train,
+            valid[:, :-1],
+            relative_damping=0.3,
+        )
+    with pytest.raises(TypeError, match="floating-point"):
+        policy_direction_from_node_rewards(
+            train,
+            torch.zeros_like(valid, dtype=torch.int64),
+            relative_damping=0.3,
+        )
+    with pytest.raises(ValueError, match="dtype and device"):
+        policy_direction_from_node_rewards(
+            train,
+            valid.to(torch.float32),
+            relative_damping=0.3,
+        )
+    with pytest.raises(ValueError, match="frozen and detached"):
+        policy_direction_from_node_rewards(
+            train,
+            valid.clone().requires_grad_(True),
+            relative_damping=0.3,
+        )
+    nonfinite = valid.clone()
+    nonfinite[0, 0] = torch.inf
+    with pytest.raises(ValueError, match="finite"):
+        policy_direction_from_node_rewards(
+            train,
+            nonfinite,
+            relative_damping=0.3,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_node_reward_direction_rejects_device_mismatch() -> None:
+    train = _training_data()
+    rewards = torch.zeros(
+        train.num_prompts,
+        train.num_candidates,
+        dtype=train.policy_scores.dtype,
+        device="cuda",
+    )
+    with pytest.raises(ValueError, match="dtype and device"):
+        policy_direction_from_node_rewards(
+            train,
+            rewards,
+            relative_damping=0.3,
+        )
 
 
 class _TinyFixedAPolicy(nn.Module):

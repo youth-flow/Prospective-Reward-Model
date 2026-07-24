@@ -236,18 +236,76 @@ def learned_theta(w: float, *, beta: float = BETA) -> Vector2:
     return (coordinate, coordinate)
 
 
+def policy_from_theta(theta: Vector2) -> Vector4:
+    """Map a two-dimensional policy parameter to the four-action policy."""
+
+    theta_one, theta_two = (float(value) for value in theta)
+    if not math.isfinite(theta_one) or not math.isfinite(theta_two):
+        raise ValueError("theta must contain only finite values")
+    first_group = sigmoid(2.0 * theta_one)
+    second_group = sigmoid(2.0 * theta_two)
+    return (
+        0.5 * first_group,
+        0.5 * (1.0 - first_group),
+        0.5 * second_group,
+        0.5 * (1.0 - second_group),
+    )
+
+
 def learned_policy(w: float, *, beta: float = BETA) -> Vector4:
     """Exact policy induced by any reward ``r_w + delta_eta``."""
 
-    beta = float(beta)
-    if not math.isfinite(beta) or beta <= 0.0:
-        raise ValueError("beta must be finite and strictly positive")
-    conditional_probability = sigmoid(float(w) / beta)
-    return (
-        0.5 * conditional_probability,
-        0.5 * (1.0 - conditional_probability),
-        0.5 * conditional_probability,
-        0.5 * (1.0 - conditional_probability),
+    return policy_from_theta(learned_theta(w, beta=beta))
+
+
+def local_fisher_kl(theta: Vector2) -> float:
+    """Second-order ``KL(pi_theta || pi_0)`` in the reference Fisher metric."""
+
+    theta_one, theta_two = (float(value) for value in theta)
+    if not math.isfinite(theta_one) or not math.isfinite(theta_two):
+        raise ValueError("theta must contain only finite values")
+    # 1/2 theta^T F_0 theta with F_0 = (1/2) I.
+    return 0.25 * (theta_one * theta_one + theta_two * theta_two)
+
+
+def _fixed_kl_theta(moment: Vector2, kl_budget: float) -> Vector2:
+    """Maximize a linear moment over the local Fisher-KL ellipsoid."""
+
+    kl_budget = float(kl_budget)
+    if not math.isfinite(kl_budget) or kl_budget <= 0.0:
+        raise ValueError("kl_budget must be finite and strictly positive")
+    first, second = (float(value) for value in moment)
+    squared_norm = first * first + second * second
+    if not math.isfinite(squared_norm) or squared_norm <= 0.0:
+        raise ValueError("moment must be finite and nonzero")
+    scale = 2.0 * math.sqrt(kl_budget / squared_norm)
+    return (scale * first, scale * second)
+
+
+def fixed_kl_learned_theta(w: float, *, kl_budget: float) -> Vector2:
+    """Local policy step from ``r_w`` after normalizing to a fixed KL budget."""
+
+    w = float(w)
+    if not math.isfinite(w) or w == 0.0:
+        raise ValueError("w must be finite and nonzero")
+    return _fixed_kl_theta(apply_a0(reward_vector(w)), kl_budget)
+
+
+def fixed_kl_target_theta(*, kl_budget: float) -> Vector2:
+    """Oracle local true-reward step at the same fixed Fisher-KL budget."""
+
+    return _fixed_kl_theta(apply_a0(TRUE_REWARD), kl_budget)
+
+
+def fixed_kl_local_regret(w: float, *, kl_budget: float) -> float:
+    """True local utility regret when learner and oracle use equal KL budgets."""
+
+    learned = fixed_kl_learned_theta(w, kl_budget=kl_budget)
+    target = fixed_kl_target_theta(kl_budget=kl_budget)
+    target_moment = apply_a0(TRUE_REWARD)
+    return math.fsum(
+        moment * (target_value - learned_value)
+        for moment, target_value, learned_value in zip(target_moment, target, learned, strict=True)
     )
 
 
@@ -386,14 +444,19 @@ __all__ = [
     "exact_true_regret_derivative",
     "expected_reward",
     "fisher_from_reference_policy",
+    "fixed_kl_learned_theta",
+    "fixed_kl_local_regret",
+    "fixed_kl_target_theta",
     "learned_policy",
     "learned_theta",
+    "local_fisher_kl",
     "local_prorm_regret",
     "logit",
     "ordered_iid_pair_distribution",
     "pair_fisher",
     "pair_reward_moment",
     "population_nll",
+    "policy_from_theta",
     "reward_vector",
     "score_mean",
     "sigmoid",

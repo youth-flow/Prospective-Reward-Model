@@ -24,6 +24,29 @@ downstream policy optimization”的预注册主张。
 样本、ridge、受限线性 reward class、operational oracle 和 measured-KL `0.01` 配置下的
 预注册经验主张未获支持。
 
+### 1.1 结果对应的 estimand
+
+Phase 1 的 `beta=1` held-out local regret 是 **fixed-beta ProRM 主 estimand**。它评价
+同一个下游 KL penalty 下 reward-induced natural direction 的角度和范数校准；squared
+Fisher direction error 是同一 fixed-beta 几何的配套指标。
+
+Fisher cosine 与 matched-KL rollout 回答另一个问题：各 learner direction 被独立缩放到
+共同 KL 半径后，哪个方向更好。局部 fixed-K constrained regret 与
+`1-cos_F` 成正比，因此它们是**次级 fixed-K estimand/transfer endpoint**，不能替代
+fixed-beta 主 estimand。Phase 1 同时要求这些预注册 gates，是证据链设计；不表示这些量在
+数学上是同一个 estimand。
+
+还必须区分两种 direction：
+
+- held-out geometry 冻结 reward head，但用 held-out moment、held-out Fisher 和
+  split-specific damping **重新求解** predicted/target directions；
+- rollout 部署的是仅由 train moment/Fisher 求出的 train direction，test geometry 不进入
+  求解或步长选择。
+
+因此 held-out re-solve 的轻微有利点估计没有传递到 deployed train-direction rollout，并非
+同一个向量出现了自相矛盾的评价，而是两个不同 operational functionals 的 ordering 没有
+一致。
+
 ## 2. 冻结身份与权威证据
 
 | Object | Locked identity |
@@ -85,6 +108,11 @@ control-plane 与 aggregation-source commit，因此这次运行没有把事后�
 `512` held-out edges。每个成功 run 的 `updated_rollouts.jsonl` 含 `3072` 行：
 reference、BT-MLE、ProRM+ 各 `256 × 4` 个 test responses；文件不保存 raw oracle score。
 
+Phase 1 的 `max_response_tokens=128` 是该实验 action space 的一部分，因此达到上限的回答
+仍是有效样本，不是需要删除的数据。但接受的 artifacts 中约 `74%–80%` candidates 达到该
+上限，说明 horizon 在实际约束大量回答；这限制了结果向更长回答的外推。下一 design 固定
+`256` tokens，并逐 policy arm 报告 EOS、length-limit rate 与 response-token 分布。
+
 ## 4. 接受的五个 seed
 
 | Seed | Controlled job | Node | Elapsed |
@@ -140,7 +168,12 @@ ProRM+ 在三个 seed 上降低 local regret，在两个 seed 上升高；方向
 
 所有要求的 ProRM+ Fisher solves 与两种 learner 的 rollout-direction PCG 都达到 true relative
 residual `≤ 1e-5`。所有 policy line searches 均收敛，BT-MLE/ProRM+ 的实测 KL 都落在
-`[0.0095, 0.0105]`。所以 `not_passed` 不是数值失败、PCG 失败或 KL 不公平造成的状态降级。
+`[0.0095, 0.0105]`。这里匹配的参数顺序明确为固定 reference histories 上的
+$D_{\mathrm{KL}}(\pi_0\Vert\pi_{\alpha d})$；理论正则项则是
+$D_{\mathrm{KL}}(\pi_{\alpha d}\Vert\pi_0)$。二者在 reference 处共享二阶 Fisher，但有限
+更新下不相等。因此可以确定的是：`not_passed` 不是数值失败、PCG 失败或**锁定 operational
+KL gate 内**的 line-search 不收敛造成的状态降级；不能进一步声称另一 KL 方向或全
+held-out distribution 也被精确匹配。
 
 权威 criteria 为：
 
@@ -167,7 +200,27 @@ residual `≤ 1e-5`。所有 policy line searches 均收敛，BT-MLE/ProRM+ 的�
 三个区间都跨零。即使其中某个预测指标稳定改善，也不能替代 downstream geometry 与 rollout
 证据。
 
-## 9. 科学解释边界
+## 9. Repeated-label finite-sample audit
+
+`gamma=0.9` 的 randomized estimator 在 locked probability range 内条件无偏且二阶矩有限，
+因此 Phase 1 没有标签构造错误。但高精度条件枚举显示
+`sd(h|p)=0.840942` at `p=0.5`，在 `p=0.25/0.75` 上升到 `0.934657`。作为对照，五个
+artifact 的 train-only node-centered oracle RMS 约为 `0.24`；全六 pair-margin RMS 约为
+`0.392`。所以单 edge 单份 `h` 是高噪声 estimator。
+
+在 worst endpoint，`P(|h-Delta r*|>5)≈2.99e-4`；若粗略按 1536 个独立 edges 计算，
+至少出现一个该级别 deviation 的概率约 `36.8%`。这不能证明它造成了 rollout reversal，
+但足以否定“无偏所以 1536 edges 必然足够”的推理。
+
+下一 design 不 clip、不固定 `N`、也不删除极端值。它加入：
+
+- `h=Delta r*` 的 zero-noise oracle-margin positive control；
+- 每 edge 四份独立 `gamma=0.9` estimates 的均值，保持严格无偏并把 conditional SD 减半；
+- 独立的 all-six natural-pairs prompt U-statistic arm；六条 pair 共享四个 nodes，因此按
+  prompt 聚类，不当作六个独立样本；
+- BT-MLE 在每个 arm 使用完全相同的 underlying Bernoulli annotation budget。
+
+## 10. 科学解释边界
 
 已由本实验确定的结论只有：
 
@@ -175,25 +228,46 @@ residual `≤ 1e-5`。所有 policy line searches 均收敛，BT-MLE/ProRM+ 的�
 - local/Fisher mean 的轻微改善不稳定，且没有传递为 matched-KL rollout 改善；
 - Phase 1 使用 transformed Skywork operational oracle，不能据此声称 human preference utility；
 - 结果不能归因于 source/config 混用、Qwen2.5/Qwen3 chat-template 混用、PCG 未收敛、
-  learner KL 不匹配、漏 seed 或事后换 run。
+  锁定 reference-to-updated KL gate 未收敛、漏 seed 或事后换 run。
 
 有限样本方差、ridge、随机截断标签、冻结线性 reward class、local quadratic approximation 与
 有限 KL rollout 的差距，都是与 population identity 不同的边界条件；本实验没有单独识别哪一项
 造成了 rollout reversal，因此不能把任何一个写成已证实的原因。
 
-## 10. 下一步的确定工程顺序
+## 11. 下一步的确定工程顺序
 
 当前 Phase 1 已经结束，不因 `not_passed` 换 seed、改阻尼或重跑同一配置。后续工作必须建立新
 design identity，并按以下顺序进行：
 
-1. **先定位 local-to-rollout gap。** 在冻结 heads、candidate graph 和 common-random rollout
-   seeds 上预注册更小的 measured-KL grid，例如 `{0.001, 0.003, 0.01}`；同时加入 oracle local
-   direction 的 finite-rollout calibration。它回答局部近似何时失效，不重新选择 reward head。
-2. **再定位 reward-class/sample gap。** 若更小 KL 仍不恢复 ordering，则用更大 prompt budget
+1. **先完成零 GPU estimand 与优化审计。** 对现有五 seed 直接评价 saved train direction、
+   applied alpha、隐式 `beta_eff`、final objective/gradient 和 policy-relevant approximation
+   error；不重训、不改写 Phase 1 结果。
+2. **再过 exact-margin/noisy-margin local controls。** 在同一 candidates/Fisher/reward class
+   上比较 `h=Delta r*`、单份 `h` 与 `R=4` 独立 `h` 均值。只有 exact-margin ProRM+ 能到达其
+   policy-relevant reward-class optimum，才进入 finite-policy 主链。
+3. **运行 common-beta 主实验。** 只用 train operational oracle、train Fisher 和冻结的
+   train candidate graph 构造
+   $u_*^{tr}=(F_{\rm train}+\lambda I)^{-1}g_*^{tr}$，以主尺度 `K_cal=0.003` 解析设定
+   $\beta_{\rm common}=\sqrt{(u_*^{tr})^\top F_{\rm train}u_*^{tr}/(2K_{\rm cal})}$，
+   随后在该 seed 内对 BT-MLE、ProRM+ 与 oracle-step 共同冻结；
+   两 learner 直接部署
+   $d_\ell=(F_{\mathrm{train}}+\lambda I)^{-1}g_\ell^{train}/\beta_{\mathrm{common}}$，
+   不再各自 line-search 或按自身 norm 重标。held-out oracle 只在 heads、beta 和 directions
+   冻结后用于评价。主效用使用 updated-policy trajectories 上的
+   $J^*=E[r^*]-\beta_{\rm common}KL(\pi_{\rm updated}\Vert\pi_0)$；固定 reference histories
+   上的反方向 KL 只作 secondary diagnostic。policy-to-reference KL 超过 `0.02` 则 fail
+   closed，不回调 beta。
+4. **用 fixed-K 诊断定位 local-to-rollout gap。** 在冻结 heads、candidate graph 和
+   common-random rollout seeds 上保留较小的 matched-KL grid，例如
+   `{0.001, 0.003, 0.01}`，并加入 train-only oracle local direction 的 finite-rollout
+   calibration。它是次级尺度/角度诊断，不取代 common-beta 主结果。
+5. **再运行 all-six 与 capacity/sample arms。** all-six natural pairs 与 `R=4` 首轮分开；
+   若更小 KL 仍不恢复 ordering，则用更大 prompt budget
    和更高容量但相同输入/标签预算的 reward parameterization，重新比较 BT-MLE 与 ProRM+；不能
    只扩大 ProRM+ 容量。
-3. **最后才做 human robustness。** 当前 `not_passed` 不激活 CoVal 作为本协议的 confirmatory
+6. **最后才做 human robustness。** 当前 `not_passed` 不激活 CoVal 作为本协议的 confirmatory
    Phase 2。任何 CoVal 或大模型实验都必须标为 exploratory，或以新的冻结协议重新预注册。
 
 这条顺序继续检验同一个 prospective reward-modeling insight，同时避免用规模扩大掩盖本次未
-通过的预注册机制判据。
+通过的预注册机制判据。以上是新 design 的规格概要，不修改 Phase 1 权威
+`pre_registered_evidence_status=not_passed`。

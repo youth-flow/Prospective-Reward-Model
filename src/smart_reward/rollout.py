@@ -103,6 +103,29 @@ def _coerce_head_weight(
     return value
 
 
+def _validate_node_rewards(
+    node_rewards: torch.Tensor,
+    train: TrainingTensorData,
+) -> torch.Tensor:
+    if not isinstance(node_rewards, torch.Tensor):
+        raise TypeError("node_rewards must be a torch.Tensor")
+    expected_shape = (train.num_prompts, train.num_candidates)
+    if node_rewards.shape != expected_shape:
+        raise ValueError(f"node_rewards must have shape {expected_shape}")
+    if not node_rewards.is_floating_point():
+        raise TypeError("node_rewards must have a floating-point dtype")
+    if (
+        node_rewards.dtype != train.policy_scores.dtype
+        or node_rewards.device != train.policy_scores.device
+    ):
+        raise ValueError("node_rewards must share dtype and device with policy_scores")
+    if node_rewards.requires_grad or node_rewards.grad_fn is not None:
+        raise ValueError("node_rewards must be frozen and detached")
+    if not bool(torch.isfinite(node_rewards).all()):
+        raise ValueError("node_rewards must be finite")
+    return node_rewards
+
+
 @dataclass(frozen=True, slots=True)
 class PolicyDirectionResult:
     """Natural direction plus auditable damping, solve, and curvature evidence."""
@@ -183,9 +206,9 @@ class PolicyDirectionResult:
 
 
 @torch.no_grad()
-def policy_direction_from_head(
+def _solve_policy_direction_from_node_rewards(
     train: TrainingTensorData,
-    head_weight: torch.Tensor | Sequence[float],
+    node_rewards: torch.Tensor,
     *,
     relative_damping: float,
     beta: float = 1.0,
@@ -196,16 +219,7 @@ def policy_direction_from_head(
     pcg_residual_recompute_interval: int = 20,
     require_pcg_convergence: bool = True,
 ) -> PolicyDirectionResult:
-    """Build the train-only learned-head natural policy direction.
-
-    If ``r_ij = feature_ij @ head_weight``, this computes
-
-    ``direction = (F + lambda I)^-1 A_hat r / beta``
-
-    from all train candidates.  ``F`` is the raw node mean ``S.T S/(P*M)``;
-    ``A_hat r`` is the average per-prompt sample covariance with denominator
-    ``P*(M-1)``; and ``lambda = relative_damping * mean(diag(F))``.
-    """
+    """Shared validated natural-direction solve for frozen node rewards."""
 
     if not isinstance(train, TrainingTensorData):
         raise TypeError("train must be TrainingTensorData")
@@ -219,10 +233,9 @@ def policy_direction_from_head(
     if not isinstance(require_pcg_convergence, bool):
         raise TypeError("require_pcg_convergence must be bool")
 
-    weight = _coerce_head_weight(head_weight, train)
-    predicted_rewards = train.reward_features @ weight
+    rewards = _validate_node_rewards(node_rewards, train)
     policy_scores = train.policy_scores.to(dtype=solve_dtype)
-    geometry_rewards = predicted_rewards.to(dtype=solve_dtype)
+    geometry_rewards = rewards.to(dtype=solve_dtype)
     moment = policy_reward_moment(
         policy_scores,
         geometry_rewards,
@@ -280,6 +293,86 @@ def policy_direction_from_head(
         pcg_relative_residual=solve.relative_residual,
         pcg_converged=solve.converged,
         pcg_reason=solve.reason,
+    )
+
+
+@torch.no_grad()
+def policy_direction_from_head(
+    train: TrainingTensorData,
+    head_weight: torch.Tensor | Sequence[float],
+    *,
+    relative_damping: float,
+    beta: float = 1.0,
+    pcg_dtype: FisherSolveDType = "float64",
+    pcg_max_iterations: int = 200,
+    pcg_tolerance: float = 1.0e-6,
+    pcg_absolute_tolerance: float = 0.0,
+    pcg_residual_recompute_interval: int = 20,
+    require_pcg_convergence: bool = True,
+) -> PolicyDirectionResult:
+    """Build the train-only learned-head natural policy direction.
+
+    If ``r_ij = feature_ij @ head_weight``, this computes
+
+    ``direction = (F + lambda I)^-1 A_hat r / beta``
+
+    from all train candidates.  ``F`` is the raw node mean ``S.T S/(P*M)``;
+    ``A_hat r`` is the average per-prompt sample covariance with denominator
+    ``P*(M-1)``; and ``lambda = relative_damping * mean(diag(F))``.
+    """
+
+    if not isinstance(train, TrainingTensorData):
+        raise TypeError("train must be TrainingTensorData")
+    weight = _coerce_head_weight(head_weight, train)
+    predicted_rewards = train.reward_features @ weight
+    return _solve_policy_direction_from_node_rewards(
+        train,
+        predicted_rewards,
+        relative_damping=relative_damping,
+        beta=beta,
+        pcg_dtype=pcg_dtype,
+        pcg_max_iterations=pcg_max_iterations,
+        pcg_tolerance=pcg_tolerance,
+        pcg_absolute_tolerance=pcg_absolute_tolerance,
+        pcg_residual_recompute_interval=pcg_residual_recompute_interval,
+        require_pcg_convergence=require_pcg_convergence,
+    )
+
+
+@torch.no_grad()
+def policy_direction_from_node_rewards(
+    train: TrainingTensorData,
+    node_rewards: torch.Tensor,
+    *,
+    relative_damping: float,
+    beta: float = 1.0,
+    pcg_dtype: FisherSolveDType = "float64",
+    pcg_max_iterations: int = 200,
+    pcg_tolerance: float = 1.0e-6,
+    pcg_absolute_tolerance: float = 0.0,
+    pcg_residual_recompute_interval: int = 20,
+    require_pcg_convergence: bool = True,
+) -> PolicyDirectionResult:
+    """Build a damped natural direction from arbitrary frozen node rewards.
+
+    ``node_rewards`` must have exact shape ``(P, M)`` matching the training
+    candidates.  The solve, precision policy, Fisher definition, damping,
+    convergence requirement, and evidence record are identical to
+    :func:`policy_direction_from_head`.  Passing ``beta=1`` returns the native
+    common-beta calibration direction.
+    """
+
+    return _solve_policy_direction_from_node_rewards(
+        train,
+        node_rewards,
+        relative_damping=relative_damping,
+        beta=beta,
+        pcg_dtype=pcg_dtype,
+        pcg_max_iterations=pcg_max_iterations,
+        pcg_tolerance=pcg_tolerance,
+        pcg_absolute_tolerance=pcg_absolute_tolerance,
+        pcg_residual_recompute_interval=pcg_residual_recompute_interval,
+        require_pcg_convergence=require_pcg_convergence,
     )
 
 
@@ -709,4 +802,5 @@ __all__ = [
     "match_fixed_a_measured_kl",
     "oracle_rollout_improvement",
     "policy_direction_from_head",
+    "policy_direction_from_node_rewards",
 ]

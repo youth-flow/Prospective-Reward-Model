@@ -152,6 +152,109 @@ class RepeatedLabelBatch:
         )
 
 
+@dataclass(frozen=True)
+class ReplicatedRepeatedLabelBatch:
+    """Independent repeated-label replicates with their boundaries intact.
+
+    ``replicates[r]`` contains the raw ragged labels for replicate ``r`` and
+    ``replicate_h[r]`` is the randomized-truncation estimate computed from
+    that replicate alone.  :attr:`mean_h` averages those estimates with equal
+    weight.  In contrast, :attr:`pooled_wins` and :attr:`pooled_totals` pool
+    the raw Bernoulli observations for a repeated-label BT objective.
+
+    Replicate boundaries are statistically material: pooled counts generally
+    do *not* correspond to one geometric truncation draw, so they must never
+    be passed back through the randomized-truncation estimator.
+    """
+
+    replicates: tuple[RepeatedLabelBatch, ...]
+    replicate_h: torch.Tensor
+    gamma: float
+
+    def __post_init__(self) -> None:
+        gamma_value = _validate_gamma(self.gamma, allow_one=False)
+        object.__setattr__(self, "gamma", gamma_value)
+        if not isinstance(self.replicates, tuple) or not self.replicates:
+            raise ValueError("replicates must be a non-empty tuple")
+        if not all(isinstance(batch, RepeatedLabelBatch) for batch in self.replicates):
+            raise TypeError("every replicate must be a RepeatedLabelBatch")
+        if not isinstance(self.replicate_h, torch.Tensor):
+            raise TypeError("replicate_h must be a torch.Tensor")
+        if not self.replicate_h.is_floating_point():
+            raise TypeError("replicate_h must have a floating-point dtype")
+        if self.replicate_h.requires_grad:
+            raise ValueError("replicate_h must not require gradients")
+
+        reference = self.replicates[0]
+        expected_shape = (len(self.replicates), *reference.counts.shape)
+        if self.replicate_h.shape != expected_shape:
+            raise ValueError(f"replicate_h must have shape {expected_shape}")
+        if self.replicate_h.device != reference.counts.device:
+            raise ValueError("replicate_h and all replicates must share a device")
+        if not bool(torch.isfinite(self.replicate_h).all()):
+            raise ValueError("replicate_h must be finite")
+
+        for batch in self.replicates[1:]:
+            if batch.counts.shape != reference.counts.shape:
+                raise ValueError("all replicates must have the same edge shape")
+            if batch.counts.device != reference.counts.device:
+                raise ValueError("all replicates must share a device")
+
+        expected_h = torch.stack(
+            [
+                batch.logit_estimates(gamma=gamma_value).to(dtype=self.replicate_h.dtype)
+                for batch in self.replicates
+            ],
+            dim=0,
+        )
+        if not torch.equal(self.replicate_h, expected_h):
+            raise ValueError(
+                "replicate_h must contain the per-replicate randomized-truncation estimates"
+            )
+
+    @property
+    def num_replicates(self) -> int:
+        """Number of independent randomized-truncation replicates."""
+
+        return len(self.replicates)
+
+    @property
+    def counts(self) -> torch.Tensor:
+        """Return geometric counts with shape ``(R, *edge_shape)``."""
+
+        return torch.stack([batch.counts for batch in self.replicates], dim=0)
+
+    @property
+    def wins(self) -> torch.Tensor:
+        """Return left-win counts with shape ``(R, *edge_shape)``."""
+
+        return torch.stack([batch.wins for batch in self.replicates], dim=0)
+
+    @property
+    def mean_h(self) -> torch.Tensor:
+        """Return the equal-weight per-edge mean of the independent estimates."""
+
+        return self.replicate_h.mean(dim=0)
+
+    @property
+    def pooled_wins(self) -> torch.Tensor:
+        """Return per-edge wins pooled across replicates for repeated-label BT."""
+
+        return self.wins.sum(dim=0)
+
+    @property
+    def pooled_totals(self) -> torch.Tensor:
+        """Return per-edge annotation totals pooled across replicates for BT."""
+
+        return self.counts.sum(dim=0)
+
+    @property
+    def total_annotations(self) -> int:
+        """Return the realized annotation cost across all edges and replicates."""
+
+        return sum(batch.labels.numel() for batch in self.replicates)
+
+
 def sample_geometric_repeated_labels(
     probabilities: torch.Tensor,
     gamma: float = 0.9,
@@ -212,6 +315,74 @@ def sample_geometric_repeated_labels(
         counts=counts.reshape(probabilities.shape),
         pair_indices=pair_indices,
         labels=labels,
+    )
+
+
+def sample_replicated_geometric_repeated_labels(
+    probabilities: torch.Tensor,
+    num_replicates: int,
+    gamma: float = 0.9,
+    *,
+    generator: torch.Generator | None = None,
+    max_total_annotations: int | None = None,
+) -> ReplicatedRepeatedLabelBatch:
+    """Sample and average independent unbiased log-odds estimators.
+
+    Every replicate draws its own geometric counts and conditionally iid
+    Bernoulli labels.  Calls consume one shared explicit ``generator`` in a
+    deterministic sequence; all draws remain mutually independent under the
+    generator's pseudorandom law.  With the same initial generator state,
+    ``num_replicates=1`` is exactly equivalent to one call to
+    :func:`sample_geometric_repeated_labels`.
+
+    ``mean_h`` is formed only after computing ``h`` within each replicate.
+    Pooled wins and totals are exposed separately for repeated-label BT; the
+    pooled counts are not a valid randomized-truncation input.
+
+    Args:
+        probabilities: Tensor of left-win probabilities in ``[0, 1]``.
+        num_replicates: Strictly positive number of independent estimators.
+        gamma: Geometric continuation probability.
+        generator: Optional PyTorch random generator shared by all draws.
+        max_total_annotations: Optional fail-fast guard on the realized total
+            across all replicates.  It raises rather than clipping.
+    """
+
+    if (
+        isinstance(num_replicates, bool)
+        or not isinstance(num_replicates, int)
+        or num_replicates < 1
+    ):
+        raise ValueError("num_replicates must be a strictly positive integer")
+    gamma_value = _validate_gamma(gamma, allow_one=False)
+    if max_total_annotations is not None and (
+        isinstance(max_total_annotations, bool)
+        or not isinstance(max_total_annotations, int)
+        or max_total_annotations < 0
+    ):
+        raise ValueError("max_total_annotations must be a non-negative integer")
+
+    replicates: list[RepeatedLabelBatch] = []
+    replicate_h: list[torch.Tensor] = []
+    total_annotations = 0
+    for _ in range(num_replicates):
+        remaining = (
+            None if max_total_annotations is None else max_total_annotations - total_annotations
+        )
+        batch = sample_geometric_repeated_labels(
+            probabilities,
+            gamma=gamma_value,
+            generator=generator,
+            max_total_annotations=remaining,
+        )
+        total_annotations += batch.labels.numel()
+        replicates.append(batch)
+        replicate_h.append(batch.logit_estimates(gamma=gamma_value))
+
+    return ReplicatedRepeatedLabelBatch(
+        replicates=tuple(replicates),
+        replicate_h=torch.stack(replicate_h, dim=0),
+        gamma=gamma_value,
     )
 
 
@@ -328,9 +499,11 @@ def repeated_labels_to_h(
 
 
 __all__ = [
+    "ReplicatedRepeatedLabelBatch",
     "RepeatedLabelBatch",
     "geometric_annotation_counts",
     "randomized_truncation_u_statistic_from_counts",
     "repeated_labels_to_h",
     "sample_geometric_repeated_labels",
+    "sample_replicated_geometric_repeated_labels",
 ]

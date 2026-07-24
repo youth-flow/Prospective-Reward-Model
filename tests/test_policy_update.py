@@ -8,8 +8,12 @@ from smart_reward.policy_update import (
     fisher_quadratic,
     line_search_measured_kl,
     masked_causal_forward_kl,
+    masked_causal_updated_to_reference_kl,
+    masked_causal_updated_to_reference_kl_per_sequence,
     select_causal_response_logits,
     selected_causal_forward_kl,
+    selected_causal_updated_to_reference_kl,
+    selected_causal_updated_to_reference_kl_per_sequence,
     set_tangent_update_,
     step_size_for_kl_budget,
     unflatten_tangent_vector,
@@ -100,6 +104,169 @@ def test_selected_chunked_kl_matches_direct_full_sequence_formula() -> None:
         rtol=1.0e-12,
         atol=1.0e-12,
     )
+
+
+def test_updated_to_reference_kl_has_the_requested_asymmetric_direction() -> None:
+    updated_probability = torch.tensor([0.8, 0.2], dtype=torch.float64)
+    reference_probability = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    updated = torch.zeros(1, 2, 2, dtype=torch.float64)
+    reference = torch.zeros_like(updated)
+    updated[0, 0] = updated_probability.log()
+    reference[0, 0] = reference_probability.log()
+    mask = torch.tensor([[0, 1]], dtype=torch.bool)
+
+    expected_updated_to_reference = (
+        updated_probability * (updated_probability.log() - reference_probability.log())
+    ).sum()
+    expected_reference_to_updated = (
+        reference_probability * (reference_probability.log() - updated_probability.log())
+    ).sum()
+
+    actual = masked_causal_updated_to_reference_kl(updated, reference, mask)
+    locked_phase1_direction = masked_causal_forward_kl(reference, updated, mask)
+    torch.testing.assert_close(actual, expected_updated_to_reference)
+    torch.testing.assert_close(locked_phase1_direction, expected_reference_to_updated)
+    assert actual.item() != pytest.approx(locked_phase1_direction.item())
+
+
+def test_updated_to_reference_kl_sums_through_eos_then_averages_sequences() -> None:
+    updated_probability = torch.tensor(
+        [
+            [0.8, 0.6, 0.999, 0.3],
+            [0.999, 0.9, 0.001, 0.3],
+        ],
+        dtype=torch.float64,
+    )
+    reference_probability = torch.tensor(
+        [
+            [0.5, 0.5, 0.001, 0.7],
+            [0.001, 0.4, 0.999, 0.7],
+        ],
+        dtype=torch.float64,
+    )
+    updated = torch.stack(
+        (updated_probability.log(), (1.0 - updated_probability).log()),
+        dim=-1,
+    )
+    reference = torch.stack(
+        (reference_probability.log(), (1.0 - reference_probability).log()),
+        dim=-1,
+    )
+    # Sequence 0 has two response predictions: the second is the EOS token.
+    # Sequence 1 has one response prediction.  The other large logit
+    # differences are deliberately unselected and must not affect the result.
+    mask = torch.tensor(
+        [
+            [0, 1, 1, 0],
+            [0, 0, 1, 0],
+        ],
+        dtype=torch.bool,
+    )
+
+    def bernoulli_kl(probability: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return probability * (probability.log() - target.log()) + (1.0 - probability) * (
+            (1.0 - probability).log() - (1.0 - target).log()
+        )
+
+    expected_per_sequence = torch.stack(
+        (
+            bernoulli_kl(updated_probability[0, 0], reference_probability[0, 0])
+            + bernoulli_kl(updated_probability[0, 1], reference_probability[0, 1]),
+            bernoulli_kl(updated_probability[1, 1], reference_probability[1, 1]),
+        )
+    )
+    actual_per_sequence = masked_causal_updated_to_reference_kl_per_sequence(
+        updated,
+        reference,
+        mask,
+        token_chunk_size=1,
+    )
+    torch.testing.assert_close(actual_per_sequence, expected_per_sequence)
+    torch.testing.assert_close(
+        masked_causal_updated_to_reference_kl(
+            updated,
+            reference,
+            mask,
+            token_chunk_size=1,
+        ),
+        expected_per_sequence.mean(),
+    )
+
+    selected_updated = select_causal_response_logits(updated, mask)
+    selected_reference = select_causal_response_logits(reference, mask)
+    torch.testing.assert_close(
+        selected_causal_updated_to_reference_kl_per_sequence(
+            selected_updated,
+            selected_reference,
+            token_chunk_size=1,
+        ),
+        expected_per_sequence,
+    )
+    torch.testing.assert_close(
+        selected_causal_updated_to_reference_kl(
+            selected_updated,
+            selected_reference,
+            token_chunk_size=1,
+        ),
+        expected_per_sequence.mean(),
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_updated_to_reference_kl_preserves_compute_dtype_and_device(
+    dtype: torch.dtype,
+) -> None:
+    updated = torch.tensor(
+        [[[0.3, -0.2], [0.0, 0.0]]],
+        dtype=dtype,
+    )
+    reference = torch.tensor(
+        [[[-0.1, 0.4], [0.0, 0.0]]],
+        dtype=dtype,
+    )
+    mask = torch.tensor([[0, 1]], dtype=torch.bool, device=updated.device)
+
+    per_sequence = masked_causal_updated_to_reference_kl_per_sequence(
+        updated,
+        reference,
+        mask,
+    )
+    assert per_sequence.shape == (1,)
+    assert per_sequence.dtype == dtype
+    assert per_sequence.device == updated.device
+
+
+def test_updated_to_reference_kl_rejects_invalid_inputs() -> None:
+    logits = torch.zeros(1, 2, 3)
+    mask = torch.tensor([[0, 1]], dtype=torch.bool)
+
+    with pytest.raises(TypeError, match="torch.Tensor"):
+        masked_causal_updated_to_reference_kl([], logits, mask)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="share shape"):
+        masked_causal_updated_to_reference_kl(logits, torch.zeros(1, 3, 3), mask)
+    with pytest.raises(ValueError, match="binary"):
+        masked_causal_updated_to_reference_kl(
+            logits,
+            logits,
+            torch.tensor([[0, 2]]),
+        )
+    with pytest.raises(ValueError, match="at least one"):
+        masked_causal_updated_to_reference_kl(
+            logits,
+            logits,
+            torch.zeros_like(mask),
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        masked_causal_updated_to_reference_kl(
+            logits,
+            logits,
+            mask,
+            token_chunk_size=True,
+        )
+    nonfinite = logits.clone()
+    nonfinite[0, 0, 0] = torch.inf
+    with pytest.raises(ValueError, match="finite"):
+        masked_causal_updated_to_reference_kl(nonfinite, logits, mask)
 
 
 def test_kl_budget_scaling_matches_quadratic_target() -> None:

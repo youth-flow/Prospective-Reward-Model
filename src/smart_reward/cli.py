@@ -392,6 +392,8 @@ def _closed_form_check(arguments: argparse.Namespace) -> int:
         closed_form_results,
         exact_true_regret,
         fisher_from_reference_policy,
+        fixed_kl_learned_theta,
+        fixed_kl_local_regret,
         local_prorm_regret,
         ordered_iid_pair_distribution,
         pair_fisher,
@@ -446,12 +448,36 @@ def _closed_form_check(arguments: argparse.Namespace) -> int:
             }
         beta_grid.append({"beta": beta, "methods": method_rows})
 
+    fixed_k = 0.01
+    bt_weight = bt_rm_optimal_w()
+    bt_fixed_k_theta = fixed_kl_learned_theta(bt_weight, kl_budget=fixed_k)
+    prorm_fixed_k_theta = fixed_kl_learned_theta(3.0, kl_budget=fixed_k)
+    bt_fixed_k_regret = fixed_kl_local_regret(bt_weight, kl_budget=fixed_k)
+    prorm_fixed_k_regret = fixed_kl_local_regret(3.0, kl_budget=fixed_k)
     payload = {
         "schema_version": "prorm-closed-form/v1",
         "audited_table": [asdict(row) for row in closed_form_results()],
         "natural_q0_identity": natural_q0_identity,
         "three_edge_identity": three_edge_identity,
         "beta_grid_local_approximation": beta_grid,
+        "fixed_k_estimand_audit": {
+            "kl_budget": fixed_k,
+            "bt_theta": list(bt_fixed_k_theta),
+            "prorm_theta": list(prorm_fixed_k_theta),
+            "bt_target_regret": bt_fixed_k_regret,
+            "prorm_target_regret": prorm_fixed_k_regret,
+            "directions_equal": vectors_close(bt_fixed_k_theta, prorm_fixed_k_theta),
+            "regrets_equal": math.isclose(
+                bt_fixed_k_regret,
+                prorm_fixed_k_regret,
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-12,
+            ),
+            "interpretation": (
+                "this example separates BT and ProRM under common beta, "
+                "not after learner-specific fixed-K normalization"
+            ),
+        },
         "population_example_only": True,
         "benchmark_only": True,
         "status": "ok",
@@ -644,6 +670,56 @@ def _controlled_rollout(arguments: argparse.Namespace) -> int:
             "seed": seed,
             "status": "ok",
             "updated_rollouts": "updated_rollouts.jsonl",
+        }
+    )
+    return 0
+
+
+def _estimand_audit(arguments: argparse.Namespace) -> int:
+    from .estimand_audit import audit_phase1_estimands
+
+    config = load_config(arguments.config)
+    seed = _resolve_run_seed(config, arguments.seed)
+    payload = audit_phase1_estimands(
+        config,
+        seed=seed,
+        artifact_dir=arguments.artifact_dir,
+        comparison_json=arguments.comparison,
+        rollout_json=arguments.rollout,
+        output_json=arguments.output,
+        prompt_chunk_size=arguments.prompt_chunk_size,
+    )
+    _print_json(
+        {
+            "config_hash": payload["config_hash"],
+            "device": "cpu",
+            "output": Path(arguments.output).name,
+            "seed": seed,
+            "status": "ok",
+        }
+    )
+    return 0
+
+
+def _optimization_audit(arguments: argparse.Namespace) -> int:
+    from .optimization_audit import audit_phase1_head_optimization
+
+    config = load_config(arguments.config)
+    seed = _resolve_run_seed(config, arguments.seed)
+    payload = audit_phase1_head_optimization(
+        config,
+        seed=seed,
+        artifact_dir=arguments.artifact_dir,
+        comparison_json=arguments.comparison,
+        output_json=arguments.output,
+    )
+    _print_json(
+        {
+            "config_hash": payload["config_hash"],
+            "device": "cpu",
+            "output": Path(arguments.output).name,
+            "seed": seed,
+            "status": "ok",
         }
     )
     return 0
@@ -1346,6 +1422,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow Hugging Face network access (formal HPC jobs remain offline by default)",
     )
     rollout_parser.set_defaults(handler=_controlled_rollout)
+
+    audit_parser = subparsers.add_parser(
+        "estimand-audit",
+        help="evaluate saved train directions on test F/g* without loading an LLM or GPU",
+    )
+    audit_parser.add_argument("config")
+    audit_parser.add_argument("artifact_dir")
+    audit_parser.add_argument("comparison")
+    audit_parser.add_argument("rollout")
+    audit_parser.add_argument("output")
+    audit_parser.add_argument("--seed", type=int, required=True)
+    audit_parser.add_argument(
+        "--prompt-chunk-size",
+        type=int,
+        default=16,
+        help="number of test prompts per CPU float64 geometry chunk (default: 16)",
+    )
+    audit_parser.set_defaults(handler=_estimand_audit)
+
+    optimization_audit_parser = subparsers.add_parser(
+        "optimization-audit",
+        help="recompute full-train unclipped head gradients without an optimizer or GPU",
+    )
+    optimization_audit_parser.add_argument("config")
+    optimization_audit_parser.add_argument("artifact_dir")
+    optimization_audit_parser.add_argument("comparison")
+    optimization_audit_parser.add_argument("output")
+    optimization_audit_parser.add_argument("--seed", type=int, required=True)
+    optimization_audit_parser.set_defaults(handler=_optimization_audit)
 
     aggregate_parser = subparsers.add_parser(
         "aggregate-results",

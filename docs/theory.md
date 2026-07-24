@@ -73,6 +73,13 @@ D_{\mathrm{KL}}\!\left(
 \qquad \beta>0.
 $$
 
+这里的理论正则项方向固定为 **policy-to-reference**：
+$D_{\mathrm{KL}}(\pi_\theta\Vert\pi_0)$。后文 Phase 1 line search 实测的是固定
+reference histories 上的 **reference-to-updated**
+$D_{\mathrm{KL}}(\pi_0\Vert\pi_{\theta_0+\delta})$。两者在 `theta_0` 处具有同一个二阶
+Fisher 展开，但在有限步长下不是同一个量。为避免“forward/reverse KL”的命名歧义，本文
+凡涉及有限更新都显式写出两个分布的顺序。
+
 令
 
 $$
@@ -155,8 +162,8 @@ scale、shape 与 hash。
 
 ### 2.2 Local policy optimization
 
-令 `delta=theta-theta_0`。在 reference policy 附近，对期望 reward 作一阶展开、对 forward KL
-作二阶展开：
+令 `delta=theta-theta_0`。在 reference policy 附近，对期望 reward 作一阶展开、对理论中的
+policy-to-reference KL 作二阶展开：
 
 $$
 J(\theta_0+\delta;r)
@@ -214,6 +221,50 @@ $$
 这里 `||u||^2_{F_0^dagger}:=u^T F_0^dagger u`。这是 population、无阻尼、局部二阶问题中的
 精确 identity；它不是任意大 policy update 的全局保证。
 
+#### 2.3.1 Global-to-local remainder
+
+上述 equality 对定义出来的 quadratic local problem 是精确的；相对于原始 nonlinear
+policy problem，它是 leading-order expansion。reward expectation 本身通常还有 Hessian：
+
+$$
+\mathbb E_{\pi_{\theta_0+\delta}}[r]
+=C(r)+g_r^\top\delta+\frac12\delta^\top H_r\delta+O(\|\delta\|^3),
+$$
+
+不能把 `H_r` 默认为零。若限制在 identifiable tangent space，并假设：
+
+- `F_0` 在该空间的最小特征值严格为正；
+- reward expectation 与 KL 在 `theta_0` 邻域三阶连续且导数一致有界；
+- downstream solver 选择留在 `O(1/beta)` 邻域内的 local maximizer；
+
+则在 `beta -> infinity` 时
+
+$$
+\delta_r
+=\frac1\beta F_0^{-1}g_r+O(\beta^{-2}),
+$$
+
+并且目标 nonlinear utility regret 满足绝对误差展开
+
+$$
+\boxed{
+\operatorname{Reg}_{G,\mathrm{local}}(r_\phi)
+=
+\frac1{2\beta}
+\|g_{r_\phi}-g_*\|_{F_0^{-1}}^2
++O(\beta^{-2})
+}.
+$$
+
+常数依赖于 Fisher conditioning、reward/KL derivative bounds 与 moment bounds。若 leading
+term 本身为零，只能使用 absolute `O(beta^-2)` statement，不能声称相对误差趋零。若 optimizer
+跳到远处另一个 mode，上述 local branch 结论不适用。
+
+common-beta calibration 中 `beta` 与 `K_cal^{-1/2}` 同阶，所以 leading regret 为
+`O(sqrt(K_cal))`，remainder 为 `O(K_cal)`，非退化情形的相对误差为
+`O(sqrt(K_cal))`。这正是保留 `K_cal={0.001,0.003,0.01}` 尺度曲线、而不只测一个有限步长的
+理论理由。
+
 ### 2.4 Projection geometry 与 reward 等价类
 
 在有限表示中，令 `A_theta` 的列为每个 `(x,y)` 的 score，
@@ -243,6 +294,58 @@ $$
 - pointwise MSE、BT-MLE NLL 与 policy regret 是不同几何中的投影；
 - 在 misspecified reward class 中，BT-MLE optimum 不保证等于 ProRM optimum；
 - 若 `A_0r_1=A_0r_2`，两个 rewards 在当前局部 policy problem 中属于同一等价类。
+
+### 2.5 Estimand hierarchy：fixed-beta 为主，fixed-K 为次
+
+令
+
+$$
+u_r=F_0^\dagger g_r,\qquad
+\|u\|_{F_0}^2=u^\top F_0u.
+$$
+
+本项目的**主 estimand**固定同一个 `beta`，不为每个 reward model 单独重标步长：
+
+$$
+\delta_{\beta,r}=\frac{u_r}{\beta},\qquad
+\mathcal R_\beta(r_\phi)
+=\frac{1}{2\beta}\|u_{r_\phi}-u_*\|_{F_0}^2.
+$$
+
+它就是上一节的 ProRM loss，同时惩罚 policy direction 的角度误差和自然梯度范数的校准
+误差。乘上全局常数不会改变 reward-class minimizer，但固定 `beta` 是下游决策问题的一部分，
+不能在方法之间分别调节后仍称为同一个 ProRM estimand。
+
+另一个合理但不同的决策问题是固定局部 KL 半径 `K`：
+
+$$
+\max_\delta g_r^\top\delta
+\quad\text{s.t.}\quad
+\frac12\delta^\top F_0\delta\le K.
+$$
+
+当 `\|u_r\|_{F_0}>0` 时，其正向边界解为
+
+$$
+\delta_{K,r}
+=\frac{\sqrt{2K}}{\|u_r\|_{F_0}}u_r.
+$$
+
+用目标 reward 评价该约束解得到**次级 estimand**
+
+$$
+\boxed{
+\mathcal R_K^{\mathrm{con}}(r_\phi)
+=g_*^\top(\delta_{K,*}-\delta_{K,r_\phi})
+=\sqrt{2K}\,\|u_*\|_{F_0}
+\left(1-\cos_{F_0}(u_{r_\phi},u_*)\right)
+}.
+$$
+
+因此 fixed-K constrained regret 与 Fisher cosine 只检验角度；它们会主动消除 learned
+direction 的范数误差。若任一 Fisher norm 为零，归一化解和 cosine 均未定义，必须 fail
+closed。fixed-K 指标对 trust-region rollout 很有用，但不能替代 fixed-beta ProRM 主
+estimand。
 
 三边四响应 [closed-form example](closed_form_example.md) 给出 BT-MLE 与 population ProRM 的解析排序
 反转。它只证明理想 population objectives 可以选出不同 reward；它不使用 randomized `h`，
@@ -392,6 +495,30 @@ $$
 `p* in [0.25,0.75]`，并且 `gamma > max(p*,1-p*)`，即 `0.9>0.75`；这满足本实验采用的
 有限二阶矩充分条件。
 
+无偏与低方差不是同一件事。对当前 estimator 作高精度条件枚举可得：
+
+| `p` | `sd(h|p)`, `gamma=0.9` |
+|---:|---:|
+| `0.50` | `0.840942` |
+| `0.40/0.60` | `0.851791` |
+| `0.25/0.75` | `0.934657` |
+
+Phase 1 的 train-only node-centered oracle RMS 约为 `0.24`；对应全六 pair-margin RMS 约为
+`0.392`。所以单 edge 单份 `h` 的噪声标准差分别约为这两个尺度的 `3.5–3.9` 倍和
+`2.1–2.4` 倍。这不破坏 population identity，但会显著增加 finite-sample moment 方差。
+
+若对同一 edge 独立生成 `R` 份合法 randomized estimates `h_1,...,h_R`，则
+
+$$
+\bar h_R=\frac1R\sum_{j=1}^R h_j,\qquad
+\mathbb E[\bar h_R|e]=\Delta r^*(e),\qquad
+\operatorname{Var}(\bar h_R|e)=\frac1R\operatorname{Var}(h|e).
+$$
+
+因此下一 noisy-label 主臂固定 `R=4`：annotation cost 为四倍，条件标准差减半，仍严格无偏。
+BT-MLE 必须使用四份 replicate 的全部 Bernoulli labels。replicate boundaries 必须被 schema
+保存；把 labels 直接拼接后按一个更大的 `N` 重算 `h` 不是同一个 estimator。
+
 不得硬截断、clip 大 `N`、按 `N` 重采样或静默丢弃。memory guard 只能使 run fail closed，
 不能改变 estimator。
 
@@ -426,6 +553,24 @@ $$
 
 所以固定 `L` 的人类数据实验必须称为 **candidate-restricted truncated ProRM+ robustness**，
 不能援引精确无偏 identity。
+
+### 4.5 BTL temperature 与 cardinal scale
+
+Repeated labels 识别的是 preference log-odds。若真实 observation model 为
+
+$$
+p^*(e)=\sigma(\Delta u^*(e)/\tau),
+$$
+
+则 `h` 无偏识别 `Delta u*/tau`，而不是另有绝对单位的 `Delta u*`。全局常数 `tau` 可以
+通过把 downstream penalty 同时改写为 `beta/tau` 吸收；因此 synthetic Phase 1 固定 unit
+temperature 并让 transformed oracle reward 与 `beta` 使用同一尺度。
+
+若 annotator/edge temperature 异质，`h` 识别的是 edge-dependent rescaled margin，通常不再
+对应一个全局 scalar reward potential。仅有 pairwise choices 时，cardinal utility scale 与
+downstream `beta` 不能分别识别。真实人类实验必须显式建模 annotator temperature/mixture，
+或把结论限制为所识别 log-odds reward 下的 prospective policy utility，不能静默把它称为
+绝对 human utility。
 
 ## 5. Observable ProRM+ Fisher–GMM objective
 
@@ -568,14 +713,50 @@ $$
 
 不得把 empirical ridge objective 称为 population identity 的“精确实现”。
 
-### 6.1 Ridge 的坐标依赖性
+还有一个必须写清楚的对应关系：把
+$H_\lambda=\widehat F_0+\lambda I$ 当作下游局部 optimizer 的 metric 时，
+$\widehat m^\top H_\lambda^{-1}\widehat m/(2\beta)$ 才是该
+**ridge-regularized local optimizer** 的精确 quadratic target。若有限 policy endpoint
+仍只报告
+$\mathbb E[r^*]-\beta D_{\rm KL}(\pi\Vert\pi_0)$、不把
+$\lambda\|\delta\|_2^2/2$ 计入 utility，那么 damped oracle direction 只是一个共同的
+算法正控，不是该无 ridge utility 的解析最优解。下一实验因此：
+
+1. 对所有 learner 与 oracle arm 使用完全相同的 $H_\lambda$；
+2. 把 oracle comparator 称为 `oracle-step reference`，不称 global optimum；
+3. 保留 $\lambda$ sensitivity；
+4. 增加一个 $d<n_F$、经验 Fisher 可识别的低维 tangent positive control，直接检查
+   $\lambda\to0$ 时的 population mechanism。
+
+### 6.1 Moment 无偏不等于 loss 无偏
+
+对一个不依赖当前样本的固定 `phi`，`\hat m_phi` 是 population moment `m_phi` 的无偏估计。
+但即使先把 weighting matrix `W` 当作固定量，
+
+$$
+\mathbb E[\widehat m_\phi^\top W\widehat m_\phi]
+=m_\phi^\top Wm_\phi
++\operatorname{tr}\!\left(W\operatorname{Var}(\widehat m_\phi)\right).
+$$
+
+所以 empirical quadratic 不是 population ProRM loss 的无偏 estimator；估计
+`F_hat+lambda I` 的逆、再让训练后的 `phi_hat` 依赖同一批数据，只会进一步增加有限样本差异。
+正确表述是：ProRM+ 有一个 unbiased identifying moment，并以 regularized empirical GMM
+训练；不能写成“ProRM+ loss 本身无偏”。
+
+这也是必须保留独立 held-out prompts、exact-margin positive control、label-replicate curve
+和 sample-size sweep 的原因。用两个独立 moment batches 构造 cross-product 可以消掉固定
+`phi,W` 下的对角方差项，但该 estimator 可为负，且无法自动解决 learned `phi`、estimated
+Fisher 与 reward-class overfitting；因此它只适合作为诊断，不替换主训练 objective。
+
+### 6.2 Ridge 的坐标依赖性
 
 `lambda*I` 不具任意 tangent reparameterization invariance。
 `lambda=c*mean(diag(F_hat))` 只消除统一全局尺度，不能抵消各坐标的非等比例变化。因此
 fixed-A seed/state、LoRA alpha、B layout、shape、scale、flatten order 与 hash 都是 empirical
 objective 的科学定义，而不只是 provenance。训练与 rollout 必须复用同一坐标。
 
-### 6.2 Train 与 held-out 不是同一个 estimator
+### 6.3 Train 与 held-out 不是同一个 estimator
 
 | 用途 | Moment/Fisher | Damping |
 |---|---|---|
@@ -584,6 +765,9 @@ objective 的科学定义，而不只是 provenance。训练与 rollout 必须�
 | held-out | prompt covariance `g_hat_error`, held-out node Fisher | 每个 split 独立解析 |
 
 Held-out covariance 直接估计 `g_error`，所以没有 pair identity 中的 `1/2`；这不是常数冲突。
+更重要的是，held-out metric 会用 held-out moment、held-out Fisher 和 held-out damping
+**重新求解** predicted/target directions。它保持 reward head 冻结，但不是把实际部署的
+train direction 搬到 held-out split 上打分。这个区别在第 8 节写成显式公式。
 
 ## 7. PCG、reported value 与 envelope gradient
 
@@ -711,6 +895,32 @@ geometry metrics 是：
 
 若任一 direction 的 Fisher norm 为零，cosine 未定义，正式结果必须 fail closed。
 
+设 `H` 表示 validation 或 test split。冻结训练后的 reward head 后，held-out evaluator
+重新计算
+
+$$
+u_{\phi}^{H}
+=(\widehat F_H+\lambda_HI)^{-1}\widehat g_{\phi}^{H},
+\qquad
+u_*^{H}
+=(\widehat F_H+\lambda_HI)^{-1}\widehat g_*^{H}.
+$$
+
+held-out local regret、direction error 和 cosine 都由这两个 **held-out re-solved**
+directions 构造。它们估计“同一 reward function 在新 prompt/candidate geometry 中会诱导
+什么局部方向”，不是实际写入 policy 的参数向量。实际部署方向只由 train quantities
+定义：
+
+$$
+d_{\phi}^{\mathrm{deploy}}
+=\beta^{-1}(\widehat F_{\mathrm{train}}+\lambda_{\mathrm{train}}I)^{-1}
+\widehat g_{\phi}^{\mathrm{train}}.
+$$
+
+后者在 rollout 前冻结；test moment/Fisher 不得用于重新求解或修改它。因此 held-out
+re-solve 指标与 deployed-direction rollout 的 ordering 不同并不构成数值矛盾，它表示
+跨 split geometry 与 finite-update transfer 没有保持同一 ordering。
+
 ### 8.2 Prediction metrics 只是描述指标
 
 Held-out preference diagnostics 报告：
@@ -724,7 +934,8 @@ preference geometry 与 policy geometry 是否出现预期分离，不能替代 
 
 ### 8.3 Matched measured-KL policy optimization
 
-分别由 BT-MLE 与 ProRM+ reward moments 构造 FP64 natural direction，并以 FP64 train
+分别由 BT-MLE 与 ProRM+ 的 **train reward moments** 构造上述 deployed FP64 natural
+direction，并以 FP64 train
 Fisher 计算 quadratic 初值；只有真正写入 FP32 LoRA-B 参数时才按参数 dtype 转换。Fisher
 quadratic
 
@@ -733,21 +944,90 @@ $$
 =\sqrt{\frac{2\kappa}{d^\top Fd}}
 $$
 
-只提供 line-search 初值。每个方法必须独立测量更新后 policy 对 reference policy 的
-sequence-level forward KL，并匹配到
+只提供 line-search 初值。每个方法必须独立测量固定 reference histories 上
+reference policy 到 updated policy 的
+sequence-level KL，并匹配到
 
 $$
 \kappa=0.01\quad\text{with relative tolerance }0.05.
 $$
 
+即 Phase 1 接受量的参数顺序是
+$D_{\mathrm{KL}}(\pi_0\Vert\pi_{\alpha d})$，不是理论全局目标中的
+$D_{\mathrm{KL}}(\pi_{\alpha d}\Vert\pi_0)$。两者共享 `theta_0` 处的局部 Fisher，但有限
+步长下只能把该 line search 解释为一个 code-locked operational KL budget。
+
 最终接受依据是 measured KL，不是二阶预测。随后用 common-random candidate indices 比较
 zero-B、BT-MLE update 与 ProRM+ update 的 transformed-oracle reward improvement。
+
+这个 learner-specific line search 把每个 direction 归一化到相同实测半径，因而对应
+fixed-K transfer test；它不是 fixed-beta ProRM 主 estimand 的直接 rollout。固定 β 与
+固定 K 回答不同问题，正式结果必须分别报告。
+
+### 8.4 下一实验：common-beta 与 train-only oracle calibration
+
+下一实验使用新的 design identity，主链改为 **common-beta deployment**：
+
+1. 先用 train split 的 operational-oracle rewards 与 train Fisher 构造
+
+   $$
+   u_*^{\rm tr}
+   =(\widehat F_{\rm tr}+\lambda I)^{-1}\widehat g_*^{\rm tr}.
+   $$
+
+   主尺度固定 `K_cal=0.003`，并按
+
+   $$
+   \boxed{
+   \beta_{\rm common}
+   =
+   \sqrt{
+   \frac{(u_*^{\rm tr})^\top\widehat F_{\rm tr}u_*^{\rm tr}}
+   {2K_{\rm cal}}
+   }}
+   $$
+
+   解析校准。它使 oracle local displacement `u*/beta_common` 的 train Fisher 二次 KL
+   等于 `K_cal`。规则在所有 seed 中相同，数值可随 train sample 改变；每个 seed 内只有一个
+   scalar，所有 learner 共享。calibration 不读取 validation/test reward、rollout 或 metric。
+2. `beta_common` 一经选定便对 BT-MLE、ProRM+ 和 oracle positive-control direction 完全相同；
+   learner 不再各自 line-search 或按自身 direction norm 重标。
+3. 实际部署
+   $d_\ell^{deploy}=u_{\ell,\mathrm{train}}/\beta_{\mathrm{common}}$。部署后同时报告
+   两种 KL 方向，但主 finite-policy utility 必须使用 updated-policy trajectories 上的
+   $D_{\mathrm{KL}}(\pi_{d_\ell}\Vert\pi_0)$：
+
+   $$
+   J_\ell^*
+   =
+   \mathbb E_{x,y\sim\pi_{d_\ell}}[r^*(x,y)]
+   -\beta_{\rm common}
+   D_{\rm KL}(\pi_{d_\ell}\Vert\pi_0).
+   $$
+
+   fixed-history $D_{\rm KL}(\pi_0\Vert\pi_{d_\ell})$ 只是 secondary diagnostic。两个量均不
+   用于事后改变 `beta_common`。
+4. held-out oracle 只能在参数与 `beta_common` 冻结后用于 evaluation。test Fisher/moment
+   仍只用于 held-out re-solve diagnostics，不参与 deployed train direction。
+5. fixed-beta regret 与 common-beta rollout 是主 estimand；fixed-K normalization、
+   constrained regret 和 Fisher cosine 保留为次级机制诊断。
+6. 主 safety cap 固定为 measured policy-to-reference KL `0.02`；超限 fail closed，不缩放。
+   `K_cal in {0.001,0.01}` 只作局部尺度 sensitivity。
+7. 在 common-beta rollout 前先过两个 train/local positive controls：
+   `h=Delta r*` 的 zero-noise oracle-margin arm，以及 `R=4` independent `gamma=0.9`
+   estimates 的 noisy arm。四个 iid candidates 的六条无序边另作 natural-pair efficiency
+   arm；它是 prompt-level U-statistic，必须按 prompt 聚类，不能把六条相关边当成六个独立
+   prompts。
+
+这项新实验不重写已完成 Phase 1。Phase 1 的 learner-specific matched-KL rollout 仍是合法的
+fixed-K transfer test，其 `not_passed` 状态保持不变。
 
 ## 9. Assumptions, failure modes and protections
 
 | Assumption | Violation | Current protection |
 |---|---|---|
 | Local reward/KL Taylor model is adequate | ProRM identity cannot be extrapolated to a large update | One update; measured-KL budget `0.01` |
+| Theoretical and measured KL orientations are interchangeable only locally | Finite-step fixed-K matching could differ from the policy-to-reference regularized objective | Record explicit argument order; interpret Phase 1 matching as an operational secondary estimand |
 | Candidates are sampled from `pi_0` | Score identity and Fisher distribution are wrong | Same FP32 instance; exact tokens; no filtering |
 | Tangent coordinates match | Objective weights unusable policy directions | Fixed-A, zero-B, identical layout/scale/hash |
 | Edge law is natural `Q_0` | Pair moment no longer identifies `A_0r` without correction | Canonical `0-1` endpoints are independent base samples |
@@ -776,7 +1056,9 @@ Public terminology is ProRM/ProRM+. The repository and Python namespace remain `
 | fixed-A LoRA score/layout | `src/smart_reward/hf.py`, `scores.py` |
 | BT-MLE / ProRM+ fixed-step trainers | `src/smart_reward/training.py` |
 | held-out policy geometry | `src/smart_reward/metrics.py` |
-| natural directions and measured KL | `src/smart_reward/rollout.py`, `policy_update.py` |
+| fixed-β/fixed-K estimands | `src/smart_reward/metrics.py`, `estimand_audit.py` |
+| natural directions and both measured-KL orientations | `src/smart_reward/rollout.py`, `policy_update.py` |
+| common-β calibration and finite-policy utility | `src/smart_reward/common_beta.py` |
 | real-model orchestration | `src/smart_reward/phase1.py`, `phase1_rollout.py` |
 
 The public CLI is `prorm`; the historical `smart-reward` executable remains a compatibility alias during

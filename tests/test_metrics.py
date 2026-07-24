@@ -3,6 +3,10 @@ import torch
 
 import smart_reward.metrics as metrics_module
 from smart_reward.metrics import (
+    FixedBetaLocalResult,
+    FixedKNormalizedLocalResult,
+    fixed_beta_deployed_direction_regret,
+    fixed_k_normalized_local_regret,
     gauge_center,
     local_regret,
     natural_direction,
@@ -180,3 +184,265 @@ def test_perfect_rewards_have_zero_regret_and_direction_error() -> None:
     assert regret.item() == 0.0
     assert metrics.squared_fisher_error.item() == 0.0
     assert torch.allclose(metrics.fisher_cosine, torch.ones((), dtype=torch.float64), atol=1.0e-12)
+
+
+def test_fixed_beta_evaluates_the_deployed_displacement_with_singular_fisher() -> None:
+    fisher = torch.diag(torch.tensor([2.0, 0.0], dtype=torch.float64))
+    target_moment = torch.tensor([4.0, 0.0], dtype=torch.float64)
+    # The second coordinate is Fisher-null and must not change utility or regret.
+    deployed = torch.tensor([0.5, 17.0], dtype=torch.float64)
+
+    result = fixed_beta_deployed_direction_regret(
+        fisher,
+        target_moment,
+        deployed,
+        beta=2.0,
+    )
+
+    assert isinstance(result, FixedBetaLocalResult)
+    assert torch.equal(
+        result.effective_deployed_direction,
+        torch.tensor([0.5, 0.0], dtype=torch.float64),
+    )
+    assert torch.allclose(
+        result.target_optimal_direction,
+        torch.tensor([1.0, 0.0], dtype=torch.float64),
+    )
+    assert result.deployed_target_utility.item() == pytest.approx(1.5)
+    assert result.optimal_target_utility.item() == pytest.approx(2.0)
+    assert result.regret.item() == pytest.approx(0.5)
+    assert result.deployed_quadratic_kl.item() == pytest.approx(0.25)
+    assert result.optimal_quadratic_kl.item() == pytest.approx(1.0)
+
+
+def test_fixed_beta_and_fixed_k_are_distinct_estimands() -> None:
+    fisher = torch.eye(2, dtype=torch.float64)
+    target_moment = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    unit_ray = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    scaled_ray = 2.0 * unit_ray
+
+    unit_fixed_beta = fixed_beta_deployed_direction_regret(
+        fisher,
+        target_moment,
+        unit_ray,
+        beta=1.0,
+    )
+    scaled_fixed_beta = fixed_beta_deployed_direction_regret(
+        fisher,
+        target_moment,
+        scaled_ray,
+        beta=1.0,
+    )
+    unit_fixed_k = fixed_k_normalized_local_regret(
+        fisher,
+        target_moment,
+        unit_ray,
+        kappa=0.5,
+    )
+    scaled_fixed_k = fixed_k_normalized_local_regret(
+        fisher,
+        target_moment,
+        scaled_ray,
+        kappa=0.5,
+    )
+
+    assert unit_fixed_beta.regret.item() == 0.0
+    assert scaled_fixed_beta.regret.item() == pytest.approx(0.5)
+    assert unit_fixed_k.regret.item() == 0.0
+    assert scaled_fixed_k.regret.item() == 0.0
+    assert torch.allclose(
+        unit_fixed_k.normalized_deployed_direction,
+        scaled_fixed_k.normalized_deployed_direction,
+    )
+
+
+def test_fixed_k_projects_fisher_null_components_and_spends_the_requested_budget() -> None:
+    fisher = torch.diag(torch.tensor([2.0, 0.0], dtype=torch.float64))
+    target_moment = torch.tensor([4.0, 0.0], dtype=torch.float64)
+    deployed_ray = torch.tensor([0.5, 9.0], dtype=torch.float64)
+
+    result = fixed_k_normalized_local_regret(
+        fisher,
+        target_moment,
+        deployed_ray,
+        kappa=0.25,
+    )
+
+    assert isinstance(result, FixedKNormalizedLocalResult)
+    assert torch.allclose(
+        result.normalized_deployed_direction,
+        torch.tensor([0.5, 0.0], dtype=torch.float64),
+    )
+    assert torch.allclose(
+        result.target_optimal_direction,
+        torch.tensor([0.5, 0.0], dtype=torch.float64),
+    )
+    assert result.deployed_quadratic_kl.item() == pytest.approx(0.25)
+    assert result.optimal_quadratic_kl.item() == pytest.approx(0.25)
+    assert result.deployed_target_improvement.item() == pytest.approx(2.0)
+    assert result.optimal_target_improvement.item() == pytest.approx(2.0)
+    assert result.regret.item() == 0.0
+    assert result.fisher_cosine.item() == pytest.approx(1.0)
+    assert result.deployed_direction_has_zero_fisher_norm is False
+    assert result.target_moment_is_zero is False
+
+
+def test_fixed_k_handles_zero_deployed_and_zero_target_directions_explicitly() -> None:
+    fisher = torch.eye(2, dtype=torch.float64)
+    target_moment = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    zero = torch.zeros(2, dtype=torch.float64)
+
+    zero_deployed = fixed_k_normalized_local_regret(
+        fisher,
+        target_moment,
+        zero,
+        kappa=0.5,
+    )
+    assert zero_deployed.deployed_direction_has_zero_fisher_norm is True
+    assert torch.equal(zero_deployed.normalized_deployed_direction, zero)
+    assert zero_deployed.optimal_target_improvement.item() == pytest.approx(1.0)
+    assert zero_deployed.deployed_target_improvement.item() == 0.0
+    assert zero_deployed.regret.item() == pytest.approx(1.0)
+    assert torch.isnan(zero_deployed.fisher_cosine)
+
+    zero_target = fixed_k_normalized_local_regret(
+        fisher,
+        zero,
+        torch.tensor([3.0, -1.0], dtype=torch.float64),
+        kappa=0.5,
+    )
+    assert zero_target.target_moment_is_zero is True
+    assert torch.equal(zero_target.target_optimal_direction, zero)
+    assert zero_target.optimal_target_improvement.item() == 0.0
+    assert zero_target.deployed_target_improvement.item() == 0.0
+    assert zero_target.regret.item() == 0.0
+    assert torch.isnan(zero_target.fisher_cosine)
+
+
+def test_fixed_k_zero_budget_produces_zero_updates() -> None:
+    result = fixed_k_normalized_local_regret(
+        torch.eye(2, dtype=torch.float64),
+        torch.tensor([1.0, 2.0], dtype=torch.float64),
+        torch.tensor([-3.0, 4.0], dtype=torch.float64),
+        kappa=0.0,
+    )
+
+    assert torch.count_nonzero(result.normalized_deployed_direction).item() == 0
+    assert torch.count_nonzero(result.target_optimal_direction).item() == 0
+    assert result.deployed_quadratic_kl.item() == 0.0
+    assert result.optimal_quadratic_kl.item() == 0.0
+    assert result.regret.item() == 0.0
+
+
+@pytest.mark.parametrize(
+    "function, keyword",
+    [
+        (fixed_beta_deployed_direction_regret, {"beta": 1.0}),
+        (fixed_k_normalized_local_regret, {"kappa": 0.5}),
+    ],
+)
+def test_local_estimand_primitives_reject_target_moment_outside_fisher_range(
+    function,
+    keyword,
+) -> None:
+    fisher = torch.diag(torch.tensor([1.0, 0.0], dtype=torch.float64))
+    target_moment = torch.tensor([0.0, 1.0], dtype=torch.float64)
+    deployed = torch.tensor([1.0, 0.0], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match=r"Range\(fisher_matrix\)"):
+        function(fisher, target_moment, deployed, **keyword)
+
+
+@pytest.mark.parametrize(
+    ("fisher", "target", "deployed", "error", "match"),
+    [
+        (
+            torch.eye(2, dtype=torch.float64),
+            torch.ones(2, dtype=torch.float64),
+            torch.ones(3, dtype=torch.float64),
+            ValueError,
+            "same shape",
+        ),
+        (
+            torch.eye(2, dtype=torch.float32),
+            torch.ones(2, dtype=torch.float64),
+            torch.ones(2, dtype=torch.float64),
+            ValueError,
+            "share dtype",
+        ),
+        (
+            torch.tensor([[1.0, float("nan")], [0.0, 1.0]], dtype=torch.float64),
+            torch.ones(2, dtype=torch.float64),
+            torch.ones(2, dtype=torch.float64),
+            ValueError,
+            "finite",
+        ),
+        (
+            torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64),
+            torch.ones(2, dtype=torch.float64),
+            torch.ones(2, dtype=torch.float64),
+            ValueError,
+            "symmetric",
+        ),
+        (
+            torch.diag(torch.tensor([1.0, -0.5], dtype=torch.float64)),
+            torch.ones(2, dtype=torch.float64),
+            torch.ones(2, dtype=torch.float64),
+            ValueError,
+            "positive semidefinite",
+        ),
+    ],
+)
+def test_local_estimand_primitives_validate_shape_dtype_and_finiteness(
+    fisher,
+    target,
+    deployed,
+    error,
+    match,
+) -> None:
+    with pytest.raises(error, match=match):
+        fixed_beta_deployed_direction_regret(
+            fisher,
+            target,
+            deployed,
+            beta=1.0,
+        )
+
+
+def test_local_estimand_primitives_reject_unsupported_dtype_and_invalid_scalars() -> None:
+    fisher = torch.eye(2, dtype=torch.float16)
+    target = torch.ones(2, dtype=torch.float16)
+    deployed = torch.ones(2, dtype=torch.float16)
+    with pytest.raises(TypeError, match="torch.float32 or torch.float64"):
+        fixed_k_normalized_local_regret(
+            fisher,
+            target,
+            deployed,
+            kappa=0.5,
+        )
+
+    fisher64 = torch.eye(2, dtype=torch.float64)
+    target64 = torch.ones(2, dtype=torch.float64)
+    deployed64 = torch.ones(2, dtype=torch.float64)
+    with pytest.raises(ValueError, match="beta"):
+        fixed_beta_deployed_direction_regret(
+            fisher64,
+            target64,
+            deployed64,
+            beta=0.0,
+        )
+    with pytest.raises(ValueError, match="kappa"):
+        fixed_k_normalized_local_regret(
+            fisher64,
+            target64,
+            deployed64,
+            kappa=-1.0,
+        )
+    with pytest.raises(ValueError, match="rcond"):
+        fixed_k_normalized_local_regret(
+            fisher64,
+            target64,
+            deployed64,
+            kappa=0.5,
+            rcond=1.0,
+        )
