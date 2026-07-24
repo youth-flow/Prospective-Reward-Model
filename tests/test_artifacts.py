@@ -318,6 +318,80 @@ def test_environment_credentials_and_nonfinite_evidence_are_refused(
         )
 
 
+def test_tokenizer_metadata_is_not_misclassified_as_a_credential(tmp_path: Path) -> None:
+    pytest.importorskip("safetensors.torch")
+    evidence = {
+        "prompt_pool_selection": {
+            "selected_minimum_policy_chat_token_count": 8,
+            "selected_maximum_policy_chat_token_count": 19,
+        },
+        "policy_prompt_semantics": {
+            "max_prompt_tokens": 1024,
+            "fail_closed_above_max_prompt_tokens": True,
+            "records": [
+                {
+                    "policy_chat_token_count": 8,
+                    "policy_prompt_token_ids_sha256": "a" * 64,
+                }
+            ],
+        },
+        "reward_model": {"feature_pooling": "last_response_token"},
+    }
+    artifact = tmp_path / "tokenizer-metadata"
+    save_controlled_feature_artifact(
+        _experiment(),
+        artifact,
+        config_hash=CONFIG_HASH,
+        seed=1,
+        evidence=evidence,
+    )
+
+    metadata = json.loads((artifact / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["evidence"] == evidence
+
+
+@pytest.mark.parametrize(
+    "credential_key",
+    [
+        "token",
+        "access_token",
+        "access_token_count",
+        "auth_token",
+        "auth_token_sha256",
+        "huggingface_token",
+        "huggingface_token_prefix",
+        "session_token",
+        "session_token_ids",
+        "api_token_digest",
+        "id_token",
+        "access_tokens",
+        "auth_tokens",
+        "session_tokens",
+        "huggingface_tokens",
+        "api_tokens",
+        "jwt_token_count",
+        "csrf_token_count",
+        "xsrf_token_ids",
+        "slack_token_ids",
+        "deploy_token_count",
+        "registry_token_ids",
+    ],
+)
+def test_credential_token_keys_remain_forbidden(
+    tmp_path: Path,
+    credential_key: str,
+) -> None:
+    pytest.importorskip("safetensors.torch")
+    with pytest.raises(ArtifactError, match="environment/credential field"):
+        save_controlled_feature_artifact(
+            _experiment(),
+            tmp_path / credential_key,
+            config_hash=CONFIG_HASH,
+            seed=1,
+            evidence={credential_key: "not-even-a-real-secret"},
+        )
+
+
 def test_expected_identity_is_strict(tmp_path: Path) -> None:
     pytest.importorskip("safetensors.torch")
     artifact = tmp_path / "identity"

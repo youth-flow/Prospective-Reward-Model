@@ -80,7 +80,16 @@ _SENSITIVE_EVIDENCE_SEGMENTS = frozenset(
         "passwd",
         "private_key",
         "secret",
-        "token",
+    }
+)
+_SAFE_TOKEN_METADATA_KEYS = frozenset(
+    {
+        "fail_closed_above_max_prompt_tokens",
+        "max_prompt_tokens",
+        "policy_chat_token_count",
+        "policy_prompt_token_ids_sha256",
+        "selected_maximum_policy_chat_token_count",
+        "selected_minimum_policy_chat_token_count",
     }
 )
 _SECRET_VALUE_PATTERNS = (
@@ -137,6 +146,25 @@ def _key_segments(key: str) -> set[str]:
     return pieces
 
 
+def _is_sensitive_evidence_key(key: str) -> bool:
+    """Distinguish credential tokens from ordinary tokenizer metadata.
+
+    Every key containing the standalone segment ``token`` or ``tokens`` fails
+    closed unless it is one of the explicitly reviewed tokenizer-metadata
+    fields in the artifact schema.  This keeps counts and digests serializable
+    without letting credential namespaces hide behind structural suffixes.
+    """
+
+    snake_case = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake_case.lower()).strip("_")
+    segments = _key_segments(key)
+    if segments.intersection(_SENSITIVE_EVIDENCE_SEGMENTS):
+        return True
+    if not {"token", "tokens"}.intersection(segments):
+        return False
+    return normalized not in _SAFE_TOKEN_METADATA_KEYS
+
+
 def _validate_evidence(value: object, *, path: str = "evidence") -> Any:
     """Return a JSON-safe copy while rejecting likely environment/secret fields."""
 
@@ -158,7 +186,7 @@ def _validate_evidence(value: object, *, path: str = "evidence") -> Any:
         for key, item in value.items():
             if not isinstance(key, str) or not key:
                 raise ArtifactError(f"{path} keys must be non-empty strings")
-            if _key_segments(key).intersection(_SENSITIVE_EVIDENCE_SEGMENTS):
+            if _is_sensitive_evidence_key(key):
                 raise ArtifactError(
                     f"{path}.{key} is an environment/credential field and cannot be stored"
                 )
