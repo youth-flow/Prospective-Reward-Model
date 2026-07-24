@@ -3,7 +3,9 @@
 The tensor-only :func:`assemble_controlled_experiment` is the authoritative
 join boundary.  Prompt order defines the first tensor axis, all four candidate
 nodes are retained for the Fisher geometry, and only candidate ``0 - 1`` is an
-annotated edge.  Oracle calibration is fit exclusively on training nodes.
+annotated edge.  Phase 1 fits oracle calibration exclusively on training
+nodes; Phase 2 may instead supply a design-bound global calibration learned
+from permanently excluded Phase-1 training artifacts.
 
 The Hugging Face entry point is intentionally lazy and fail closed.  It loads
 only immutable revisions, defaults to the local cache, generates and scores
@@ -60,8 +62,8 @@ from .oracle import (
 )
 from .prompts import (
     PromptRecord,
+    build_policy_token_eligible_prompt_pool,
     load_multipref_parquet_snapshot,
-    prepare_multipref_prompts,
     save_prompt_jsonl,
 )
 from .scores import per_sample_scores
@@ -71,6 +73,33 @@ _SPLITS = ("train", "validation", "test")
 _NUM_CANDIDATES = 4
 _ASSEMBLY_SCHEMA = "phase1-assembly/v1"
 _MATERIALIZATION_SCHEMA = "phase1-materialization/v1"
+_POLICY_PROMPT_SEMANTICS_SCHEMA = "full-policy-prompt-semantics/v1"
+_FROZEN_ORACLE_CALIBRATION_KEYS = frozenset(
+    {
+        "mode",
+        "b",
+        "tau",
+        "aggregation_rule",
+        "source_split",
+        "source_config",
+        "source_config_hash",
+        "source_seeds_excluded_from_phase2",
+        "source_artifacts",
+    }
+)
+_FIXED_LORA_A_KEYS = frozenset(
+    {
+        "mode",
+        "initialization_seed",
+        "expected_sha256",
+        "source_seed",
+        "source_named_stream",
+        "source_config",
+        "source_config_hash",
+        "source_artifact_metadata_sha256",
+        "source_seed_excluded_from_phase2",
+    }
+)
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
@@ -291,6 +320,186 @@ def _reward_class_projection_diagnostic(
     }
 
 
+def _normalize_frozen_oracle_calibration(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    """Validate and detach the global transform provenance used by Phase 2."""
+
+    if not isinstance(value, Mapping) or set(value) != _FROZEN_ORACLE_CALIBRATION_KEYS:
+        raise ValueError("oracle transform calibration must contain the exact frozen-global schema")
+    if value["mode"] != "frozen_global":
+        raise ValueError("oracle transform calibration mode must equal 'frozen_global'")
+    if value["aggregation_rule"] != "componentwise_median":
+        raise ValueError(
+            "oracle transform calibration aggregation_rule must equal 'componentwise_median'"
+        )
+    if value["source_split"] != "train":
+        raise ValueError("oracle transform calibration source_split must equal 'train'")
+    if value["source_seeds_excluded_from_phase2"] is not True:
+        raise ValueError("oracle transform calibration source seeds must be excluded from Phase 2")
+    for name in ("source_config", "source_config_hash"):
+        if not isinstance(value[name], str) or not value[name]:
+            raise ValueError(f"oracle transform calibration {name} must be non-empty")
+    source_config_hash = str(value["source_config_hash"])
+    if len(source_config_hash) != 64 or any(
+        character not in _LOWER_HEX for character in source_config_hash
+    ):
+        raise ValueError("oracle transform calibration source_config_hash must be SHA-256")
+
+    # RobustOracleTransform owns the finite-value and positive-scale checks.
+    transform = RobustOracleTransform(b=value["b"], tau=value["tau"])
+    raw_artifacts = value["source_artifacts"]
+    if isinstance(raw_artifacts, (str, bytes, bytearray)) or not isinstance(
+        raw_artifacts,
+        Sequence,
+    ):
+        raise TypeError("oracle transform calibration source_artifacts must be a sequence")
+    if not raw_artifacts:
+        raise ValueError("oracle transform calibration source_artifacts must not be empty")
+    artifacts: list[dict[str, object]] = []
+    seen_seeds: set[int] = set()
+    seen_hashes: set[str] = set()
+    for index, raw_artifact in enumerate(raw_artifacts):
+        if not isinstance(raw_artifact, Mapping) or set(raw_artifact) != {
+            "seed",
+            "metadata_sha256",
+        }:
+            raise ValueError(
+                "oracle transform calibration source artifact must contain exactly "
+                "seed and metadata_sha256"
+            )
+        seed = raw_artifact["seed"]
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 or seed > 2**63 - 1:
+            raise ValueError(
+                f"oracle transform calibration source_artifacts[{index}].seed is invalid"
+            )
+        digest = raw_artifact["metadata_sha256"]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in _LOWER_HEX for character in digest)
+        ):
+            raise ValueError(
+                "oracle transform calibration source artifact metadata_sha256 is invalid"
+            )
+        if seed in seen_seeds or digest in seen_hashes:
+            raise ValueError("oracle transform calibration source artifacts must be unique")
+        seen_seeds.add(seed)
+        seen_hashes.add(digest)
+        artifacts.append({"seed": seed, "metadata_sha256": digest})
+
+    return {
+        "mode": "frozen_global",
+        "b": transform.b,
+        "tau": transform.tau,
+        "aggregation_rule": "componentwise_median",
+        "source_split": "train",
+        "source_config": str(value["source_config"]),
+        "source_config_hash": source_config_hash,
+        "source_seeds_excluded_from_phase2": True,
+        "source_artifacts": artifacts,
+    }
+
+
+def _policy_lora_a_initialization(
+    policy_config: Mapping[str, object],
+    *,
+    run_seed: int,
+) -> dict[str, object]:
+    """Resolve the effective LoRA-A seed without changing Phase-1 semantics."""
+
+    validated_seed = _validate_seed(run_seed)
+    current_seed_derived = SeedBundle.from_base_seed(validated_seed).policy_lora_a
+    fixed = policy_config.get("fixed_lora_a")
+    if fixed is None:
+        return {
+            "mode": "current_seed_derived",
+            "initialization_seed": current_seed_derived,
+            "expected_sha256": None,
+            "current_run_seed": validated_seed,
+            "current_seed_derived_initialization_seed": current_seed_derived,
+            "current_seed_derivation_used": True,
+        }
+    if not isinstance(fixed, Mapping) or set(fixed) != _FIXED_LORA_A_KEYS:
+        raise ValueError("policy.fixed_lora_a must contain the exact frozen-global schema")
+    if fixed["mode"] != "frozen_global":
+        raise ValueError("policy.fixed_lora_a.mode must equal 'frozen_global'")
+    initialization_seed = fixed["initialization_seed"]
+    source_seed = fixed["source_seed"]
+    if (
+        isinstance(initialization_seed, bool)
+        or not isinstance(initialization_seed, int)
+        or initialization_seed < 0
+        or initialization_seed > 2**63 - 1
+    ):
+        raise ValueError("policy.fixed_lora_a.initialization_seed is invalid")
+    if (
+        isinstance(source_seed, bool)
+        or not isinstance(source_seed, int)
+        or source_seed < 0
+        or source_seed > 2**63 - 1
+    ):
+        raise ValueError("policy.fixed_lora_a.source_seed is invalid")
+    if SeedBundle.from_base_seed(source_seed).policy_lora_a != initialization_seed:
+        raise ValueError(
+            "policy.fixed_lora_a.initialization_seed does not match its source named seed"
+        )
+    for name in (
+        "expected_sha256",
+        "source_config_hash",
+        "source_artifact_metadata_sha256",
+    ):
+        digest = fixed[name]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in _LOWER_HEX for character in digest)
+        ):
+            raise ValueError(f"policy.fixed_lora_a.{name} must be a lowercase SHA-256 digest")
+    if fixed["source_named_stream"] != "policy_lora_a":
+        raise ValueError("policy.fixed_lora_a.source_named_stream must equal 'policy_lora_a'")
+    if not isinstance(fixed["source_config"], str) or not fixed["source_config"]:
+        raise ValueError("policy.fixed_lora_a.source_config must be non-empty")
+    if fixed["source_seed_excluded_from_phase2"] is not True:
+        raise ValueError("policy.fixed_lora_a source seed must be excluded from Phase 2")
+
+    return {
+        **dict(fixed),
+        "current_run_seed": validated_seed,
+        "current_seed_derived_initialization_seed": current_seed_derived,
+        "current_seed_derivation_used": False,
+    }
+
+
+def _policy_lora_a_initialization_evidence(
+    policy_config: Mapping[str, object],
+    *,
+    run_seed: int,
+    observed_sha256: str,
+) -> dict[str, object]:
+    """Bind the resolved seed/provenance to the observed LoRA-A tensor bytes."""
+
+    if (
+        not isinstance(observed_sha256, str)
+        or len(observed_sha256) != 64
+        or any(character not in _LOWER_HEX for character in observed_sha256)
+    ):
+        raise ValueError("observed LoRA-A fingerprint must be a lowercase SHA-256 digest")
+    initialization = _policy_lora_a_initialization(
+        policy_config,
+        run_seed=run_seed,
+    )
+    expected = initialization["expected_sha256"]
+    if expected is not None and observed_sha256 != expected:
+        raise RuntimeError(
+            "configured global LoRA-A fingerprint does not match the initialized policy"
+        )
+    return {
+        **initialization,
+        "observed_sha256": observed_sha256,
+    }
+
+
 def assemble_controlled_experiment(
     prompt_records: Sequence[PromptRecord],
     policy_scores: torch.Tensor,
@@ -299,12 +508,15 @@ def assemble_controlled_experiment(
     *,
     seed: int,
     gamma: float = DEFAULT_CONTINUATION_PROBABILITY,
+    oracle_transform_calibration: Mapping[str, object] | None = None,
 ) -> Phase1Assembly:
     """Join ordered node tensors into the locked controlled experiment.
 
     ``prompt_records[i]`` is the explicit join key for tensor row ``i``.  The
-    robust oracle transform is fit on all and only the ``train`` rows.  Raw or
-    transformed rewards are never supplied to :class:`TrainingTensorData`.
+    robust oracle transform is fit on all and only the ``train`` rows unless a
+    validated ``frozen_global`` calibration is supplied.  In that Phase-2
+    mode, the current seed's oracle scores never select ``b`` or ``tau``.  Raw
+    or transformed rewards are never supplied to :class:`TrainingTensorData`.
     A private named CPU generator samples iid BTL labels and does not mutate
     Python, CPU-Torch, or CUDA global RNG state.
     """
@@ -330,9 +542,28 @@ def assemble_controlled_experiment(
     train_index = torch.tensor(
         split_indices["train"], dtype=torch.int64, device=raw_oracle_scores.device
     )
-    transform = fit_robust_oracle_transform(
-        raw_oracle_scores.index_select(0, train_index).reshape(-1)
-    )
+    if oracle_transform_calibration is None:
+        transform = fit_robust_oracle_transform(
+            raw_oracle_scores.index_select(0, train_index).reshape(-1)
+        )
+        transform_calibration: dict[str, object] = {
+            "mode": "current_seed_train_fit",
+            "b": transform.b,
+            "tau": transform.tau,
+            "aggregation_rule": "sample_median_and_scaled_mad",
+            "source_split": "train",
+            "source_seed": validated_seed,
+        }
+        oracle_fit_split = "train"
+        fitted_on_current_seed = True
+    else:
+        transform_calibration = _normalize_frozen_oracle_calibration(oracle_transform_calibration)
+        transform = RobustOracleTransform(
+            b=transform_calibration["b"],
+            tau=transform_calibration["tau"],
+        )
+        oracle_fit_split = "excluded_phase1_train_artifacts"
+        fitted_on_current_seed = False
     true_rewards = transform(raw_oracle_scores)
     train_reward_class_projection = _reward_class_projection_diagnostic(
         reward_features.index_select(0, train_index),
@@ -439,7 +670,9 @@ def assemble_controlled_experiment(
         "num_candidates": _NUM_CANDIDATES,
         "split_sizes": {split: len(split_indices[split]) for split in _SPLITS},
         "oracle_transform": {"b": transform.b, "tau": transform.tau},
-        "oracle_fit_split": "train",
+        "oracle_transform_calibration": transform_calibration,
+        "oracle_fit_split": oracle_fit_split,
+        "oracle_transform_fitted_on_current_seed": fitted_on_current_seed,
         "train_reward_class_projection": train_reward_class_projection,
         "edge_orientation": {"left_candidate": 0, "right_candidate": 1},
     }
@@ -496,6 +729,100 @@ def _prompt_text(record: PromptRecord) -> str:
             "controlled MultiPref prompts must contain exactly one user message and no system role"
         )
     return record.messages[0].content
+
+
+def _prompt_text_sha256(prompt: str) -> str:
+    if not isinstance(prompt, str) or not prompt:
+        raise ValueError("prompt must be a non-empty string")
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _prompt_token_ids_sha256(token_ids: Sequence[int]) -> str:
+    values = tuple(token_ids)
+    if not values or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values
+    ):
+        raise ValueError("prompt token IDs must be a non-empty sequence of non-negative integers")
+    encoded = json.dumps(
+        list(values),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _prompt_semantics_records_sha256(records: Sequence[Mapping[str, object]]) -> str:
+    encoded = json.dumps(
+        list(records),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _encode_full_policy_prompt(
+    tokenizer: object,
+    prompt: PromptRecord,
+    *,
+    max_prompt_tokens: int,
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
+    """Render one complete policy prompt and fail before any silent truncation.
+
+    The raw :class:`PromptRecord` remains the semantic source of truth.  The
+    Qwen policy tokenizer may render it with its own chat template, but it is
+    never allowed to shorten the rendered token sequence.  The returned
+    evidence binds the raw user text to the exact token prefix consumed by the
+    policy.
+    """
+
+    if (
+        isinstance(max_prompt_tokens, bool)
+        or not isinstance(max_prompt_tokens, int)
+        or max_prompt_tokens < 1
+    ):
+        raise ValueError("max_prompt_tokens must be a positive integer")
+    if not isinstance(device, torch.device):
+        raise TypeError("device must be a torch.device")
+    prompt_text = _prompt_text(prompt)
+    encoded = tokenizer.apply_chat_template(
+        [message.to_dict() for message in prompt.messages],
+        tokenize=True,
+        add_generation_prompt=True,
+        truncation=False,
+        return_tensors="pt",
+        return_dict=True,
+    )
+    inputs = _model_inputs(encoded, device)
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
+    if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        raise ValueError("one policy prompt must encode to a single token row")
+    if attention_mask.shape != input_ids.shape:
+        raise ValueError("policy prompt attention mask must match input_ids")
+    if not bool((attention_mask == 1).all()):
+        raise ValueError("single-prompt policy encoding must not contain padding")
+    token_count = int(input_ids.shape[1])
+    if token_count > max_prompt_tokens:
+        raise ValueError(
+            "policy prompt exceeds the frozen max_prompt_tokens and truncation is forbidden: "
+            f"prompt_id={prompt.prompt_id!r}, token_count={token_count}, "
+            f"max_prompt_tokens={max_prompt_tokens}"
+        )
+    token_ids = tuple(int(value) for value in input_ids[0].detach().cpu().tolist())
+    evidence = {
+        "prompt_id": prompt.prompt_id,
+        "raw_prompt_sha256": _prompt_text_sha256(prompt_text),
+        "policy_chat_token_count": token_count,
+        "policy_prompt_token_ids_sha256": _prompt_token_ids_sha256(token_ids),
+        "max_prompt_tokens": max_prompt_tokens,
+        "truncated": False,
+        "raw_prompt_preserved": True,
+    }
+    return inputs, evidence
 
 
 @contextmanager
@@ -583,9 +910,10 @@ def _load_prompts(
     datasets: Any,
     config: Mapping[str, Any],
     *,
+    policy_tokenizer: object,
     split_seed: int,
     local_files_only: bool,
-) -> list[PromptRecord]:
+) -> tuple[list[PromptRecord], dict[str, object]]:
     data_config = config["data"]
     run_config = config["run"]
     try:
@@ -622,8 +950,13 @@ def _load_prompts(
                 data_config["prompt_revision"],
             ) from error
         raise
-    return prepare_multipref_prompts(
+    prompt_pool = build_policy_token_eligible_prompt_pool(
         rows,
+        policy_tokenizer=policy_tokenizer,
+        max_prompt_tokens=int(config["policy"]["max_prompt_tokens"]),
+        eligibility_rule=data_config.get("prompt_eligibility"),
+    )
+    return prompt_pool.select(
         split_sizes=run_config["split_sizes"],
         seed=split_seed,
     )
@@ -712,15 +1045,12 @@ def materialize_phase1(
     _require_module("safetensors")
     from .artifacts import save_controlled_feature_artifact
 
-    seeds = SeedBundle.from_base_seed(validated_seed)
-    prompts = _load_prompts(
-        datasets,
-        normalized,
-        split_seed=seeds.prompt_split,
-        local_files_only=local_files_only,
-    )
-
     policy_config = normalized["policy"]
+    lora_a_initialization = _policy_lora_a_initialization(
+        policy_config,
+        run_seed=validated_seed,
+    )
+    lora_a_seed = int(lora_a_initialization["initialization_seed"])
     tokenizer = _load_pretrained(
         transformers.AutoTokenizer,
         policy_config["model"],
@@ -734,8 +1064,16 @@ def materialize_phase1(
     tokenizer.truncation_side = "left"
     if getattr(tokenizer, "pad_token_id", None) is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
+    seeds = SeedBundle.from_base_seed(validated_seed)
+    prompts, prompt_pool_selection = _load_prompts(
+        datasets,
+        normalized,
+        policy_tokenizer=tokenizer,
+        split_seed=seeds.prompt_split,
+        local_files_only=local_files_only,
+    )
 
-    with _fork_torch_seed(seeds.policy_lora_a, target_device):
+    with _fork_torch_seed(lora_a_seed, target_device):
         policy_model = _load_pretrained(
             transformers.AutoModelForCausalLM,
             policy_config["model"],
@@ -747,16 +1085,12 @@ def materialize_phase1(
     policy_model.to(target_device)
     policy_model.eval()
 
-    first_encoded = tokenizer.apply_chat_template(
-        [message.to_dict() for message in prompts[0].messages],
-        tokenize=True,
-        add_generation_prompt=True,
-        truncation=True,
-        max_length=policy_config["max_prompt_tokens"],
-        return_tensors="pt",
-        return_dict=True,
+    probe_inputs, _ = _encode_full_policy_prompt(
+        tokenizer,
+        prompts[0],
+        max_prompt_tokens=int(policy_config["max_prompt_tokens"]),
+        device=target_device,
     )
-    probe_inputs = _model_inputs(first_encoded, target_device)
     with torch.inference_mode():
         reference_logits = policy_model(**probe_inputs, use_cache=False).logits.detach().clone()
 
@@ -770,8 +1104,14 @@ def materialize_phase1(
         init_lora_weights=True,
         task_type="CAUSAL_LM",
     )
-    with _fork_torch_seed(seeds.policy_lora_a, target_device):
+    with _fork_torch_seed(lora_a_seed, target_device):
         setup = configure_fixed_a_lora(policy_model, lora_config)
+    a_state_sha256 = setup.a_state_sha256
+    lora_a_evidence = _policy_lora_a_initialization_evidence(
+        policy_config,
+        run_seed=validated_seed,
+        observed_sha256=a_state_sha256,
+    )
     policy_model = setup.model
     policy_model.eval()
     with torch.inference_mode():
@@ -780,6 +1120,7 @@ def materialize_phase1(
     del reference_logits, adapted_logits
 
     candidate_nodes: list[CandidateNode] = []
+    prompt_semantics_records: list[dict[str, object]] = []
     policy_score_rows: list[torch.Tensor] = []
     reward_feature_rows: list[torch.Tensor] = []
     generation_kwargs = {
@@ -792,16 +1133,13 @@ def materialize_phase1(
     }
     with _fork_torch_seed(seeds.candidate_generation, target_device):
         for prompt in prompts:
-            encoded = tokenizer.apply_chat_template(
-                [message.to_dict() for message in prompt.messages],
-                tokenize=True,
-                add_generation_prompt=True,
-                truncation=True,
-                max_length=policy_config["max_prompt_tokens"],
-                return_tensors="pt",
-                return_dict=True,
+            prompt_inputs, prompt_semantics = _encode_full_policy_prompt(
+                tokenizer,
+                prompt,
+                max_prompt_tokens=int(policy_config["max_prompt_tokens"]),
+                device=target_device,
             )
-            prompt_inputs = _model_inputs(encoded, target_device)
+            prompt_semantics_records.append(prompt_semantics)
             candidates = generate_exact_candidates(
                 policy_model,
                 prompt_inputs["input_ids"],
@@ -863,7 +1201,6 @@ def materialize_phase1(
     policy_scores = torch.stack(policy_score_rows, dim=0)
     reward_features = torch.stack(reward_feature_rows, dim=0)
     layout_metadata = setup.layout.to_metadata()
-    a_state_sha256 = setup.a_state_sha256
     del setup, policy_model, policy_score_rows, reward_feature_rows, probe_inputs
     gc.collect()
     if target_device.type == "cuda":
@@ -923,6 +1260,7 @@ def materialize_phase1(
         raw_oracle_scores,
         seed=validated_seed,
         gamma=float(normalized["annotations"]["gamma"]),
+        oracle_transform_calibration=normalized["oracle"].get("transform_calibration"),
     )
 
     evaluation_edges = (*assembly.validation_edges, *assembly.test_edges)
@@ -937,12 +1275,25 @@ def materialize_phase1(
         "schema": _MATERIALIZATION_SCHEMA,
         "config_sha256": config_hash(normalized),
         "policy_a_sha256": a_state_sha256,
+        "policy_lora_a_initialization": lora_a_evidence,
         "policy_layout": layout_metadata,
         "policy_zero_b_max_absolute_error": zero_b_error,
         "chat_template_sha256": hashlib.sha256(
             str(tokenizer.chat_template).encode("utf-8")
         ).hexdigest(),
         "oracle_chat_template_sha256": oracle_chat_template_sha256,
+        "prompt_pool_selection": prompt_pool_selection,
+        "policy_prompt_semantics": {
+            "schema_version": _POLICY_PROMPT_SEMANTICS_SCHEMA,
+            "encoding": "policy_tokenizer_apply_chat_template",
+            "add_generation_prompt": True,
+            "truncation": False,
+            "fail_closed_above_max_prompt_tokens": True,
+            "max_prompt_tokens": int(policy_config["max_prompt_tokens"]),
+            "num_prompts": len(prompt_semantics_records),
+            "records_sha256": _prompt_semantics_records_sha256(prompt_semantics_records),
+            "records": prompt_semantics_records,
+        },
         "jsonl_sha256": json_hashes,
         "revisions": {
             "prompt_dataset": normalized["data"]["prompt_revision"],

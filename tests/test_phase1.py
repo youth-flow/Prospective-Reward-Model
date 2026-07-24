@@ -11,7 +11,10 @@ from smart_reward.config import load_config
 from smart_reward.data import repeated_labels_to_h
 from smart_reward.oracle import fit_robust_oracle_transform
 from smart_reward.phase1 import (
+    _encode_full_policy_prompt,
     _load_prompts,
+    _policy_lora_a_initialization,
+    _policy_lora_a_initialization_evidence,
     _reward_class_projection_diagnostic,
     assemble_controlled_experiment,
     materialize_phase1,
@@ -108,6 +111,98 @@ def test_assembler_fits_oracle_on_training_nodes_only_and_never_leaks() -> None:
         changed.evidence["train_reward_class_projection"]
         == result.evidence["train_reward_class_projection"]
     )
+
+
+def test_phase2_frozen_oracle_transform_is_reused_without_current_seed_refit() -> None:
+    calibration = load_config(
+        Path(__file__).resolve().parents[1] / "configs" / "common_beta_pilot_base.yaml"
+    )["oracle"]["transform_calibration"]
+    policy_scores, reward_features, raw_scores = _tensors()
+    first = assemble_controlled_experiment(
+        _records(),
+        policy_scores,
+        reward_features,
+        raw_scores,
+        seed=20260801,
+        oracle_transform_calibration=calibration,
+    )
+    shifted_scores = raw_scores * 1000.0 + 777.0
+    second = assemble_controlled_experiment(
+        _records(),
+        policy_scores,
+        reward_features,
+        shifted_scores,
+        seed=20260802,
+        oracle_transform_calibration=calibration,
+    )
+
+    assert first.oracle_transform == second.oracle_transform
+    assert first.oracle_transform.b == -4.500244140625
+    assert first.oracle_transform.tau == 2.7715682983398438
+    assert second.oracle_transform != fit_robust_oracle_transform(
+        shifted_scores[[0, 2]].reshape(-1)
+    )
+    for result in (first, second):
+        assert result.evidence["oracle_transform_calibration"] == calibration
+        assert result.evidence["oracle_fit_split"] == "excluded_phase1_train_artifacts"
+        assert result.evidence["oracle_transform_fitted_on_current_seed"] is False
+        assert [entry["seed"] for entry in calibration["source_artifacts"]] == [
+            20260722,
+            20260723,
+            20260724,
+            20260725,
+            20260726,
+        ]
+
+
+def test_phase2_reuses_one_global_lora_a_seed_and_phase1_keeps_per_seed_semantics() -> None:
+    root = Path(__file__).resolve().parents[1]
+    phase2_policy = load_config(root / "configs" / "common_beta_pilot_base.yaml")["policy"]
+    first = _policy_lora_a_initialization(phase2_policy, run_seed=20260801)
+    second = _policy_lora_a_initialization(phase2_policy, run_seed=20260802)
+
+    assert first["initialization_seed"] == second["initialization_seed"]
+    assert first["initialization_seed"] == 946081152281754541
+    assert first["expected_sha256"] == second["expected_sha256"]
+    assert first["expected_sha256"] == (
+        "a2b5804109396f76b96cde98d1e2060f175a47724b1ca9fef317c7a10cb9a838"
+    )
+    assert (
+        first["current_seed_derived_initialization_seed"]
+        != second["current_seed_derived_initialization_seed"]
+    )
+    assert first["current_seed_derivation_used"] is False
+    assert second["current_seed_derivation_used"] is False
+    assert first["source_seed"] == second["source_seed"] == 20260722
+    assert first["source_artifact_metadata_sha256"] == (
+        "8ec7ca893a7c93d4bbfac0b71b829b37ec63af3ca0c7a9496465ed60815b155f"
+    )
+    first_evidence = _policy_lora_a_initialization_evidence(
+        phase2_policy,
+        run_seed=20260801,
+        observed_sha256=str(first["expected_sha256"]),
+    )
+    second_evidence = _policy_lora_a_initialization_evidence(
+        phase2_policy,
+        run_seed=20260802,
+        observed_sha256=str(second["expected_sha256"]),
+    )
+    assert first_evidence["observed_sha256"] == second_evidence["observed_sha256"]
+    assert first_evidence["initialization_seed"] == second_evidence["initialization_seed"]
+    with pytest.raises(RuntimeError, match="fingerprint"):
+        _policy_lora_a_initialization_evidence(
+            phase2_policy,
+            run_seed=20260801,
+            observed_sha256="0" * 64,
+        )
+
+    phase1_policy = load_config(root / "configs" / "main.yaml")["policy"]
+    legacy_first = _policy_lora_a_initialization(phase1_policy, run_seed=20260722)
+    legacy_second = _policy_lora_a_initialization(phase1_policy, run_seed=20260723)
+    assert legacy_first["mode"] == legacy_second["mode"] == "current_seed_derived"
+    assert legacy_first["current_seed_derivation_used"] is True
+    assert legacy_second["current_seed_derivation_used"] is True
+    assert legacy_first["initialization_seed"] != legacy_second["initialization_seed"]
 
 
 def test_reward_class_projection_is_prompt_gauge_invariant() -> None:
@@ -302,6 +397,59 @@ def test_materializer_refuses_existing_files_before_optional_imports(tmp_path: P
     assert (target / "keep.txt").read_text(encoding="utf-8") == "user data"
 
 
+class _PromptTokenizer:
+    def __init__(self, token_count: int) -> None:
+        self.token_count = token_count
+        self.kwargs: dict[str, object] | None = None
+
+    def apply_chat_template(self, messages, **kwargs):
+        assert messages == [{"role": "user", "content": "complete original prompt"}]
+        self.kwargs = kwargs
+        return {
+            "input_ids": torch.arange(self.token_count, dtype=torch.int64).reshape(1, -1),
+            "attention_mask": torch.ones((1, self.token_count), dtype=torch.int64),
+        }
+
+
+def test_materialization_prompt_encoding_preserves_complete_raw_prompt() -> None:
+    tokenizer = _PromptTokenizer(7)
+    prompt = PromptRecord(
+        prompt_id="p-full",
+        messages=(ChatMessage(role="user", content="complete original prompt"),),
+        split="train",
+    )
+    inputs, evidence = _encode_full_policy_prompt(
+        tokenizer,
+        prompt,
+        max_prompt_tokens=8,
+        device=torch.device("cpu"),
+    )
+    assert tokenizer.kwargs is not None
+    assert tokenizer.kwargs["truncation"] is False
+    assert "max_length" not in tokenizer.kwargs
+    assert inputs["input_ids"].shape == (1, 7)
+    assert evidence["policy_chat_token_count"] == 7
+    assert evidence["truncated"] is False
+    assert evidence["raw_prompt_preserved"] is True
+    assert prompt.messages[0].content == "complete original prompt"
+
+
+def test_materialization_prompt_encoding_fails_closed_above_frozen_cap() -> None:
+    tokenizer = _PromptTokenizer(9)
+    prompt = PromptRecord(
+        prompt_id="p-too-long",
+        messages=(ChatMessage(role="user", content="complete original prompt"),),
+        split="train",
+    )
+    with pytest.raises(ValueError, match="truncation is forbidden"):
+        _encode_full_policy_prompt(
+            tokenizer,
+            prompt,
+            max_prompt_tokens=8,
+            device=torch.device("cpu"),
+        )
+
+
 def test_materializer_reports_missing_optional_dependency_without_download(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -332,7 +480,13 @@ def test_formal_prompt_loader_resolves_snapshot_then_reads_local_parquet(
     parquet = snapshot / "data" / "train-00000-of-00001.parquet"
     parquet.parent.mkdir(parents=True)
     parquet.write_bytes(b"test parquet placeholder")
-    rows = [{"prompt_id": f"p-{index}", "text": f"prompt {index}"} for index in range(64)]
+    rows = [
+        {
+            "prompt_id": f"p-{index}",
+            "text": f"{'long ' if index < 6 else ''}prompt {index}",
+        }
+        for index in range(70)
+    ]
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     class DownloadConfig:
@@ -367,15 +521,37 @@ def test_formal_prompt_loader_resolves_snapshot_then_reads_local_parquet(
             hub if name == "huggingface_hub" else (_ for _ in ()).throw(AssertionError(name))
         ),
     )
+    config["data"]["prompt_eligibility"] = (
+        "policy_chat_template_tokens_lte_max_prompt_tokens_before_seeded_shuffle"
+    )
 
-    prompts = _load_prompts(
+    class Tokenizer:
+        chat_template = "test-template"
+
+        @staticmethod
+        def apply_chat_template(messages, **kwargs):
+            assert kwargs == {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "truncation": False,
+            }
+            return [1] * (400 if messages[0]["content"].startswith("long ") else 8)
+
+    prompts, selection = _load_prompts(
         datasets,
         config,
+        policy_tokenizer=Tokenizer(),
         split_seed=123,
         local_files_only=True,
     )
 
     assert len(prompts) == 64
+    assert selection["dataset_unique_prompt_count"] == 70
+    assert selection["eligible_prompt_count"] == 64
+    assert selection["excluded_over_limit_prompt_count"] == 6
+    assert selection["filter_applied_before_seeded_shuffle"] is True
+    assert selection["selected_maximum_policy_chat_token_count"] == 8
+    assert all(not prompt.messages[0].content.startswith("long ") for prompt in prompts)
     assert calls[0][0] == ("parquet",)
     assert calls[0][1]["data_files"] == {"train": [str(parquet)]}
     assert calls[0][1]["download_config"].local_files_only is True

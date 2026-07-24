@@ -21,8 +21,8 @@ from pathlib import Path
 
 from smart_reward.config import config_hash, load_config
 from smart_reward.prompts import (
+    build_policy_token_eligible_prompt_pool,
     load_multipref_parquet_snapshot,
-    prepare_multipref_prompts,
 )
 from smart_reward.seeding import SeedBundle
 
@@ -253,7 +253,8 @@ def _verify_offline_resolution(
         ) from error
 
     model_checks: list[dict[str, object]] = []
-    seen_models: set[tuple[str, str]] = set()
+    tokenizers_by_identity: dict[tuple[str, str], object] = {}
+    policy_tokenizer: object | None = None
     for section_name in ("policy", "oracle"):
         section = config[section_name]
         if not isinstance(section, Mapping):
@@ -261,36 +262,40 @@ def _verify_offline_resolution(
         model_id = str(section["model"])
         revision = str(section["revision"])
         identity = (model_id, revision)
-        if identity in seen_models:
-            continue
-        seen_models.add(identity)
-        loaded_config = AutoConfig.from_pretrained(
-            model_id,
-            revision=revision,
-            cache_dir=hub_cache,
-            local_files_only=True,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
-            revision=revision,
-            cache_dir=hub_cache,
-            local_files_only=True,
-            use_fast=True,
-        )
-        chat_template = getattr(tokenizer, "chat_template", None)
-        if not isinstance(chat_template, str) or not chat_template.strip():
-            raise RuntimeError(
-                f"pinned tokenizer has no non-empty chat template: {model_id}@{revision}"
+        tokenizer = tokenizers_by_identity.get(identity)
+        if tokenizer is None:
+            loaded_config = AutoConfig.from_pretrained(
+                model_id,
+                revision=revision,
+                cache_dir=hub_cache,
+                local_files_only=True,
             )
-        model_checks.append(
-            {
-                "repo_id": model_id,
-                "revision": revision,
-                "model_type": str(getattr(loaded_config, "model_type", "")),
-                "tokenizer_class": type(tokenizer).__name__,
-                "chat_template_present": True,
-            }
-        )
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_id,
+                revision=revision,
+                cache_dir=hub_cache,
+                local_files_only=True,
+                use_fast=True,
+            )
+            chat_template = getattr(tokenizer, "chat_template", None)
+            if not isinstance(chat_template, str) or not chat_template.strip():
+                raise RuntimeError(
+                    f"pinned tokenizer has no non-empty chat template: {model_id}@{revision}"
+                )
+            tokenizers_by_identity[identity] = tokenizer
+            model_checks.append(
+                {
+                    "repo_id": model_id,
+                    "revision": revision,
+                    "model_type": str(getattr(loaded_config, "model_type", "")),
+                    "tokenizer_class": type(tokenizer).__name__,
+                    "chat_template_present": True,
+                }
+            )
+        if section_name == "policy":
+            policy_tokenizer = tokenizer
+    if policy_tokenizer is None:
+        raise RuntimeError("offline verification did not resolve the policy tokenizer")
 
     data = config["data"]
     if not isinstance(data, Mapping):
@@ -315,6 +320,15 @@ def _verify_offline_resolution(
     run = config["run"]
     if not isinstance(run, Mapping):
         raise TypeError("run must be a mapping")
+    policy = config["policy"]
+    if not isinstance(policy, Mapping):
+        raise TypeError("policy must be a mapping")
+    prompt_pool = build_policy_token_eligible_prompt_pool(
+        dataset,
+        policy_tokenizer=policy_tokenizer,
+        max_prompt_tokens=int(policy["max_prompt_tokens"]),
+        eligibility_rule=data.get("prompt_eligibility"),
+    )
     raw_seeds = [run["seed"]] if "seed" in run else run["seeds"]
     if not isinstance(raw_seeds, list):
         raw_seeds = [raw_seeds]
@@ -322,8 +336,7 @@ def _verify_offline_resolution(
     for raw_seed in raw_seeds:
         seed = int(raw_seed)
         prompt_split_seed = SeedBundle.from_base_seed(seed).prompt_split
-        prompts = prepare_multipref_prompts(
-            dataset,
+        prompts, prompt_pool_selection = prompt_pool.select(
             split_sizes=run["split_sizes"],  # type: ignore[arg-type]
             seed=prompt_split_seed,
         )
@@ -348,6 +361,7 @@ def _verify_offline_resolution(
                 "prepared_prompts": len(prompts),
                 "split_counts": split_counts,
                 "prepared_prompts_sha256": prompt_digest.hexdigest(),
+                "prompt_pool_selection": prompt_pool_selection,
             }
         )
     return {

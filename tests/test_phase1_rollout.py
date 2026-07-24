@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,6 +103,85 @@ def _candidate(
         terminated_by_eos=False,
         reached_max_length=False,
     )
+
+
+def test_policy_runtime_uses_global_lora_a_seed_for_every_phase2_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(
+        Path(__file__).resolve().parents[1] / "configs" / "common_beta_pilot_base.yaml"
+    )
+    expected_sha = config["policy"]["fixed_lora_a"]["expected_sha256"]
+    expected_seed = config["policy"]["fixed_lora_a"]["initialization_seed"]
+    tokenizer_factory = object()
+    model_factory = object()
+    tokenizer = SimpleNamespace(
+        chat_template="test-template",
+        pad_token_id=0,
+        eos_token_id=1,
+        truncation_side=None,
+    )
+
+    class Model:
+        def to(self, device):
+            self.device = device
+            return self
+
+        def eval(self):
+            return self
+
+    model = Model()
+    transformers = SimpleNamespace(
+        AutoTokenizer=tokenizer_factory,
+        AutoModelForCausalLM=model_factory,
+    )
+    peft = SimpleNamespace(LoraConfig=lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        stage._phase1,
+        "_require_module",
+        lambda name: transformers if name == "transformers" else peft,
+    )
+    monkeypatch.setattr(
+        stage._phase1,
+        "_load_pretrained",
+        lambda factory, *args, **kwargs: tokenizer if factory is tokenizer_factory else model,
+    )
+    observed_seeds: list[int] = []
+
+    @contextmanager
+    def fake_fork(seed, device):
+        del device
+        observed_seeds.append(seed)
+        yield
+
+    monkeypatch.setattr(stage._phase1, "_fork_torch_seed", fake_fork)
+    setup = SimpleNamespace(model=model, a_state_sha256=expected_sha)
+    monkeypatch.setattr(stage._hf, "configure_fixed_a_lora", lambda *args, **kwargs: setup)
+
+    first = stage._load_policy_runtime(
+        config,
+        seed=20260801,
+        device=torch.device("cpu"),
+        local_files_only=True,
+    )
+    second = stage._load_policy_runtime(
+        config,
+        seed=20260802,
+        device=torch.device("cpu"),
+        local_files_only=True,
+    )
+
+    assert first.setup.a_state_sha256 == second.setup.a_state_sha256 == expected_sha
+    assert observed_seeds == [expected_seed, expected_seed, expected_seed, expected_seed]
+
+    setup.a_state_sha256 = "0" * 64
+    with pytest.raises(RuntimeError, match="fingerprint"):
+        stage._load_policy_runtime(
+            config,
+            seed=20260803,
+            device=torch.device("cpu"),
+            local_files_only=True,
+        )
 
 
 def test_comparison_parser_selects_only_unique_main_run_and_checks_identity() -> None:

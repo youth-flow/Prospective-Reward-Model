@@ -1,10 +1,11 @@
-"""Pure primitives for a train-calibrated, common-beta policy experiment.
+"""Pure primitives for a pilot-calibrated, globally frozen-beta experiment.
 
 The primary ProRM estimand fixes one downstream KL penalty for every learner.
-This module deliberately separates that rule from learner-specific trust-region
-normalization:
+This module deliberately separates pilot scale selection, confirmatory binding,
+and learner-specific trust-region normalization:
 
-* a train-only oracle natural direction calibrates ``beta_common`` once;
+* pilot train-oracle directions produce beta candidates for later design selection;
+* confirmatory runs bind the single beta already frozen in the design identity;
 * every saved natural direction is divided by exactly that same scalar;
 * post-deployment measured KL is a safety outcome and never rescales a learner;
 * downstream utility uses on-policy ``KL(pi_updated || pi_0)`` per sequence.
@@ -127,6 +128,43 @@ def calibrate_common_beta(
     predicted = 0.5 * curvature / (beta * beta)
     if not math.isclose(predicted, target, rel_tol=2.0e-12, abs_tol=1.0e-15):
         raise FloatingPointError("common-beta calibration failed its quadratic-KL identity")
+    return CommonBetaCalibration(
+        beta_common=beta,
+        target_oracle_quadratic_kl=target,
+        oracle_natural_curvature=curvature,
+        oracle_displacement=displacement,
+        predicted_oracle_quadratic_kl=predicted,
+    )
+
+
+@torch.no_grad()
+def bind_frozen_common_beta(
+    oracle_natural_direction: torch.Tensor,
+    fisher_operator: Callable[[torch.Tensor], torch.Tensor],
+    *,
+    frozen_global_beta: float,
+    reference_target_oracle_quadratic_kl: float,
+) -> CommonBetaCalibration:
+    """Bind current-seed diagnostics to a beta frozen before this seed ran.
+
+    Unlike :func:`calibrate_common_beta`, current-seed Fisher curvature has no
+    authority over the returned beta.  It is used only to report the local KL
+    predicted for the already frozen scalar.
+    """
+
+    direction = _finite_direction("oracle_natural_direction", oracle_natural_direction)
+    beta = _positive_float("frozen_global_beta", frozen_global_beta)
+    target = _positive_float(
+        "reference_target_oracle_quadratic_kl",
+        reference_target_oracle_quadratic_kl,
+    )
+    curvature = float(fisher_quadratic(direction, fisher_operator).item())
+    if curvature <= 0.0:
+        raise ValueError(
+            "oracle_natural_direction must have strictly positive train Fisher curvature"
+        )
+    displacement = (direction / beta).detach().clone()
+    predicted = 0.5 * curvature / (beta * beta)
     return CommonBetaCalibration(
         beta_common=beta,
         target_oracle_quadratic_kl=target,
@@ -399,6 +437,7 @@ __all__ = [
     "MeasuredKLSafety",
     "PairedPromptEstimate",
     "assess_measured_kl_safety",
+    "bind_frozen_common_beta",
     "calibrate_common_beta",
     "deploy_with_common_beta",
     "summarize_downstream_utility",

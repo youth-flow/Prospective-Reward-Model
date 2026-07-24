@@ -1,5 +1,15 @@
 {
   "configs": {
+    "configs/common_beta_pilot.yaml": {
+      "config_hash": "0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca",
+      "file_sha256": "b855883b744ed87c998e8771fe8c4f736ed132c97977ddcf672c5eeed143fb29",
+      "seed_count": 3
+    },
+    "configs/common_beta_pilot_base.yaml": {
+      "config_hash": "81ccbd3bc9d745d3792d1834116ba2480d34a7201d6f4e463a61d8d8ab0baefa",
+      "file_sha256": "e32cf5ad2a7bb2f6fa27180aa2fa6e05e2b457cfe032bab1c33f86646af1beb1",
+      "seed_count": 3
+    },
     "configs/main.yaml": {
       "config_hash": "ae5d628ee47ff74a1fa2b89478c40b4fdd289935d8cf58dcbcf98b42f69a0df6",
       "file_sha256": "722dae181bf39ddb162d65d9797c2bd7f584098fc0bd3a4cdef355299a5d9a08",

@@ -282,6 +282,24 @@ def _config_check(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _phase2_config_check(arguments: argparse.Namespace) -> int:
+    from .phase2_config import load_phase2_config_bundle
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    _print_json(
+        {
+            "design_stage": bundle.config["design"]["stage"],
+            "formal_eligibility": bundle.config["design"]["formal_eligibility"],
+            "overlay_path": str(bundle.source_path),
+            "phase2_design_sha256": bundle.design_identity,
+            "source_config_hash": config_hash(bundle.base_config),
+            "source_config_path": str(bundle.base_config_path),
+            "status": "ok",
+        }
+    )
+    return 0
+
+
 def _env_report(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
     selected_seed = (
@@ -670,6 +688,190 @@ def _controlled_rollout(arguments: argparse.Namespace) -> int:
             "seed": seed,
             "status": "ok",
             "updated_rollouts": "updated_rollouts.jsonl",
+        }
+    )
+    return 0
+
+
+def _phase2_run(arguments: argparse.Namespace) -> int:
+    from .phase2_config import load_phase2_config_bundle
+    from .phase2_hf import HuggingFacePhase2Backend
+    from .phase2_inputs import prepare_phase2_inputs
+    from .phase2_pilot_aggregate import (
+        verify_beta_source_aggregate,
+        verify_horizon_parent_aggregate,
+    )
+    from .phase2_rollout import Phase2Design, run_common_beta_rollouts
+    from .phase2_training import FreshPhase2HeadTrainer
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    seed = _resolve_run_seed(bundle.config, arguments.seed)
+    beta_source_aggregate = getattr(arguments, "beta_source_aggregate", None)
+    horizon_parent_aggregate = getattr(arguments, "horizon_parent_aggregate", None)
+    verify_beta_source_aggregate(bundle.config, beta_source_aggregate)
+    verify_horizon_parent_aggregate(
+        bundle.config,
+        (
+            beta_source_aggregate
+            if horizon_parent_aggregate is None
+            and bundle.config["design"]["pilot_phase"] != "calibration"
+            else horizon_parent_aggregate
+        ),
+    )
+    inputs = prepare_phase2_inputs(
+        arguments.overlay,
+        seed=seed,
+        artifact_dir=arguments.artifact,
+        run_manifest=arguments.manifest,
+        training_device=arguments.device,
+    )
+    head_trainer = FreshPhase2HeadTrainer(bundle)
+    backend = HuggingFacePhase2Backend(
+        bundle.base_config,
+        device=arguments.device,
+        local_files_only=True,
+    )
+    design = Phase2Design.from_phase2_config(bundle.config)
+    payload = run_common_beta_rollouts(
+        inputs,
+        head_trainer,
+        backend,
+        output_json=arguments.output,
+        design=design,
+    )
+    safety = payload.get("measured_kl_safety")
+    if not isinstance(safety, dict) or not isinstance(safety.get("passed"), bool):
+        raise RuntimeError("Phase-2 runner returned malformed measured-KL safety evidence")
+    kl_gate_passed = safety["passed"]
+    kl_gate_measure_only = payload["design_stage"] == "pilot"
+    if kl_gate_measure_only:
+        pilot_gate = payload.get("pilot_kl_safety_gate")
+        if (
+            not isinstance(pilot_gate, dict)
+            or pilot_gate.get("gate_passed") is not kl_gate_passed
+            or pilot_gate.get("measure_only") is not True
+        ):
+            raise RuntimeError("Phase-2 pilot returned inconsistent measure-only KL evidence")
+    _print_json(
+        {
+            "design_stage": bundle.config["design"]["stage"],
+            "formal_eligibility": bundle.config["design"]["formal_eligibility"],
+            "kl_gate_measure_only": kl_gate_measure_only,
+            "kl_gate_passed": kl_gate_passed,
+            "output": Path(arguments.output).name,
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "sidecar_jsonl": (
+                payload["diagnostics_jsonl"]
+                if payload["design_stage"] == "pilot"
+                else payload["rollouts_jsonl"]
+            ),
+            "seed": seed,
+            "status": "ok",
+        }
+    )
+    return 0
+
+
+def _phase2_sensitivity_run(arguments: argparse.Namespace) -> int:
+    from .phase2_config import load_phase2_config_bundle
+    from .phase2_hf import HuggingFacePhase2Backend
+    from .phase2_inputs import prepare_phase2_inputs
+    from .phase2_rollout import Phase2Design
+    from .phase2_sensitivity import (
+        load_primary_sensitivity_binding,
+        run_phase2_sensitivity_seed,
+    )
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    seed = _resolve_run_seed(bundle.config, arguments.seed)
+    inputs = prepare_phase2_inputs(
+        arguments.overlay,
+        seed=seed,
+        artifact_dir=arguments.artifact,
+        run_manifest=arguments.manifest,
+        training_device=arguments.device,
+    )
+    binding = load_primary_sensitivity_binding(
+        bundle.config,
+        arguments.primary_result,
+    )
+    backend = HuggingFacePhase2Backend(
+        bundle.base_config,
+        device=arguments.device,
+        local_files_only=True,
+    )
+    payload = run_phase2_sensitivity_seed(
+        inputs,
+        binding,
+        backend,
+        settings=bundle,
+        design=Phase2Design.from_phase2_config(bundle.config),
+        output_json=arguments.output,
+    )
+    _print_json(
+        {
+            "beta_cell_statuses": {
+                str(cell["multiplier"]): cell["status"] for cell in payload["beta_cells"]
+            },
+            "formal_eligibility": False,
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "ridge_cells": len(payload["ridge_cells"]),
+            "seed": seed,
+            "status": "ok",
+            "supports_primary_claim": False,
+        }
+    )
+    return 0
+
+
+def _phase2_mechanism_run(arguments: argparse.Namespace) -> int:
+    from .phase2_config import load_phase2_config_bundle
+    from .phase2_hf import HuggingFacePhase2Backend
+    from .phase2_inputs import prepare_phase2_inputs
+    from .phase2_mechanism import run_phase2_mechanism_seed
+    from .phase2_rollout import Phase2Design
+    from .phase2_sensitivity import load_primary_sensitivity_binding
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    seed = _resolve_run_seed(bundle.config, arguments.seed)
+    inputs = prepare_phase2_inputs(
+        arguments.overlay,
+        seed=seed,
+        artifact_dir=arguments.artifact,
+        run_manifest=arguments.manifest,
+        training_device=arguments.device,
+    )
+    binding = load_primary_sensitivity_binding(
+        bundle.config,
+        arguments.primary_result,
+    )
+    backend = HuggingFacePhase2Backend(
+        bundle.base_config,
+        device=arguments.device,
+        local_files_only=True,
+    )
+    payload = run_phase2_mechanism_seed(
+        inputs,
+        binding,
+        backend,
+        design=Phase2Design.from_phase2_config(bundle.config),
+        output_json=arguments.output,
+    )
+    _print_json(
+        {
+            "formal_eligibility": False,
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "qualifiers": [
+                "exact_noise_free",
+                "low_dimensional_ridge_free",
+            ],
+            "seed": seed,
+            "status": "ok",
+            "supports_primary_claim": False,
         }
     )
     return 0
@@ -1302,6 +1504,164 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _phase2_aggregate(arguments: argparse.Namespace) -> int:
+    from .phase2_aggregate import write_common_beta_seed_aggregate
+    from .phase2_config import load_phase2_config_bundle
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    aggregate = write_common_beta_seed_aggregate(
+        bundle.config,
+        arguments.results,
+        arguments.output,
+    )
+    _print_json(
+        {
+            "design_stage": bundle.config["design"]["stage"],
+            "formal_eligibility": bundle.config["design"]["formal_eligibility"],
+            "evidence_status": aggregate.evidence.to_dict()["status"],
+            "num_seeds": len(aggregate.seeds),
+            "output": Path(arguments.output).name,
+            "phase2_design_sha256": aggregate.phase2_design_sha256,
+            "status": "ok",
+        }
+    )
+    return 0
+
+
+def _phase2_pilot_aggregate(arguments: argparse.Namespace) -> int:
+    from .phase2_config import load_phase2_config_bundle
+    from .phase2_pilot_aggregate import write_phase2_pilot_aggregate
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    payload = write_phase2_pilot_aggregate(
+        bundle.config,
+        arguments.results,
+        arguments.output,
+        beta_source_aggregate=arguments.beta_source_aggregate,
+        horizon_parent_aggregate=arguments.horizon_parent_aggregate,
+    )
+    selection = payload["selection"]
+    if not isinstance(selection, dict):
+        raise RuntimeError("pilot aggregate returned malformed selection evidence")
+    _print_json(
+        {
+            "formal_eligibility": False,
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "pilot_phase": payload["pilot_phase"],
+            "selection_accepted": selection["selection_accepted"],
+            "next_action": selection["next_action"],
+            "status": "ok",
+            "supports_formal_claim": False,
+        }
+    )
+    return 0
+
+
+def _phase2_sensitivity_aggregate(arguments: argparse.Namespace) -> int:
+    from .phase2_config import load_phase2_config_bundle
+    from .phase2_sensitivity import write_phase2_sensitivity_aggregate
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    payload = write_phase2_sensitivity_aggregate(
+        bundle.config,
+        arguments.results,
+        arguments.output,
+        primary_aggregate_json=arguments.primary_aggregate,
+    )
+    _print_json(
+        {
+            "formal_eligibility": False,
+            "num_seeds": payload["num_seeds"],
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "primary_efficacy_status": payload["primary_aggregate"]["efficacy_status"],
+            "status": "ok",
+            "supports_primary_claim": False,
+        }
+    )
+    return 0
+
+
+def _phase2_mechanism_aggregate(arguments: argparse.Namespace) -> int:
+    from .phase2_config import load_phase2_config_bundle
+    from .phase2_mechanism import write_phase2_mechanism_aggregate
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    payload = write_phase2_mechanism_aggregate(
+        bundle.config,
+        arguments.results,
+        arguments.output,
+        primary_aggregate_json=arguments.primary_aggregate,
+    )
+    _print_json(
+        {
+            "claim_scope_status": payload["claim_scope"]["status"],
+            "formal_eligibility": False,
+            "num_seeds": payload["num_seeds"],
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "primary_efficacy_status": payload["primary_aggregate"]["efficacy_status"],
+            "status": "ok",
+            "supports_primary_claim": False,
+        }
+    )
+    return 0
+
+
+def _phase2_failure_manifest(arguments: argparse.Namespace) -> int:
+    from .phase2_campaign import write_phase2_seed_failure_manifest
+    from .phase2_config import load_phase2_config_bundle
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    spec = json.loads(Path(arguments.spec).read_text(encoding="utf-8"))
+    if not isinstance(spec, dict):
+        raise TypeError("Phase-2 failure spec must contain one JSON object")
+    payload = write_phase2_seed_failure_manifest(
+        bundle.config,
+        spec,
+        arguments.output,
+    )
+    _print_json(
+        {
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "phase2_design_sha256": payload["phase2_design_sha256"],
+            "seed": payload["seed"],
+            "status": "failed_seed_terminal_recorded",
+            "supports_formal_claim": False,
+        }
+    )
+    return 0
+
+
+def _phase2_campaign_finalize(arguments: argparse.Namespace) -> int:
+    from .phase2_campaign import write_phase2_campaign_terminal
+    from .phase2_config import load_phase2_config_bundle
+
+    bundle = load_phase2_config_bundle(arguments.overlay)
+    payload = write_phase2_campaign_terminal(
+        bundle.config,
+        arguments.terminals,
+        arguments.output,
+        aggregate_output_json=arguments.aggregate_output,
+    )
+    _print_json(
+        {
+            "failed_seeds": payload["failed_seeds"],
+            "output": Path(arguments.output).name,
+            "output_sha256": _sha256_file(arguments.output),
+            "primary_ci_computed": payload["primary_ci_computed"],
+            "status": payload["status"],
+            "supports_formal_claim": payload["supports_formal_claim"],
+        }
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the command-line parser without touching network or GPU state."""
 
@@ -1317,6 +1677,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_parser.add_argument("config", help="path to configs/smoke.yaml or configs/main.yaml")
     config_parser.set_defaults(handler=_config_check)
+
+    phase2_config_parser = subparsers.add_parser(
+        "phase2-config-check",
+        help="validate the Phase-2 overlay and print both bound configuration identities",
+    )
+    phase2_config_parser.add_argument(
+        "overlay",
+        help="path to a validated Phase-2 pilot or confirmatory overlay",
+    )
+    phase2_config_parser.set_defaults(handler=_phase2_config_check)
 
     environment_parser = subparsers.add_parser(
         "env-report",
@@ -1423,6 +1793,91 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollout_parser.set_defaults(handler=_controlled_rollout)
 
+    phase2_run_parser = subparsers.add_parser(
+        "phase2-run",
+        help="run one fresh-head common-beta seed over a bound source artifact",
+    )
+    phase2_run_parser.add_argument(
+        "overlay",
+        help="path to a validated Phase-2 pilot or confirmatory overlay",
+    )
+    phase2_run_parser.add_argument("artifact", help="source materialization artifact directory")
+    phase2_run_parser.add_argument("manifest", help="selected-seed source run manifest")
+    phase2_run_parser.add_argument("output", help="new common-beta result JSON")
+    phase2_run_parser.add_argument("--seed", type=int, required=True)
+    phase2_run_parser.add_argument("--device", default="cuda")
+    phase2_run_parser.add_argument(
+        "--beta-source-aggregate",
+        help=(
+            "identity-bound calibration/freeze aggregate; required by pilot-freeze "
+            "and confirmatory designs"
+        ),
+    )
+    phase2_run_parser.add_argument(
+        "--horizon-parent-aggregate",
+        help=(
+            "identity-bound failed prior-horizon aggregate; required by escalated "
+            "calibration designs (pilot-freeze defaults to --beta-source-aggregate)"
+        ),
+    )
+    phase2_run_parser.set_defaults(handler=_phase2_run)
+
+    phase2_sensitivity_run_parser = subparsers.add_parser(
+        "phase2-sensitivity-run",
+        help="run the complete fixed ridge/frozen-beta secondary grid for one formal seed",
+    )
+    phase2_sensitivity_run_parser.add_argument(
+        "overlay",
+        help="validated formal Phase-2 confirmatory overlay",
+    )
+    phase2_sensitivity_run_parser.add_argument(
+        "artifact",
+        help="source materialization artifact directory",
+    )
+    phase2_sensitivity_run_parser.add_argument(
+        "manifest",
+        help="selected-seed source run manifest",
+    )
+    phase2_sensitivity_run_parser.add_argument(
+        "primary_result",
+        help="immutable successful primary result for the same seed",
+    )
+    phase2_sensitivity_run_parser.add_argument(
+        "output",
+        help="new per-seed sensitivity artifact",
+    )
+    phase2_sensitivity_run_parser.add_argument("--seed", type=int, required=True)
+    phase2_sensitivity_run_parser.add_argument("--device", default="cuda")
+    phase2_sensitivity_run_parser.set_defaults(handler=_phase2_sensitivity_run)
+
+    phase2_mechanism_run_parser = subparsers.add_parser(
+        "phase2-mechanism-run",
+        help="evaluate both held-out mechanism qualifiers for one formal seed",
+    )
+    phase2_mechanism_run_parser.add_argument(
+        "overlay",
+        help="validated formal Phase-2 confirmatory overlay",
+    )
+    phase2_mechanism_run_parser.add_argument(
+        "artifact",
+        help="source materialization artifact directory",
+    )
+    phase2_mechanism_run_parser.add_argument(
+        "manifest",
+        help="selected-seed source run manifest",
+    )
+    phase2_mechanism_run_parser.add_argument(
+        "primary_result",
+        help="immutable successful primary result for the same seed",
+    )
+    phase2_mechanism_run_parser.add_argument(
+        "output",
+        help="new per-seed mechanism artifact",
+    )
+    phase2_mechanism_run_parser.add_argument("--seed", type=int, required=True)
+    phase2_mechanism_run_parser.add_argument("--device", default="cuda")
+    phase2_mechanism_run_parser.set_defaults(handler=_phase2_mechanism_run)
+
     audit_parser = subparsers.add_parser(
         "estimand-audit",
         help="evaluate saved train directions on test F/g* without loading an LLM or GPU",
@@ -1471,6 +1926,133 @@ def build_parser() -> argparse.ArgumentParser:
         help="matched-kl-rollout/v1 or v2 JSON files, one for every declared seed",
     )
     aggregate_parser.set_defaults(handler=_aggregate_results)
+
+    phase2_aggregate_parser = subparsers.add_parser(
+        "phase2-aggregate",
+        help="strictly validate and aggregate the complete declared-seed common-beta campaign",
+    )
+    phase2_aggregate_parser.add_argument(
+        "overlay",
+        help="path to a validated Phase-2 pilot or confirmatory overlay",
+    )
+    phase2_aggregate_parser.add_argument("output", help="new aggregate JSON")
+    phase2_aggregate_parser.add_argument(
+        "results",
+        nargs="+",
+        help="one Phase-2 result JSON for every seed declared by the overlay",
+    )
+    phase2_aggregate_parser.set_defaults(handler=_phase2_aggregate)
+
+    phase2_pilot_aggregate_parser = subparsers.add_parser(
+        "phase2-pilot-aggregate",
+        help="strictly aggregate all three target-free calibration or freeze pilot seeds",
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "overlay",
+        help="validated Phase-2 pilot calibration or freeze overlay",
+    )
+    phase2_pilot_aggregate_parser.add_argument("output", help="new pilot aggregate JSON")
+    phase2_pilot_aggregate_parser.add_argument(
+        "results",
+        nargs="+",
+        help="one target-free pilot result JSON for every declared pilot seed",
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "--beta-source-aggregate",
+        help=(
+            "immediate beta parent: accepted calibration for the first freeze, "
+            "or the preceding failed freeze aggregate for a beta-grid retry"
+        ),
+    )
+    phase2_pilot_aggregate_parser.add_argument(
+        "--horizon-parent-aggregate",
+        help=(
+            "aggregate authorizing the frozen horizon: accepted calibration "
+            "for freeze, or failed prior-horizon evidence for escalation"
+        ),
+    )
+    phase2_pilot_aggregate_parser.set_defaults(handler=_phase2_pilot_aggregate)
+
+    phase2_sensitivity_aggregate_parser = subparsers.add_parser(
+        "phase2-sensitivity-aggregate",
+        help="validate and aggregate the complete exact-30 fixed sensitivity grid",
+    )
+    phase2_sensitivity_aggregate_parser.add_argument(
+        "overlay",
+        help="validated formal Phase-2 confirmatory overlay",
+    )
+    phase2_sensitivity_aggregate_parser.add_argument(
+        "primary_aggregate",
+        help="immutable exact-30 primary aggregate",
+    )
+    phase2_sensitivity_aggregate_parser.add_argument(
+        "output",
+        help="new sensitivity aggregate JSON",
+    )
+    phase2_sensitivity_aggregate_parser.add_argument(
+        "results",
+        nargs="+",
+        help="one complete sensitivity artifact for every formal seed",
+    )
+    phase2_sensitivity_aggregate_parser.set_defaults(handler=_phase2_sensitivity_aggregate)
+
+    phase2_mechanism_aggregate_parser = subparsers.add_parser(
+        "phase2-mechanism-aggregate",
+        help="validate and aggregate both exact-30 mechanism qualifiers",
+    )
+    phase2_mechanism_aggregate_parser.add_argument(
+        "overlay",
+        help="validated formal Phase-2 confirmatory overlay",
+    )
+    phase2_mechanism_aggregate_parser.add_argument(
+        "primary_aggregate",
+        help="immutable exact-30 primary aggregate",
+    )
+    phase2_mechanism_aggregate_parser.add_argument(
+        "output",
+        help="new mechanism aggregate JSON",
+    )
+    phase2_mechanism_aggregate_parser.add_argument(
+        "results",
+        nargs="+",
+        help="one complete mechanism artifact for every formal seed",
+    )
+    phase2_mechanism_aggregate_parser.set_defaults(handler=_phase2_mechanism_aggregate)
+
+    phase2_failure_parser = subparsers.add_parser(
+        "phase2-failure-manifest",
+        help="immutably bind one failed formal seed and its attempt ledger",
+    )
+    phase2_failure_parser.add_argument(
+        "overlay",
+        help="validated formal Phase-2 confirmatory overlay",
+    )
+    phase2_failure_parser.add_argument(
+        "spec",
+        help="strict JSON failure/attempt/evidence specification",
+    )
+    phase2_failure_parser.add_argument("output", help="new immutable seed failure manifest")
+    phase2_failure_parser.set_defaults(handler=_phase2_failure_manifest)
+
+    phase2_finalize_parser = subparsers.add_parser(
+        "phase2-campaign-finalize",
+        help="finalize exactly 30 success-result or failed-seed terminal slots",
+    )
+    phase2_finalize_parser.add_argument(
+        "overlay",
+        help="validated formal Phase-2 confirmatory overlay",
+    )
+    phase2_finalize_parser.add_argument("output", help="new campaign terminal JSON")
+    phase2_finalize_parser.add_argument(
+        "aggregate_output",
+        help="reserved primary aggregate path; remains absent after any seed failure",
+    )
+    phase2_finalize_parser.add_argument(
+        "terminals",
+        nargs="+",
+        help="exactly one success result or failure manifest for every declared seed",
+    )
+    phase2_finalize_parser.set_defaults(handler=_phase2_campaign_finalize)
     return parser
 
 

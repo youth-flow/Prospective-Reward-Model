@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from smart_reward.config import config_hash, load_config
+from smart_reward.phase2_config import load_phase2_config_bundle
 
 ROOT = Path(__file__).parents[1]
 BASE_DIGEST = "sha256:2b59b1b91885677814f78be1f8df48a25d5dc952eb6580eaecfefca510f9afd3"
@@ -74,14 +75,25 @@ def test_tracked_config_identities_match_exact_bytes_and_semantics() -> None:
     payload = json.loads(identity_path.read_text(encoding="utf-8"))
 
     assert payload["schema_version"] == "prorm-config-identities/v1"
-    assert set(payload["configs"]) == {"configs/main.yaml", "configs/smoke.yaml"}
+    assert set(payload["configs"]) == {
+        "configs/common_beta_pilot.yaml",
+        "configs/common_beta_pilot_base.yaml",
+        "configs/main.yaml",
+        "configs/smoke.yaml",
+    }
     for relative, entry in payload["configs"].items():
         path = ROOT / relative
-        config = load_config(path)
+        if relative == "configs/common_beta_pilot.yaml":
+            bundle = load_phase2_config_bundle(path)
+            config = bundle.config
+            semantic_hash = bundle.design_identity
+        else:
+            config = load_config(path)
+            semantic_hash = config_hash(config)
         run = config["run"]
         expected_seed_count = 1 if "seed" in run else len(run["seeds"])
         assert entry == {
-            "config_hash": config_hash(config),
+            "config_hash": semantic_hash,
             "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "seed_count": expected_seed_count,
         }

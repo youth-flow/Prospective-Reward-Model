@@ -3,6 +3,8 @@
 本文是实验执行与结果判定规格。数学定义以 [theory.md](theory.md) 为准。
 本文在观察正式结果前冻结，不因结果改写；执行记录与权威结果见
 [phase1_results.md](phase1_results.md)。
+第 1–12 节保留已冻结的 Phase 1 协议与历史执行语义；第 13 节是尚未运行正式结果的
+Phase 2 预实验/confirmatory 规格，不能反向改变 Phase 1 的 `not_passed` 判定。
 论文标题固定为：
 
 > **Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret**
@@ -667,82 +669,254 @@ objective。该阶段检验现实鲁棒性，不证明 Phase 1 的 population th
 启动。后续 CoVal、容量扩大或新 KL 预算实验必须明确标为 exploratory，或以新的 design identity
 重新预注册。
 
-## 13. 下一实验规格概要：common-beta + train-only oracle
+## 13. 下一实验规格概要：global-beta + outcome-blind pilot
 
 下一实验必须建立新 design identity；它不追加、覆盖或重新聚合 Phase 1。核心变化是把
-fixed-beta ProRM 对齐为主 deployment，而把 matched-KL 保留为次级分析。
+fixed-beta ProRM 对齐为主 deployment，而把 learner-specific matched-KL 保留为次级分析。
 
-1. **Train-only calibration。** 只用 train operational-oracle rewards、train candidate
-   graph 与 train Fisher 构造
-   $u_*^{tr}=(F_{\rm train}+\lambda I)^{-1}g_*^{tr}$。主尺度固定
-   `K_cal=0.003`，并解析设定
+Phase 2 的 operational-oracle 坐标也必须跨 seed 固定，不再对当前 seed 重新拟合。锁定
 
-   $$
-   \beta_{\rm common}
-   =
-   \sqrt{
-   \frac{(u_*^{tr})^\top F_{\rm train}u_*^{tr}}
-   {2K_{\rm cal}}
-   }.
-   $$
+$$
+b_0=-4.500244140625,\qquad
+\tau_0=2.7715682983398438,\qquad
+r^*=\frac{\log 3}{2}\tanh((R_{\rm oracle}-b_0)/\tau_0).
+$$
 
-   这是“每个 seed 一个、所有 policy arms 共享”的 scalar；校准规则跨 seed 固定，实际值允许
-   随 train sample 改变。选择过程不得读取 validation/test oracle reward、held-out geometry
-   或 rollout。
-2. **一个共同 beta。** `beta_common` 在 learner 训练结果和 held-out endpoint 打开前冻结，
-   并对 BT-MLE、ProRM+ 和 oracle calibration direction 完全相同。禁止为两个 learner
-   分别 line-search、分别选择 beta 或按各自 norm 归一化。
-3. **Train direction 直接部署。**
+`(b_0,tau_0)` 是完全排除于 Phase 2 的五个 Phase-1 seeds
+`20260722`–`20260726` 各自 train-only transform 的 componentwise median。base/overlay
+config 同时绑定 Phase-1 semantic config hash 与五份 artifact `metadata.json` SHA256；
+materializer 直接构造同一个 `RobustOracleTransform`，不得读取当前 seed 的 raw scores
+重新决定 `b` 或 `tau`。artifact metadata 必须记录 `mode=frozen_global`、数值、聚合规则、
+source split/seeds/hashes，以及 `oracle_transform_fitted_on_current_seed=false`。
 
-   $$
-   d_\ell^{deploy}
-   =\frac1{\beta_{\mathrm{common}}}
-   (F_{\mathrm{train}}+\lambda I)^{-1}g_{\ell}^{\mathrm{train}},
-   \qquad \ell\in\{\mathrm{BT},\mathrm{ProRM+}\}.
-   $$
+Phase 2 的 policy tangent 同样跨 seed 固定。所有 materialization 与 rollout reload 都使用
+排除的最小 Phase-1 seed `20260722` 对应的 `policy_lora_a` named seed
+`946081152281754541`，并硬校验
+`A_SHA256=a2b5804109396f76b96cde98d1e2060f175a47724b1ca9fef317c7a10cb9a838`。
+config 和 artifact metadata 绑定 source seed、named stream、Phase-1 config hash、source
+artifact metadata hash、effective seed 与 observed A hash；当前实验 seed 派生出的 LoRA-A
+seed 只记录为未使用的诊断。这样跨 seed 改变的是抽样与标注，而不是 policy class。
+Phase 1 main 配置不增加该字段，继续保留历史 per-seed-A 语义。
 
-   test Fisher/moment 不进入该式。
-4. **KL 只测量，不回调。** 每个 updated policy 生成自己的 trajectories，在这些 histories
-   上逐 token 计算完整 vocabulary
-   $D_{\mathrm{KL}}(\pi_{d_\ell}(\cdot|h)\Vert\pi_0(\cdot|h))$，按 sequence 求和并保留
-   per-sequence 值；它进入
+### 13.1 Pilot 的唯一信息边界
 
-   $$
-   J_\ell^*=\mathbb E[r^*]-\beta_{\rm common}
-   D_{\rm KL}(\pi_{d_\ell}\Vert\pi_0).
-   $$
+当前三个永久排除 seed `20260801,20260802,20260803` 上运行两个
+`confirmatory=false` 的 target-free 阶段：
+`pilot_phase=calibration` 只产生 seed-wise beta candidates；
+`pilot_phase=freeze` 在新 design identity 中给所有 seeds/arms 部署同一个
+`frozen_global_beta`。两个阶段都只允许产生工程诊断：
 
-   固定 reference histories 上的
-   $D_{\mathrm{KL}}(\pi_0\Vert\pi_{d_\ell})$ 继续作为 secondary diagnostic。主 safety cap
-   固定为 policy-to-reference KL `0.02`；超过即 fail closed，不得根据 learner 身份重调
-   `beta_common`。
-5. **Endpoint 层级。** fixed-beta held-out regret 与 common-beta rollout 是主 endpoint；
-   fixed-K constrained regret、Fisher cosine 和 learner-specific matched-KL rollout 是
-   次级机制/尺度诊断。held-out oracle 只能在 `beta_common`、heads 和 deployed directions
-   全部冻结后用于 evaluation。
-6. **正控与统计。** 同时部署 train-oracle direction 作为 local-to-finite-policy positive
-   control；其 gap 只能称为 oracle-step reference gap，不是 global optimum regret。候选先在
-   prompt 内平均，prompt 才是 rollout 实验单位。`K_cal={0.001,0.01}` 只作 sensitivity。
-   已观察过的五个 Phase-1 seeds 只作 estimand audit；confirmatory 主张必须使用新冻结的十
-   seed campaign。
-7. **Repeated-label variance control。** 新 noisy-label 主臂对每条 edge 独立生成
-   `R=4` 份 `gamma=0.9` randomized estimates 并取均值。该均值仍严格无偏，conditional
-   variance 为单份的四分之一；BT-MLE 使用对应的全部 raw Bernoulli labels。不得把四份
-   labels 合并后按一个 truncation level 重算 `h`。同时运行 `h=Delta r*` 的
-   zero-noise positive control。
-8. **Natural-pair efficiency arm。** 四个现有 iid candidates 给出六条无序 pair。all-six
-   arm 与 `R=4` 首轮分开运行，在不增加 generation/oracle forward 的前提下使用完整
-   prompt-level U-statistic；annotation 数约六倍，reward-head edge work 约六倍，
-   Fisher nodes/PCG 维度不变。六条边共享 nodes，统计上必须按 prompt 聚类，不能宣称六倍
-   独立样本。
-9. **Response horizon。** 新 design 的 candidate 与 rollout 上限固定为
-   `max_response_tokens=256`，并逐 arm 报告 EOS、达到上限的比例和 response-token
-   分布。旧 Phase 1 的 `128` token action space 保持原样，不用新上限重写旧结果。
-10. **Ridge positive control。** 主 full tangent 继续共享同一
-    $H_\lambda=F_{\rm train}+\lambda I$；另加一个 `d<n_F` 的低维 tangent arm，检验
-    $\lambda\to0$ ordering。有限 rollout 的 oracle arm 只称 `oracle-step reference`，
-    因为主 utility 不含显式 parameter-space ridge。
+- train-only optimization、数值收敛、rank 与局部正控；
+- train-only beta calibration candidate；
+- 各 arm 的 response-token、EOS、达到长度上限比例，以及 on-policy KL 的 mean/p95/p99/max；
+- source/config/artifact/environment/output hashes。
 
-以上 calibration、KL 方向、主尺度和 safety cap 已冻结。正式提交前还需把新的十个 seed、
-源 artifact identity、聚合判据和 positive-control gate 写入新 config；
-这些值不能从新 campaign 的 test rollout 反向选择。
+Pilot 不调用 held-out evaluator，不开启 final oracle-scoring session，不计算或发布 reward、
+utility、regret 或 learner ordering，也不序列化 prompt/response text、token IDs、head weights
+或 policy direction vectors。它不是三 seed 的小型效果实验；其 seeds 永久排除在正式统计之外。
+
+### 13.2 Pilot candidate 与正式 global beta
+
+pilot seed `s` 只用 train operational-oracle rewards、train candidate graph 与 train Fisher
+构造
+
+$$
+u_{*,s}^{tr}=(F_{{\rm train},s}+\lambda I)^{-1}g_{*,s}^{tr},
+\qquad
+\widetilde\beta_s
+=
+\sqrt{
+\frac{(u_{*,s}^{tr})^\top F_{{\rm train},s}u_{*,s}^{tr}}
+{2K_{\rm cal}}
+},
+\qquad K_{\rm cal}=0.003.
+$$
+
+正式实验不再使用 seed-conditional beta。calibration pilot 先给出
+
+$$
+\beta_{\rm base}
+=\max_{s\in\mathcal S_{\rm pilot}}\widetilde\beta_s,
+\qquad
+\beta^{(k)}=2^k\beta_{\rm base}.
+$$
+
+calibration aggregate 严格校验三个 result/sidecar 的 schema、SHA256、无 outcome 泄漏和
+完整 seed 集，再取上述最大值。随后必须建立新的 freeze identity，绑定 calibration
+aggregate 的 bytes SHA256，并在三个 seeds 的全部 arms 上使用完全相同的 beta。若
+worst-arm 非长度 KL safety 不通过，只能建立新的 freeze identity，在预先声明的序列
+`{beta_base, 2 beta_base, 4 beta_base, ...}` 中取下一个值；不得在同一个
+job/identity 中重调。
+首个 freeze 的 `beta_source_aggregate_sha256` 绑定 calibration aggregate；第 `k>0`
+个 freeze 必须改为绑定**紧邻的上一个 freeze aggregate**，且后者必须证明同一 horizon
+下只有非长度 safety 失败、`selection_accepted=false`、`next_action` 为 double-beta，
+并满足 `next_global_beta=当前 beta` 与 grid index `k-1 -> k`。不得从 calibration
+直接跳到 `2 beta_base` 或跨过任何 grid point。horizon 的 parent hash 独立保留为接受该
+horizon 的 calibration aggregate。
+预注册阈值为 mean KL `0.02`、prompt-mean KL p95 `0.02`、p99 `0.05`、
+prompt maximum `0.10`、per-sequence maximum `0.20` 与 maximum-length rate `0.05`。
+response horizon 只能沿 `[256, 512, 1024]` 递增。初始 identity 使用 256；若任一
+seed/arm 的长度门槛失败，必须从下一个 horizon 重新运行 calibration 与 freeze。新
+calibration identity 必须绑定上一个失败 aggregate 的 SHA256，并声明
+`previous_horizon_failed_length_gate=true`。若 1024 仍失败则停止并修改协议，不能静默扩展。
+令
+
+$$
+k_*=\min\{k\ge0:\beta^{(k)}\text{ 的 freeze 通过全部冻结 gate}\},
+\qquad
+\beta_0=2^{k_*}\beta_{\rm base}.
+$$
+
+只有该集合非空时，strict freeze aggregate 才定义可用于 confirmatory 的
+`beta_0`；否则停止并修改协议。随后才把这个单一 scalar、response
+horizon、最大长度率门槛、KL tail 门槛、优化 tolerance 与全部 hashes 写入新的 confirmatory
+config。所有正式 seeds 和 BT-MLE、ProRM+、zero-B、oracle-step arms 共用同一个
+`beta_0`；禁止 learner-specific 或 formal-seed-specific line search、norm normalization
+与 beta calibration。正式 beta sensitivity 只能使用预注册的
+`c in {0.5, 2.0}`，并对所有 sensitivity seeds/arms 直接部署
+`beta=c*beta_0`；不得读取该 seed 的 curvature 重新定标。seed-conditional `K_cal`
+曲线仅属于 pilot train-only 尺度诊断，不能进入正式实验。
+
+### 13.3 正式训练与直接部署
+
+BT-MLE 与 ProRM+ 从相同 zero head 出发，但分别通过各自 full-data、post-update、unclipped
+gradient 相对 zero-init gradient 的连续一阶门槛。ProRM+ 的正式检查使用 cold-start FP64
+PCG。720-step head 仅作为 compute-matched secondary checkpoint；validation/test 不得选择
+stopping time 或 checkpoint。
+
+正式 train direction 直接部署：
+
+$$
+d_\ell^{deploy}
+=\frac1{\beta_0}
+(F_{\mathrm{train}}+\lambda I)^{-1}g_{\ell}^{\mathrm{train}},
+\qquad \ell\in\{\mathrm{BT},\mathrm{ProRM+},\mathrm{oracle}\}.
+$$
+
+test Fisher/moment 不进入该式。每个 updated policy 在自身 trajectories 上计算
+
+$$
+J_\ell^*
+=\mathbb E_{\pi_\ell}[r^*]
+-\beta_0D_{\mathrm{KL}}(\pi_\ell\Vert\pi_0).
+$$
+
+fixed-history $D_{\mathrm{KL}}(\pi_0\Vert\pi_\ell)$、fixed-K constrained regret、Fisher
+cosine 与 learner-specific matched-KL rollout 均为 secondary diagnostics。正式值超过冻结的
+mean/tail KL safety gate 时整 seed fail closed，不得缩放或重选 beta。
+
+### 13.4 标签方差、成本与控制臂
+
+noisy primary 对每条 canonical edge 独立生成 `R=4` 份 `gamma=0.9` randomized estimates
+并取均值。均值严格无偏且 conditional variance 为单份的四分之一；BT-MLE 使用四份 replicate
+的全部 raw Bernoulli labels。不得合并后重算一个 `h`、硬截断、clip 或静默 retry。
+
+`gamma=0.9` 时每份 `E[N]=10`，因此 canonical-edge `R=4` arm 每 prompt 平均需要 40 个
+Bernoulli annotations，且 geometric tail 无上界；all-six-pairs arm 平均需要 240 个。这是
+精确无偏方案的主要实际成本，必须单独报告 annotation counts 与 tail。exact
+`h=Delta r*` ProRM+、exact-soft BT、direct oracle identity 与 `d=256` ridge-free tangent
+用于区分 label noise、reward-class misspecification、数值误差和 full-tangent ridge 影响。
+
+all-six-pairs arm 是 prompt-level U-statistic：复用四个 iid candidates，不增加 generation/oracle
+forward，但六条边共享 nodes，必须按 prompt 聚类，不能当作六倍独立样本。
+
+### 13.5 Prompt/template 契约
+
+Phase 2 的 Qwen2.5 policy 对完整 raw prompt 使用自己的 tokenizer/chat template，
+`truncation=False`。对 pinned MultiPref 的 5,323 个 unique prompts 做 deterministic local
+precheck 后，88 个超过 1024 policy tokens（`1.65%`），剩余 eligible pool 为 5,235。旧的
+“先 seeded shuffle/split、后 fail-closed length check”会使三个 pilot seeds 分别选中
+39、34、36 个超限 prompt，无法进入有效 pilot。
+
+因此 Phase 2 必须先对全部 unique prompts 完整渲染计数，建立 `<=1024` eligible pool，再做
+seeded shuffle/split；不得再沿用 Phase 1 的 384-token 左截断，也不得在 selected prompt 上
+静默截断。metadata 必须记录 unique/eligible/excluded/selected counts、对应 prompt-ID list
+hashes；每条 selected metadata 与 trajectory 还要绑定 raw-text hash、policy token count、
+prompt-prefix hash、cap 和 `truncated=false`。consumer 必须复核这些值。Phase 2 prompt
+population 明确定义为 length-eligible MultiPref subset，而不是完整 MultiPref。
+
+Skywork Qwen3 RM 对**同一份 raw prompt 加 assistant response**使用自己的 pinned Qwen3
+tokenizer/chat template 独立重渲染。Qwen2.5 的 template/token IDs 不得传给 Qwen3。这样允许
+policy 与 RM 属于不同基座家族，同时避免模板混用或语义内容错位。
+
+上述 5,323/88/5,235 与 39/34/36 是固定输入/tokenizer 下的本地可复现 preflight evidence，
+不属于 pilot outcome，也不能支持任何 learner 效果结论。
+
+### 13.6 Endpoint、统计与外部有效性
+
+正式正面结论要求以下证据的交集：
+
+1. held-out fixed-`beta_0` local regret 支持 ProRM+；
+2. `utility(ProRM+) - utility(BT-MLE)` paired interval 下界大于 0；
+3. `utility(ProRM+) - utility(zero-B)` paired interval 下界大于 0；
+4. `utility(oracle-step) - utility(zero-B)` paired interval 下界大于 0；
+5. 所有 optimization、rank、positive-control、KL/horizon、identity 与 numerical gates 通过。
+
+每个 prompt 先平均 candidates，每个 seed 只贡献一个 paired scalar；candidate/prompt 不充当
+独立 seed。正式 campaign 使用顺序锁定的 30 个全新 paired seeds
+`20260901`–`20260930`，排除五个 Phase-1 seeds、全部 pilot seeds 与任何参与设计修改的 seed。
+
+对每个 endpoint `k`，正式 estimand 固定为
+
+$$
+\mu_k
+=
+\mathbb E_{\mathrm{RNG}}\!\left[
+\Delta_k
+\mid
+\text{冻结的 eligible MultiPref pool、models、oracle、design}
+\right].
+$$
+
+四个正向 endpoint 构成一个 intersection-union test：
+
+$$
+H_0=\bigcup_k\{\mu_k\le0\},
+\qquad
+H_1=\bigcap_k\{\mu_k>0\}.
+$$
+
+每个 component 使用 two-sided 95% paired-seed percentile interval，要求下界严格大于
+0；其 effective one-sided level 为 `0.025`。对这个单一合取主张不需要 Bonferroni，
+但不得把四个 endpoint 另行解释成未经 multiplicity control 的独立正面主张。该区间针对
+冻结系统下的 RNG expectation，不外推为任意人类 prompt population 的 CI。`n=30`
+时，normal approximation 下单个 component 的 80% power MDE 约为 `0.53` 个 paired
+standard deviations；合取检验的 power 由最弱 endpoint 决定。
+
+exact 30 中每个 seed 必须有一个 terminal slot：合法 result 或 immutable failure
+manifest。只允许同一个 seed 在 outcome reveal 前因 infrastructure failure 重试，且不得
+替换 seed。failure-manifest 路径已经代码强制 contiguous attempt ledger；对“前序
+infrastructure failure 后最终成功”的路径，完整 ledger 仍须由尚待实现的 formal Slurm
+wrapper 绑定，不能只依赖 result JSON。该 wrapper gate 关闭前不得启动 exact 30。任一失败
+slot 令 campaign
+`not_passed_due_to_seed_failure` 且不计算 primary CI。若 30 个结果都合法但效果未通过，
+仍计算并保留区间，科学状态为 `not_passed`。
+
+正式 CPU finalizer 必须调用统一终态入口，而不是绕过 terminal-slot 检查直接运行
+`phase2-aggregate`：
+
+```text
+prorm phase2-failure-manifest OVERLAY FAILURE_SPEC FAILURE_JSON
+prorm phase2-campaign-finalize \
+  OVERLAY CAMPAIGN_TERMINAL_JSON PRIMARY_AGGREGATE_JSON TERMINAL_1 ... TERMINAL_30
+```
+
+若任一 terminal 是 failure manifest，`PRIMARY_AGGREGATE_JSON` 必须保持不存在且不计算 CI；
+若 30 个 terminal 全是合法 success result，finalizer 才在该保留路径发布 primary aggregate。
+HPC4 仍需一个 detached-checkout CPU wrapper 来绑定 commit、image、inventory、30 个输入和
+上述 success-retry ledger；直接在 login node 运行该 CLI 不是正式流程。
+
+借鉴 AuxDPO 的是证据架构：analytic misspecification example、matched data/compute、
+capacity/sample-size stress、exactly 30 preregistered paired formal seeds、
+base/oracle controls，以及单独的 ID/OOD/人类 evaluation。不得照搬其 auxiliary
+null-space parameterization，也不把 IPO/DPOP 设为本项目
+reward-model 主 baseline；这里的主比较始终是 repeated-label BT-MLE vs ProRM+。capacity、
+all-six、frozen-global-beta multiplier sensitivity 与 OOD/human evaluation 都是
+secondary/external-validity
+experiments，不能替代上述 common-`beta_0` controlled mechanism test。
+
+当前 pilot 尚未构成正式结果。pilot 通过后才创建新的 confirmatory config；其必须绑定
+`beta_0`、完整有序的 30-seed 列表 `20260901`–`20260930`、源 artifact identity、
+聚合判据、全部数值正控及
+response-horizon/KL gates。任何值都不能从 confirmatory held-out 或 rollout outcomes
+反向选择。Phase 1 的权威状态继续是 `not_passed`。

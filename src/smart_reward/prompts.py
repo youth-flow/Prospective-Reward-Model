@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import torch
+
 PROMPT_SCHEMA_VERSION = "prompt/v1"
+PROMPT_POOL_SELECTION_SCHEMA = "policy-token-length-eligible-prompt-pool/v1"
+POLICY_TOKEN_LENGTH_ELIGIBILITY_RULE = (
+    "policy_chat_template_tokens_lte_max_prompt_tokens_before_seeded_shuffle"
+)
 Split = Literal["train", "validation", "test"]
 _SPLIT_ORDER: tuple[Split, ...] = ("train", "validation", "test")
 
@@ -90,6 +97,153 @@ class PromptRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyTokenEligiblePromptPool:
+    """A deduplicated prompt population filtered with one frozen policy tokenizer."""
+
+    prompt_texts: tuple[tuple[str, str], ...]
+    token_counts: tuple[tuple[str, int], ...]
+    eligible_prompt_ids: tuple[str, ...]
+    excluded_prompt_ids: tuple[str, ...]
+    max_prompt_tokens: int
+    policy_chat_template_sha256: str
+
+    def select(
+        self,
+        *,
+        split_sizes: Mapping[str, int],
+        seed: int,
+    ) -> tuple[list[PromptRecord], dict[str, object]]:
+        """Draw one deterministic split and return materializer-identical evidence."""
+
+        prompt_texts = dict(self.prompt_texts)
+        token_counts = dict(self.token_counts)
+        prompts = prepare_multipref_prompts(
+            (
+                {"prompt_id": prompt_id, "text": prompt_texts[prompt_id]}
+                for prompt_id in self.eligible_prompt_ids
+            ),
+            split_sizes=split_sizes,
+            seed=seed,
+        )
+        selected_ids = tuple(prompt.prompt_id for prompt in prompts)
+        selected_counts = tuple(token_counts[prompt_id] for prompt_id in selected_ids)
+        if not selected_counts or max(selected_counts) > self.max_prompt_tokens:
+            raise RuntimeError("prompt eligibility filtering failed before the seeded split")
+        evidence: dict[str, object] = {
+            "schema_version": PROMPT_POOL_SELECTION_SCHEMA,
+            "rule": POLICY_TOKEN_LENGTH_ELIGIBILITY_RULE,
+            "dataset_unique_prompt_count": len(self.prompt_texts),
+            "eligible_prompt_count": len(self.eligible_prompt_ids),
+            "excluded_over_limit_prompt_count": len(self.excluded_prompt_ids),
+            "selected_prompt_count": len(selected_ids),
+            "max_prompt_tokens": self.max_prompt_tokens,
+            "filter_applied_before_seeded_shuffle": True,
+            "split_seed": seed,
+            "policy_chat_template_sha256": self.policy_chat_template_sha256,
+            "eligible_prompt_ids_sha256": _string_sequence_sha256(self.eligible_prompt_ids),
+            "excluded_prompt_ids_sha256": _string_sequence_sha256(self.excluded_prompt_ids),
+            "selected_prompt_ids_sha256": _string_sequence_sha256(selected_ids),
+            "selected_minimum_policy_chat_token_count": min(selected_counts),
+            "selected_maximum_policy_chat_token_count": max(selected_counts),
+            "truncation": False,
+        }
+        return prompts, evidence
+
+
+def _string_sequence_sha256(values: Sequence[str]) -> str:
+    if isinstance(values, (str, bytes, bytearray)) or not all(
+        isinstance(value, str) and value for value in values
+    ):
+        raise ValueError("digest values must be a sequence of non-empty strings")
+    encoded = json.dumps(
+        list(values),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def policy_chat_token_count(tokenizer: object, prompt_text: str) -> int:
+    """Count one complete policy chat without truncation or tensor allocation."""
+
+    if not isinstance(prompt_text, str) or not prompt_text.strip():
+        raise ValueError("prompt_text must be a non-empty string")
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        raise TypeError("policy tokenizer must expose callable apply_chat_template")
+    encoded = apply_chat_template(
+        [{"role": "user", "content": prompt_text}],
+        tokenize=True,
+        add_generation_prompt=True,
+        truncation=False,
+    )
+    if isinstance(encoded, torch.Tensor):
+        if encoded.ndim == 1:
+            count = int(encoded.numel())
+        elif encoded.ndim == 2 and encoded.shape[0] == 1:
+            count = int(encoded.shape[1])
+        else:
+            raise ValueError("policy chat template returned an invalid token tensor")
+    elif isinstance(encoded, Sequence) and not isinstance(encoded, (str, bytes, bytearray)):
+        count = len(encoded)
+    else:
+        raise TypeError("policy chat template must return one token-ID sequence")
+    if count < 1:
+        raise ValueError("policy chat template returned an empty token sequence")
+    return count
+
+
+def build_policy_token_eligible_prompt_pool(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    policy_tokenizer: object,
+    max_prompt_tokens: int,
+    eligibility_rule: object,
+) -> PolicyTokenEligiblePromptPool:
+    """Apply the frozen token-length eligibility rule to the full unique pool."""
+
+    if eligibility_rule != POLICY_TOKEN_LENGTH_ELIGIBILITY_RULE:
+        raise ValueError(
+            "data.prompt_eligibility must explicitly freeze policy-token-length "
+            "filtering before the seeded prompt split"
+        )
+    if (
+        isinstance(max_prompt_tokens, bool)
+        or not isinstance(max_prompt_tokens, int)
+        or max_prompt_tokens < 1
+    ):
+        raise ValueError("max_prompt_tokens must be a positive integer")
+    chat_template = getattr(policy_tokenizer, "chat_template", None)
+    if not isinstance(chat_template, str) or not chat_template:
+        raise ValueError("policy tokenizer must provide a non-empty chat_template")
+
+    prompt_texts = deduplicate_multipref_prompt_texts(rows)
+    ordered_prompt_texts = tuple(sorted(prompt_texts.items()))
+    token_counts = tuple(
+        (
+            prompt_id,
+            policy_chat_token_count(policy_tokenizer, prompt_text),
+        )
+        for prompt_id, prompt_text in ordered_prompt_texts
+    )
+    eligible_ids = tuple(
+        prompt_id for prompt_id, count in token_counts if count <= max_prompt_tokens
+    )
+    excluded_ids = tuple(
+        prompt_id for prompt_id, count in token_counts if count > max_prompt_tokens
+    )
+    return PolicyTokenEligiblePromptPool(
+        prompt_texts=ordered_prompt_texts,
+        token_counts=token_counts,
+        eligible_prompt_ids=eligible_ids,
+        excluded_prompt_ids=excluded_ids,
+        max_prompt_tokens=max_prompt_tokens,
+        policy_chat_template_sha256=hashlib.sha256(chat_template.encode("utf-8")).hexdigest(),
+    )
+
+
 def prepare_multipref_prompts(
     rows: Iterable[Mapping[str, Any]],
     *,
@@ -115,22 +269,7 @@ def prepare_multipref_prompts(
             raise ValueError(f"split size for {split!r} must be a positive integer")
         normalized_sizes[split] = size
 
-    prompt_text: dict[str, str] = {}
-    for row_number, row in enumerate(rows, start=1):
-        if not isinstance(row, Mapping):
-            raise TypeError(f"row {row_number} must be a mapping")
-        try:
-            prompt_id = row["prompt_id"]
-            text = row["text"]
-        except KeyError as error:
-            raise ValueError(f"row {row_number} is missing {error.args[0]!r}") from error
-        if not isinstance(prompt_id, str) or not prompt_id.strip():
-            raise ValueError(f"row {row_number} has an invalid prompt_id")
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError(f"row {row_number} has invalid prompt text")
-        previous = prompt_text.setdefault(prompt_id, text)
-        if previous != text:
-            raise ValueError(f"prompt_id {prompt_id!r} maps to conflicting prompt text")
+    prompt_text = deduplicate_multipref_prompt_texts(rows)
 
     required = sum(normalized_sizes.values())
     if len(prompt_text) < required:
@@ -152,6 +291,35 @@ def prepare_multipref_prompts(
             )
         offset += normalized_sizes[split]
     return records
+
+
+def deduplicate_multipref_prompt_texts(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Validate MultiPref rows and return one immutable-text entry per prompt ID.
+
+    The returned mapping is intentionally not shuffled.  Callers that impose a
+    tokenizer-length eligibility rule can therefore filter the complete unique
+    prompt population *before* the seeded split is drawn.
+    """
+
+    prompt_text: dict[str, str] = {}
+    for row_number, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            raise TypeError(f"row {row_number} must be a mapping")
+        try:
+            prompt_id = row["prompt_id"]
+            text = row["text"]
+        except KeyError as error:
+            raise ValueError(f"row {row_number} is missing {error.args[0]!r}") from error
+        if not isinstance(prompt_id, str) or not prompt_id.strip():
+            raise ValueError(f"row {row_number} has an invalid prompt_id")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"row {row_number} has invalid prompt text")
+        previous = prompt_text.setdefault(prompt_id, text)
+        if previous != text:
+            raise ValueError(f"prompt_id {prompt_id!r} maps to conflicting prompt text")
+    return prompt_text
 
 
 def load_multipref_parquet_snapshot(
@@ -265,12 +433,18 @@ def load_prompt_jsonl(path: str | os.PathLike[str]) -> list[PromptRecord]:
 
 
 __all__ = [
+    "POLICY_TOKEN_LENGTH_ELIGIBILITY_RULE",
+    "PROMPT_POOL_SELECTION_SCHEMA",
     "PROMPT_SCHEMA_VERSION",
     "ChatMessage",
+    "PolicyTokenEligiblePromptPool",
     "PromptRecord",
+    "build_policy_token_eligible_prompt_pool",
+    "deduplicate_multipref_prompt_texts",
     "load_multipref_parquet_snapshot",
     "load_multipref_prompts",
     "load_prompt_jsonl",
+    "policy_chat_token_count",
     "prepare_multipref_prompts",
     "save_prompt_jsonl",
 ]

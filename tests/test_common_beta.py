@@ -5,6 +5,7 @@ import torch
 
 from smart_reward.common_beta import (
     assess_measured_kl_safety,
+    bind_frozen_common_beta,
     calibrate_common_beta,
     deploy_with_common_beta,
     summarize_downstream_utility,
@@ -72,6 +73,33 @@ def test_calibration_rejects_fisher_null_or_invalid_oracle_direction() -> None:
             _dense_operator(fisher),
             target_oracle_quadratic_kl=0.01,
         )
+
+
+def test_frozen_global_beta_is_independent_of_current_oracle_curvature() -> None:
+    fisher = torch.tensor([[2.0, 0.5], [0.5, 1.0]], dtype=torch.float64)
+    frozen_beta = 2.75
+    first = bind_frozen_common_beta(
+        torch.tensor([1.0, -0.5], dtype=torch.float64),
+        _dense_operator(fisher),
+        frozen_global_beta=frozen_beta,
+        reference_target_oracle_quadratic_kl=0.003,
+    )
+    second = bind_frozen_common_beta(
+        torch.tensor([3.0, -1.5], dtype=torch.float64),
+        _dense_operator(fisher),
+        frozen_global_beta=frozen_beta,
+        reference_target_oracle_quadratic_kl=0.003,
+    )
+
+    assert first.beta_common == second.beta_common == frozen_beta
+    assert second.oracle_natural_curvature == pytest.approx(9.0 * first.oracle_natural_curvature)
+    assert second.predicted_oracle_quadratic_kl == pytest.approx(
+        9.0 * first.predicted_oracle_quadratic_kl
+    )
+    torch.testing.assert_close(
+        second.oracle_displacement,
+        3.0 * first.oracle_displacement,
+    )
 
 
 def test_measured_kl_safety_is_a_fail_closed_outcome_not_a_rescaling_rule() -> None:

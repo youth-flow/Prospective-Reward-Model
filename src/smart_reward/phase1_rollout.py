@@ -703,6 +703,25 @@ def _artifact_contract(
         raise ValueError("artifact named seeds are inconsistent with the requested seed")
 
     a_sha = _validate_digest(evidence.get("policy_a_sha256"), name="policy_a_sha256")
+    policy_config = normalized_config.get("policy")
+    if not isinstance(policy_config, Mapping):
+        raise TypeError("normalized policy config must be a mapping")
+    if policy_config.get("fixed_lora_a") is not None:
+        try:
+            expected_lora_a_evidence = _phase1._policy_lora_a_initialization_evidence(
+                policy_config,
+                run_seed=expected_seed,
+                observed_sha256=a_sha,
+            )
+        except RuntimeError as error:
+            raise ValueError(
+                "artifact LoRA-A fingerprint differs from the configured global identity"
+            ) from error
+        if evidence.get("policy_lora_a_initialization") != expected_lora_a_evidence:
+            raise ValueError(
+                "artifact global LoRA-A initialization/provenance does not match "
+                "the source configuration"
+            )
     policy_chat_sha = _validate_digest(
         evidence.get("chat_template_sha256"), name="chat_template_sha256"
     )
@@ -730,6 +749,32 @@ def _artifact_contract(
         b=_finite_float(transform_value["b"], name="oracle_transform.b"),
         tau=_finite_float(transform_value["tau"], name="oracle_transform.tau"),
     )
+    oracle_config = normalized_config.get("oracle")
+    if not isinstance(oracle_config, Mapping):
+        raise TypeError("normalized oracle config must be a mapping")
+    expected_transform_calibration = oracle_config.get("transform_calibration")
+    if expected_transform_calibration is not None:
+        if not isinstance(expected_transform_calibration, Mapping):
+            raise TypeError("oracle.transform_calibration must be a mapping")
+        if evidence.get("oracle_transform_calibration") != expected_transform_calibration:
+            raise ValueError(
+                "artifact frozen oracle-transform calibration/provenance does not "
+                "match the source configuration"
+            )
+        if (
+            evidence.get("oracle_fit_split") != "excluded_phase1_train_artifacts"
+            or evidence.get("oracle_transform_fitted_on_current_seed") is not False
+        ):
+            raise ValueError(
+                "artifact does not prove that the frozen oracle transform avoided "
+                "current-seed refitting"
+            )
+        if transform.b != float(expected_transform_calibration["b"]) or transform.tau != float(
+            expected_transform_calibration["tau"]
+        ):
+            raise ValueError(
+                "artifact oracle_transform differs from the configured frozen global values"
+            )
     revisions = evidence.get("revisions")
     expected_revisions = {
         "prompt_dataset": normalized_config["data"]["prompt_revision"],
@@ -807,7 +852,11 @@ def _load_policy_runtime(
     if getattr(tokenizer, "pad_token_id", None) is None:
         raise ValueError("policy tokenizer must expose a pad or EOS token id")
 
-    lora_seed = SeedBundle.from_base_seed(seed).policy_lora_a
+    lora_a_initialization = _phase1._policy_lora_a_initialization(
+        policy,
+        run_seed=seed,
+    )
+    lora_seed = int(lora_a_initialization["initialization_seed"])
     with _phase1._fork_torch_seed(lora_seed, device):
         model = _phase1._load_pretrained(
             transformers.AutoModelForCausalLM,
@@ -831,6 +880,11 @@ def _load_policy_runtime(
     )
     with _phase1._fork_torch_seed(lora_seed, device):
         setup = _hf.configure_fixed_a_lora(model, lora_config)
+    _phase1._policy_lora_a_initialization_evidence(
+        policy,
+        run_seed=seed,
+        observed_sha256=setup.a_state_sha256,
+    )
     setup.model.eval()
     return _PolicyRuntime(tokenizer=tokenizer, setup=setup)
 

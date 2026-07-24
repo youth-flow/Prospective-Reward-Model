@@ -129,6 +129,27 @@ def test_canonical_edge_conversion_and_shape_validation() -> None:
         replace(train, h=train.h.clone().index_fill(0, torch.tensor([0]), float("nan")))
 
 
+def test_training_tensor_device_transfer_preserves_frozen_schema() -> None:
+    train = _train()
+    moved = train.to("cpu")
+
+    assert moved is not train
+    assert moved.prompt_ids == train.prompt_ids
+    for name in (
+        "policy_scores",
+        "reward_features",
+        "h",
+        "left_wins",
+        "num_annotations",
+    ):
+        original = getattr(train, name)
+        transferred = getattr(moved, name)
+        assert transferred.device.type == "cpu"
+        assert transferred.dtype == original.dtype
+        assert torch.equal(transferred, original)
+        assert transferred.requires_grad is False
+
+
 def test_split_ids_are_pairwise_disjoint_and_layouts_match() -> None:
     experiment = _experiment()
     leaked_validation = replace(

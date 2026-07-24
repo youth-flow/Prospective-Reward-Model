@@ -29,6 +29,7 @@ class MissingConfigDependencyError(ConfigError):
 
 
 _REVISION_PATTERN = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
@@ -210,12 +211,20 @@ def _validate_data(value: object) -> None:
         value,
         path="data",
         required={"prompt_dataset", "prompt_revision", "num_candidates"},
+        optional={"prompt_eligibility"},
     )
     _string(data["prompt_dataset"], "data.prompt_dataset")
     _pinned_revision(data["prompt_revision"], "data.prompt_revision")
     num_candidates = _integer(data["num_candidates"], "data.num_candidates", minimum=2)
     if num_candidates != 4:
         raise ConfigError("data.num_candidates must equal 4 for the locked Phase-1 graph")
+    if "prompt_eligibility" in data:
+        eligibility = _string(data["prompt_eligibility"], "data.prompt_eligibility")
+        if eligibility != "policy_chat_template_tokens_lte_max_prompt_tokens_before_seeded_shuffle":
+            raise ConfigError(
+                "data.prompt_eligibility must freeze policy-token-length filtering "
+                "before the seeded prompt split"
+            )
 
 
 def _validate_sampling(value: object) -> None:
@@ -270,6 +279,71 @@ def _validate_sampling(value: object) -> None:
         )
 
 
+def _validate_fixed_lora_a(value: object) -> None:
+    contract = _keys(
+        value,
+        path="policy.fixed_lora_a",
+        required={
+            "mode",
+            "initialization_seed",
+            "expected_sha256",
+            "source_seed",
+            "source_named_stream",
+            "source_config",
+            "source_config_hash",
+            "source_artifact_metadata_sha256",
+            "source_seed_excluded_from_phase2",
+        },
+    )
+    if contract["mode"] != "frozen_global":
+        raise ConfigError("policy.fixed_lora_a.mode must equal 'frozen_global'")
+    _integer(
+        contract["initialization_seed"],
+        "policy.fixed_lora_a.initialization_seed",
+        minimum=0,
+        maximum=2**63 - 1,
+    )
+    expected_sha256 = _string(
+        contract["expected_sha256"],
+        "policy.fixed_lora_a.expected_sha256",
+    )
+    if _SHA256_PATTERN.fullmatch(expected_sha256) is None:
+        raise ConfigError(
+            "policy.fixed_lora_a.expected_sha256 must be a lowercase 64-character SHA-256 digest"
+        )
+    _integer(
+        contract["source_seed"],
+        "policy.fixed_lora_a.source_seed",
+        minimum=0,
+        maximum=2**63 - 1,
+    )
+    if contract["source_named_stream"] != "policy_lora_a":
+        raise ConfigError("policy.fixed_lora_a.source_named_stream must equal 'policy_lora_a'")
+    _string(contract["source_config"], "policy.fixed_lora_a.source_config")
+    source_config_hash = _string(
+        contract["source_config_hash"],
+        "policy.fixed_lora_a.source_config_hash",
+    )
+    if _SHA256_PATTERN.fullmatch(source_config_hash) is None:
+        raise ConfigError(
+            "policy.fixed_lora_a.source_config_hash must be a lowercase 64-character SHA-256 digest"
+        )
+    source_metadata_hash = _string(
+        contract["source_artifact_metadata_sha256"],
+        "policy.fixed_lora_a.source_artifact_metadata_sha256",
+    )
+    if _SHA256_PATTERN.fullmatch(source_metadata_hash) is None:
+        raise ConfigError(
+            "policy.fixed_lora_a.source_artifact_metadata_sha256 must be a lowercase "
+            "64-character SHA-256 digest"
+        )
+    if not _boolean(
+        contract["source_seed_excluded_from_phase2"],
+        "policy.fixed_lora_a.source_seed_excluded_from_phase2",
+    ):
+        raise ConfigError("policy.fixed_lora_a.source_seed_excluded_from_phase2 must be true")
+
+
 def _validate_policy(value: object, normalized: dict[str, Any]) -> None:
     policy = _keys(
         value,
@@ -286,7 +360,11 @@ def _validate_policy(value: object, normalized: dict[str, Any]) -> None:
             "lora_layers",
             "lora_modules",
         },
-        optional={"lora_dropout", "trainable_tangent_parameters"},
+        optional={
+            "lora_dropout",
+            "trainable_tangent_parameters",
+            "fixed_lora_a",
+        },
     )
     _string(policy["model"], "policy.model")
     _pinned_revision(policy["revision"], "policy.revision")
@@ -312,6 +390,8 @@ def _validate_policy(value: object, normalized: dict[str, Any]) -> None:
         raise ConfigError(
             "fixed-A LoRA requires policy.trainable_tangent_parameters == 'lora_B_only'"
         )
+    if "fixed_lora_a" in policy:
+        _validate_fixed_lora_a(policy["fixed_lora_a"])
 
     # The smoke config predates the explicit spelling of these locked values.
     # Materializing them makes semantically identical runs hash identically.
@@ -319,6 +399,98 @@ def _validate_policy(value: object, normalized: dict[str, Any]) -> None:
     normalized_policy.setdefault("lora_dropout", 0.0)
     normalized_policy.setdefault("trainable_tangent_parameters", "lora_B_only")
     normalized["policy"] = normalized_policy
+
+
+def _validate_oracle_transform_calibration(
+    value: object,
+    *,
+    scale_floor: float,
+) -> None:
+    calibration = _keys(
+        value,
+        path="oracle.transform_calibration",
+        required={
+            "mode",
+            "b",
+            "tau",
+            "aggregation_rule",
+            "source_split",
+            "source_config",
+            "source_config_hash",
+            "source_seeds_excluded_from_phase2",
+            "source_artifacts",
+        },
+    )
+    if calibration["mode"] != "frozen_global":
+        raise ConfigError("oracle.transform_calibration.mode must equal 'frozen_global'")
+    _number(calibration["b"], "oracle.transform_calibration.b")
+    _number(
+        calibration["tau"],
+        "oracle.transform_calibration.tau",
+        minimum=scale_floor,
+    )
+    if calibration["aggregation_rule"] != "componentwise_median":
+        raise ConfigError(
+            "oracle.transform_calibration.aggregation_rule must equal 'componentwise_median'"
+        )
+    if calibration["source_split"] != "train":
+        raise ConfigError("oracle.transform_calibration.source_split must equal 'train'")
+    _string(
+        calibration["source_config"],
+        "oracle.transform_calibration.source_config",
+    )
+    source_config_hash = _string(
+        calibration["source_config_hash"],
+        "oracle.transform_calibration.source_config_hash",
+    )
+    if _SHA256_PATTERN.fullmatch(source_config_hash) is None:
+        raise ConfigError(
+            "oracle.transform_calibration.source_config_hash must be a lowercase "
+            "64-character SHA-256 digest"
+        )
+    if not _boolean(
+        calibration["source_seeds_excluded_from_phase2"],
+        "oracle.transform_calibration.source_seeds_excluded_from_phase2",
+    ):
+        raise ConfigError(
+            "oracle.transform_calibration.source_seeds_excluded_from_phase2 must be true"
+        )
+
+    source_artifacts = _sequence(
+        calibration["source_artifacts"],
+        "oracle.transform_calibration.source_artifacts",
+    )
+    if not source_artifacts:
+        raise ConfigError("oracle.transform_calibration.source_artifacts must not be empty")
+    seeds: list[int] = []
+    metadata_hashes: list[str] = []
+    for index, raw_artifact in enumerate(source_artifacts):
+        path = f"oracle.transform_calibration.source_artifacts[{index}]"
+        artifact = _keys(
+            raw_artifact,
+            path=path,
+            required={"seed", "metadata_sha256"},
+        )
+        seeds.append(
+            _integer(
+                artifact["seed"],
+                f"{path}.seed",
+                minimum=0,
+                maximum=2**63 - 1,
+            )
+        )
+        digest = _string(artifact["metadata_sha256"], f"{path}.metadata_sha256")
+        if _SHA256_PATTERN.fullmatch(digest) is None:
+            raise ConfigError(
+                f"{path}.metadata_sha256 must be a lowercase 64-character SHA-256 digest"
+            )
+        metadata_hashes.append(digest)
+    if len(seeds) != len(set(seeds)):
+        raise ConfigError("oracle.transform_calibration.source_artifacts must have unique seeds")
+    if len(metadata_hashes) != len(set(metadata_hashes)):
+        raise ConfigError(
+            "oracle.transform_calibration.source_artifacts must have unique metadata hashes"
+        )
 
 
 def _validate_oracle(value: object) -> float:
@@ -334,6 +506,7 @@ def _validate_oracle(value: object) -> float:
             "robust_scale_floor",
             "probability_floor",
         },
+        optional={"transform_calibration"},
     )
     _string(oracle["model"], "oracle.model")
     _pinned_revision(oracle["revision"], "oracle.revision")
@@ -352,6 +525,11 @@ def _validate_oracle(value: object) -> float:
     )
     if scale_floor != 1.0e-6:
         raise ConfigError("oracle.robust_scale_floor must equal the locked value 1e-6")
+    if "transform_calibration" in oracle:
+        _validate_oracle_transform_calibration(
+            oracle["transform_calibration"],
+            scale_floor=scale_floor,
+        )
     probability_floor = _number(
         oracle["probability_floor"],
         "oracle.probability_floor",

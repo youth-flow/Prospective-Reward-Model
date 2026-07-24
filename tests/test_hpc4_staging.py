@@ -177,8 +177,18 @@ def test_offline_verification_uses_formal_prompt_preparation_and_local_only_data
 ) -> None:
     staging = _load_staging_module()
     config = load_config(Path(__file__).parents[1] / "configs" / "smoke.yaml")
-    rows = [{"prompt_id": f"p-{index}", "text": f"prompt {index}"} for index in range(64)]
+    config["data"]["prompt_eligibility"] = (
+        "policy_chat_template_tokens_lte_max_prompt_tokens_before_seeded_shuffle"
+    )
+    rows = [
+        {
+            "prompt_id": f"p-{index:02d}",
+            "text": f"{'long ' if index < 6 else ''}prompt {index}",
+        }
+        for index in range(70)
+    ]
     load_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    tokenizer_calls: list[tuple[list[dict[str, str]], dict[str, object]]] = []
     dataset_asset = staging._asset_contract(config)[0]
     dataset_snapshot = (
         tmp_path / "hub" / "datasets--allenai--multipref" / "snapshots" / dataset_asset["revision"]
@@ -201,18 +211,38 @@ def test_offline_verification_uses_formal_prompt_preparation_and_local_only_data
         assert kwargs["split"] == "train"
         return rows
 
-    class Factory:
+    class ConfigFactory:
         @staticmethod
         def from_pretrained(*_: object, **kwargs: object) -> object:
             assert kwargs["local_files_only"] is True
-            return SimpleNamespace(model_type="test", chat_template="{{ messages }}")
+            return SimpleNamespace(model_type="test")
+
+    class Tokenizer:
+        chat_template = "{{ messages }}"
+
+        @staticmethod
+        def apply_chat_template(messages: list[dict[str, str]], **kwargs: object) -> list[int]:
+            tokenizer_calls.append((messages, kwargs))
+            assert kwargs == {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "truncation": False,
+            }
+            return [1] * (400 if messages[0]["content"].startswith("long ") else 8)
+
+    class TokenizerFactory:
+        @staticmethod
+        def from_pretrained(*_: object, **kwargs: object) -> object:
+            assert kwargs["local_files_only"] is True
+            assert kwargs["use_fast"] is True
+            return Tokenizer()
 
     datasets_module = ModuleType("datasets")
     datasets_module.DownloadConfig = DownloadConfig
     datasets_module.load_dataset = load_dataset
     transformers_module = ModuleType("transformers")
-    transformers_module.AutoConfig = Factory
-    transformers_module.AutoTokenizer = Factory
+    transformers_module.AutoConfig = ConfigFactory
+    transformers_module.AutoTokenizer = TokenizerFactory
     monkeypatch.setitem(sys.modules, "datasets", datasets_module)
     monkeypatch.setitem(sys.modules, "transformers", transformers_module)
 
@@ -231,6 +261,40 @@ def test_offline_verification_uses_formal_prompt_preparation_and_local_only_data
     assert prompt_check["prepared_prompts"] == 64
     assert prompt_check["split_counts"] == {"train": 48, "validation": 8, "test": 8}
     assert len(prompt_check["prepared_prompts_sha256"]) == 64
+    selection = prompt_check["prompt_pool_selection"]
+    assert selection["dataset_unique_prompt_count"] == 70
+    assert selection["eligible_prompt_count"] == 64
+    assert selection["excluded_over_limit_prompt_count"] == 6
+    assert selection["selected_prompt_count"] == 64
+    assert selection["filter_applied_before_seeded_shuffle"] is True
+    assert selection["selected_minimum_policy_chat_token_count"] == 8
+    assert selection["selected_maximum_policy_chat_token_count"] == 8
+    assert selection["truncation"] is False
+    expected_eligible_ids = [f"p-{index:02d}" for index in range(6, 70)]
+    expected_excluded_ids = [f"p-{index:02d}" for index in range(6)]
+    assert (
+        selection["eligible_prompt_ids_sha256"]
+        == hashlib.sha256(
+            json.dumps(
+                expected_eligible_ids,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    assert (
+        selection["excluded_prompt_ids_sha256"]
+        == hashlib.sha256(
+            json.dumps(
+                expected_excluded_ids,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    assert len(tokenizer_calls) == 70
     assert len(load_calls) == 1
 
 

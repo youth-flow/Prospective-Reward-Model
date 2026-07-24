@@ -520,7 +520,229 @@ submit 脚本在 committed identity 中读取完整 seed 数，并形成
 单 index 或连续闭区间，`PRORM_ARRAY_CONCURRENCY` 必须是正整数。当前用户决定拉满已确认
 QoS，因此 accepted FP64 campaign 取 2；`MaxJobsPU=2` 仍是所有 split arrays 的全局并发上限。
 
-### 7.1 Historical numerical incident
+### 6.1 Phase 2 outcome-blind pilot（尚未运行）
+
+Phase 2 使用两个被同时锁定的 config：
+
+- `configs/common_beta_pilot_base.yaml` 定义 real-model materialization，决定 HF inventory
+  与 content-addressed artifact identity；
+- `configs/common_beta_pilot.yaml` 是固定 seeds
+  `20260801,20260802,20260803`、`stage=pilot`、
+  `formal_eligibility=false` 的 overlay，决定 pilot design identity。
+
+提交前的本地 deterministic input audit 必须使用 pinned Qwen2.5 tokenizer/template 完整渲染
+全部 5,323 个 unique MultiPref prompts。当前锁定输入有 88 个超过 1024 policy tokens
+（`1.65%`），eligible pool 为 5,235；旧 shuffle-first 顺序会让三个 pilot tasks 分别包含
+39、34、36 个超限 prompt。当前 contract 是先建立 `<=1024` eligible pool，再 seeded
+shuffle/split，绝不截断；artifact 保存 unique/eligible/excluded/selected counts 与 ID-list
+hashes。这个检查是 reproducible preflight，不是 Phase 2 结果。
+
+先在 CPU 计算节点为 **base config** 建立/验证 inventory；不能用 overlay hash 代替 base
+inventory identity：
+
+```bash
+git fetch origin main
+test -z "$(git status --porcelain --untracked-files=normal)"
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+
+bash scripts/hpc4/submit_hf_stage.sh \
+  configs/common_beta_pilot_base.yaml amd 02:00:00
+```
+
+staging job 必须 `COMPLETED (0:0)`，对应
+`$PRORM_HF_CACHE/inventories/<base-config-hash>.json` 存在且 verify-only 通过。随后提交 pilot；
+HPC4 已观察到 `l20_qos MaxJobsPU=2`，所以脚本默认 array concurrency 2：
+
+```bash
+export PRORM_PHASE2_ARRAY_CONCURRENCY=2
+bash scripts/hpc4/submit_phase2_pilot.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  gpu-l20 1-00:00:00
+```
+
+当前可执行的 Phase 2 pilot GPU design 固定为 `gpu-l20`（NVIDIA L20）；专用 pilot 提交
+入口会拒绝任何其他 GPU partition。未来 confirmatory wrapper 在运行任何正式 seed 前必须
+保留同一硬件 guard，避免把跨硬件 producer 差异混入方法效应。CPU pilot aggregation 仍只
+允许 `amd|intel`，不受此 GPU 锁定影响。
+
+可选第五参数仍是一个 zero-based index 或连续闭区间。该专用入口在 allocation 前验证：
+
+- clean exact Git commit（上面的 operator precheck 另行保证它已推送到 `origin/main`）；
+- overlay/base/`identities.json` 的 committed bytes、file SHA256 与 semantic hash；
+- overlay 对 base config hash 的绑定、3-seed pilot 身份和 `formal_eligibility=false`；
+- validated SIF、base-config inventory、绝对 project/scratch roots；
+- account `sigroup`、单节点、单 task、单 GPU 与锁定的 `gpu-l20` partition。
+
+每个 array task 的权威目录是
+
+```text
+$PRORM_PROJECT_ROOT/runs/phase2-pilot/<phase2-design-sha>/
+└── seed-<seed>/job-<array-job-id>_<task-id>/
+    ├── phase2-pilot-diagnostics.json
+    ├── phase2-pilot-diagnostics.diagnostics.jsonl
+    ├── phase2-output-verification.json
+    ├── run-manifest.json
+    ├── artifact -> <content-addressed base artifact>
+    └── SUCCESS | FAILED
+```
+
+base artifact 单独发布到
+
+```text
+$PRORM_PROJECT_ROOT/artifacts/<base-config-hash>/<image-sha>/<inventory-sha>/<git-commit>/seed-<seed>/
+```
+
+pilot 输出的 schema 是 `common-beta-pilot-diagnostics/v2` 与
+`common-beta-pilot-diagnostic-row/v2`。它们只允许 train-only convergence/rank/control、
+train-only beta candidates、response length/EOS/max-length 和 on-policy KL evidence。作业内
+verifier 会拒绝 held-out、reward、utility、regret、oracle outcome、head/direction vectors、
+prompt/response text 或 token IDs；pilot 不调用 held-out evaluator，也不开启 final
+oracle-scoring session。`SUCCESS` 只表示这条 outcome-blind 工程链和信息边界通过，不表示
+ProRM+ 胜过 BT-MLE，也不能进入正式 aggregate。
+
+三个声明 seed 都产生完整 `SUCCESS` 目录后，只能通过 CPU Slurm job 做严格聚合。先将三个
+路径分别替换为与当前 committed design SHA 对应的唯一成功目录；输出父目录必须预先存在，
+目标文件必须尚不存在：
+
+```bash
+design_sha=REPLACE_WITH_COMMITTED_DESIGN_SHA256
+pilot_root="${PRORM_PROJECT_ROOT}/runs/phase2-pilot/${design_sha}"
+aggregate_dir="${pilot_root}/aggregate"
+mkdir -p "${aggregate_dir}"
+
+run_seed_1=REPLACE_WITH_20260801_SUCCESS_DIR
+run_seed_2=REPLACE_WITH_20260802_SUCCESS_DIR
+run_seed_3=REPLACE_WITH_20260803_SUCCESS_DIR
+
+aggregate_job="$(
+  bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
+    configs/common_beta_pilot.yaml \
+    configs/common_beta_pilot_base.yaml \
+    "${aggregate_dir}/calibration.json" \
+    amd 01:00:00 \
+    "${run_seed_1}" "${run_seed_2}" "${run_seed_3}"
+)"
+aggregate_job="${aggregate_job%%;*}"
+test -n "${aggregate_job}"
+squeue -j "${aggregate_job}"
+```
+
+任务离开队列后，要求 `COMPLETED`、`ExitCode=0:0`，并验证原子发布的 JSON：
+
+```bash
+sacct -j "${aggregate_job}" \
+  --format=JobID,State,Elapsed,ExitCode,Partition,MaxRSS
+calibration_aggregate="${aggregate_dir}/calibration.json"
+test -f "${calibration_aggregate}"
+aggregate_log="${PRORM_PROJECT_ROOT}/slurm-logs/prorm-phase2-pilot-aggregate-${aggregate_job}.out"
+calibration_sha="$(sha256sum -- "${calibration_aggregate}" | awk '{print $1}')"
+grep -Fx \
+  "Phase-2 pilot aggregate published: ${calibration_aggregate} sha256=${calibration_sha}" \
+  "${aggregate_log}"
+```
+
+aggregate job 不发布 `.sha256` sidecar；其权威 digest 是计算后与 Slurm publication log
+逐字匹配的 `calibration_sha`。calibration aggregate 只接受或拒绝当前 horizon；仅在当前
+horizon 通过时，它才给新的 freeze identity 提供
+`beta_base=max_s(beta_tilde_s)`。它本身永远不接受 confirmatory selection。
+
+把该值、`calibration_sha` 和所有冻结字段写入一个新的 committed overlay identity：
+`design.stage=pilot`、`design.pilot_phase=freeze`。随后完整重跑固定 pilot seeds
+`20260801,20260802,20260803`。aggregate identity 必须在 **GPU submit** 和 **CPU
+aggregate submit** 两处都传入。
+
+第一次 freeze 的模板是：
+
+```bash
+calibration_aggregate=REPLACE_WITH_ACCEPTED_CALIBRATION_JSON
+
+bash scripts/hpc4/submit_phase2_pilot.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  gpu-l20 1-00:00:00 \
+  --beta-source-aggregate "${calibration_aggregate}" \
+  --horizon-parent-aggregate "${calibration_aggregate}"
+
+# 三个 freeze SUCCESS 目录产生后：
+bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  REPLACE_WITH_NEW_FREEZE_AGGREGATE_JSON \
+  amd 01:00:00 \
+  REPLACE_WITH_20260801_FREEZE_SUCCESS_DIR \
+  REPLACE_WITH_20260802_FREEZE_SUCCESS_DIR \
+  REPLACE_WITH_20260803_FREEZE_SUCCESS_DIR \
+  --beta-source-aggregate "${calibration_aggregate}" \
+  --horizon-parent-aggregate "${calibration_aggregate}"
+```
+
+如果 freeze 仅因非长度 KL safety 失败，下一个身份只能使用精确
+`next_global_beta=2*previous_beta`，且其 `--beta-source-aggregate` 必须是**紧邻的上一份失败
+freeze aggregate**；`--horizon-parent-aggregate` 仍是接受当前 horizon 的 calibration
+aggregate。禁止跳过 beta 网格点。提交模板是：
+
+```bash
+previous_failed_freeze=REPLACE_WITH_IMMEDIATELY_PRECEDING_FREEZE_AGGREGATE
+accepted_horizon_calibration=REPLACE_WITH_ACCEPTED_CALIBRATION_AGGREGATE
+
+bash scripts/hpc4/submit_phase2_pilot.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  gpu-l20 1-00:00:00 \
+  --beta-source-aggregate "${previous_failed_freeze}" \
+  --horizon-parent-aggregate "${accepted_horizon_calibration}"
+
+# 三个 retry SUCCESS 目录产生后，CPU aggregate 使用完全相同的两个父证据：
+bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  REPLACE_WITH_NEW_RETRY_AGGREGATE_JSON \
+  amd 01:00:00 \
+  REPLACE_WITH_20260801_RETRY_SUCCESS_DIR \
+  REPLACE_WITH_20260802_RETRY_SUCCESS_DIR \
+  REPLACE_WITH_20260803_RETRY_SUCCESS_DIR \
+  --beta-source-aggregate "${previous_failed_freeze}" \
+  --horizon-parent-aggregate "${accepted_horizon_calibration}"
+```
+
+若长度 gate 失败，则不能只调 beta：必须在 `[256,512,1024]` 中进入下一 horizon，
+建立新的 `pilot_phase=calibration` identity，并从三个 seeds 重新开始。此时 GPU 与 CPU
+提交都只绑定紧邻的长度失败 aggregate：
+
+```bash
+previous_length_failure=REPLACE_WITH_IMMEDIATELY_PRECEDING_LENGTH_FAILURE
+
+bash scripts/hpc4/submit_phase2_pilot.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  gpu-l20 1-00:00:00 \
+  --horizon-parent-aggregate "${previous_length_failure}"
+
+# 三个新-horizon calibration SUCCESS 目录产生后：
+bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  REPLACE_WITH_NEW_HORIZON_CALIBRATION_AGGREGATE_JSON \
+  amd 01:00:00 \
+  REPLACE_WITH_20260801_HORIZON_SUCCESS_DIR \
+  REPLACE_WITH_20260802_HORIZON_SUCCESS_DIR \
+  REPLACE_WITH_20260803_HORIZON_SUCCESS_DIR \
+  --horizon-parent-aggregate "${previous_length_failure}"
+```
+
+每个箭头都要求先提交新的 overlay/design identity、更新 `configs/identities.json`，并使用
+新的 no-overwrite output。只有最终 `selection_accepted=true` 的 freeze aggregate 才能生成
+confirmatory identity。
+
+正式实验只有在 pilot 结束后，才建立新的 confirmatory config：冻结一个对所有 formal
+seeds/arms 相同的 global `beta_0`、response horizon、optimization/KL/length gates，并使用
+顺序锁定的 30 个 paired seeds `20260901`–`20260930`。正式 beta sensitivity 只运行固定的
+`beta in {0.5*beta_0, 2.0*beta_0}`；seed-specific curvature calibration 仅是 pilot
+train-only 诊断，禁止进入 confirmatory jobs。当前文件没有记录任何 Phase 2 pilot job ID
+或结果，因为该 campaign 尚未运行。
+
+### 6.2 Historical numerical incident
 
 旧 main semantic hash
 `7b3f12ba1c2b6f73deb8ca2fe0da303424f108876fb4a0ad12e68df312cbf7b2`、source

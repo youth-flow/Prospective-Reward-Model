@@ -260,10 +260,12 @@ $$
 term 本身为零，只能使用 absolute `O(beta^-2)` statement，不能声称相对误差趋零。若 optimizer
 跳到远处另一个 mode，上述 local branch 结论不适用。
 
-common-beta calibration 中 `beta` 与 `K_cal^{-1/2}` 同阶，所以 leading regret 为
+pilot calibration candidate 中 `beta` 与 `K_cal^{-1/2}` 同阶，所以 leading regret 为
 `O(sqrt(K_cal))`，remainder 为 `O(K_cal)`，非退化情形的相对误差为
-`O(sqrt(K_cal))`。这正是保留 `K_cal={0.001,0.003,0.01}` 尺度曲线、而不只测一个有限步长的
-理论理由。
+`O(sqrt(K_cal))`。正式实验会冻结一个 global `beta_0`；prespecified global-beta multiples
+`c in {0.5, 2.0}` 只作正式尺度 sensitivity，并统一部署
+`beta=c*beta_0`。seed-conditional `K_cal` 曲线仅用于 pilot train-only 尺度诊断；
+它不能为 formal seed 重新选择下游问题或步长。
 
 ### 2.4 Projection geometry 与 reward 等价类
 
@@ -515,9 +517,12 @@ $$
 \operatorname{Var}(\bar h_R|e)=\frac1R\operatorname{Var}(h|e).
 $$
 
-因此下一 noisy-label 主臂固定 `R=4`：annotation cost 为四倍，条件标准差减半，仍严格无偏。
-BT-MLE 必须使用四份 replicate 的全部 Bernoulli labels。replicate boundaries 必须被 schema
-保存；把 labels 直接拼接后按一个更大的 `N` 重算 `h` 不是同一个 estimator。
+因此下一 noisy-label 主臂固定 `R=4`：条件标准差减半，仍严格无偏。`gamma=0.9` 时
+每份 `E[N]=10`，所以 canonical-edge arm 每 prompt 平均需要 40 个 Bernoulli labels；
+all-six-pairs arm 平均需要 240 个，且 geometric tail 无上界。这是精确无偏方法的主要工程
+成本，不可用 hard cap 换取固定预算。BT-MLE 必须使用四份 replicate 的全部 Bernoulli
+labels。replicate boundaries 必须被 schema 保存；把 labels 直接拼接后按一个更大的 `N`
+重算 `h` 不是同一个 estimator。
 
 不得硬截断、clip 大 `N`、按 `N` 重采样或静默丢弃。memory guard 只能使 run fail closed，
 不能改变 estimator。
@@ -870,7 +875,29 @@ all training-edge margins
 ```
 
 Microbatch 只改变内存占用，不创建 batch-local moment/Fisher。一个 dual direction 不得跨多个
-outer steps stale reuse。主实验固定 720 次 fresh-dual updates，validation 不选择 checkpoint。
+outer steps stale reuse。
+
+Phase 2 不再用相同的任意固定步数定义两个 estimator。BT-MLE 与 ProRM+ 的曲率和条件数不同；
+把两者都停在第 720 步会把 objective 差异与 optimizer error 混在一起。每个 objective 的主
+head 必须分别通过冻结的、只读 train data 的一阶条件：
+
+$$
+\rho_\ell
+=
+\frac{\|\nabla_w L_\ell(w_{\rm final})\|_2}
+{\max(\|\nabla_w L_\ell(w_0)\|_2,\epsilon)}
+\le \tau.
+$$
+
+梯度在 optimizer update 后对完整训练集重算，不使用 clipping 后的值；ProRM+ 的 gate 必须
+用 cold-start FP64 PCG 和 reported quadratic 的精确 envelope gradient。连续若干次 scheduled
+check 通过后才接受第一个合格 iterate，未在最大步数内通过则整个 seed fail closed。validation、
+test 与 rollout 不参与停止或 checkpoint 选择。
+
+第 720 步仍保存为两方法共享算力的 secondary checkpoint，但不会覆盖已收敛的主 head。
+zero initialization 与 AdamW 路径只定义可复现的 algorithmic tie-break；在没有 rank 证据或
+显式投影时，不得声称它给出欧氏 minimum-norm 解。pilot 只用 train-only trajectory 冻结
+`tau`、检查间隔、连续通过次数与最大步数，pilot seeds 永久排除在正式统计之外。
 
 ## 8. Held-out geometry and downstream evaluation
 
@@ -964,60 +991,106 @@ zero-B、BT-MLE update 与 ProRM+ update 的 transformed-oracle reward improveme
 fixed-K transfer test；它不是 fixed-beta ProRM 主 estimand 的直接 rollout。固定 β 与
 固定 K 回答不同问题，正式结果必须分别报告。
 
-### 8.4 下一实验：common-beta 与 train-only oracle calibration
+### 8.4 下一实验：pilot-calibrated global beta
 
-下一实验使用新的 design identity，主链改为 **common-beta deployment**：
+下一实验使用新的 design identity。关键区分是：pilot 可以产生
+**seed-specific calibration candidates**，但正式 estimand 使用一个对所有 formal seeds 与
+policy arms 相同的 **global beta**。
 
-1. 先用 train split 的 operational-oracle rewards 与 train Fisher 构造
+对 excluded pilot seed `s`，只用 train split 的 operational-oracle rewards 与 train Fisher
+构造
 
-   $$
-   u_*^{\rm tr}
-   =(\widehat F_{\rm tr}+\lambda I)^{-1}\widehat g_*^{\rm tr}.
-   $$
+$$
+u_{*,s}^{\rm tr}
+=(\widehat F_{{\rm tr},s}+\lambda I)^{-1}\widehat g_{*,s}^{\rm tr},
+\qquad
+\widetilde\beta_s
+=
+\sqrt{
+\frac{(u_{*,s}^{\rm tr})^\top
+\widehat F_{{\rm tr},s}u_{*,s}^{\rm tr}}
+{2K_{\rm cal}}
+}.
+$$
 
-   主尺度固定 `K_cal=0.003`，并按
+`widetilde beta_s` 使该 pilot seed 的 oracle local displacement 达到解析的 train-Fisher
+二次 KL `K_cal`；它只是尺度候选，不是正式 seed `s` 的专用 beta。calibration pilot 先设
 
-   $$
-   \boxed{
-   \beta_{\rm common}
-   =
-   \sqrt{
-   \frac{(u_*^{\rm tr})^\top\widehat F_{\rm tr}u_*^{\rm tr}}
-   {2K_{\rm cal}}
-   }}
-   $$
+$$
+\beta_{\rm base}
+=
+\max_{s\in\mathcal S_{\rm pilot}}\widetilde\beta_s,
+\qquad
+\beta^{(k)}=2^k\beta_{\rm base}.
+$$
 
-   解析校准。它使 oracle local displacement `u*/beta_common` 的 train Fisher 二次 KL
-   等于 `K_cal`。规则在所有 seed 中相同，数值可随 train sample 改变；每个 seed 内只有一个
-   scalar，所有 learner 共享。calibration 不读取 validation/test reward、rollout 或 metric。
-2. `beta_common` 一经选定便对 BT-MLE、ProRM+ 和 oracle positive-control direction 完全相同；
-   learner 不再各自 line-search 或按自身 direction norm 重标。
-3. 实际部署
-   $d_\ell^{deploy}=u_{\ell,\mathrm{train}}/\beta_{\mathrm{common}}$。部署后同时报告
-   两种 KL 方向，但主 finite-policy utility 必须使用 updated-policy trajectories 上的
-   $D_{\mathrm{KL}}(\pi_{d_\ell}\Vert\pi_0)$：
+若 excluded pilot seeds 的 worst-arm mean/tail KL safety 不通过，只能运行 target-free
+KL grid，并取预声明序列 `{beta_base, 2 beta_base, 4 beta_base, ...}` 中最小通过值。首个 freeze
+绑定 calibration aggregate；之后每一步必须绑定紧邻的上一个 non-length safety failed
+freeze aggregate 及其 exact doubled-beta recommendation，不能直接跳到更大的 grid
+point。horizon parent 与 beta retry parent 分别绑定。随后把最终值与全部
+numerical/horizon gates 写入新 confirmatory identity。即
 
-   $$
-   J_\ell^*
-   =
-   \mathbb E_{x,y\sim\pi_{d_\ell}}[r^*(x,y)]
-   -\beta_{\rm common}
-   D_{\rm KL}(\pi_{d_\ell}\Vert\pi_0).
-   $$
+$$
+k_*=\min\{k\ge0:\beta^{(k)}\text{ 通过全部冻结 gate}\},
+\qquad
+\boxed{\beta_0=2^{k_*}\beta_{\rm base}}.
+$$
 
-   fixed-history $D_{\rm KL}(\pi_0\Vert\pi_{d_\ell})$ 只是 secondary diagnostic。两个量均不
-   用于事后改变 `beta_common`。
-4. held-out oracle 只能在参数与 `beta_common` 冻结后用于 evaluation。test Fisher/moment
-   仍只用于 held-out re-solve diagnostics，不参与 deployed train direction。
-5. fixed-beta regret 与 common-beta rollout 是主 estimand；fixed-K normalization、
-   constrained regret 和 Fisher cosine 保留为次级机制诊断。
-6. 主 safety cap 固定为 measured policy-to-reference KL `0.02`；超限 fail closed，不缩放。
-   `K_cal in {0.001,0.01}` 只作局部尺度 sensitivity。
-7. 在 common-beta rollout 前先过两个 train/local positive controls：
-   `h=Delta r*` 的 zero-noise oracle-margin arm，以及 `R=4` independent `gamma=0.9`
-   estimates 的 noisy arm。四个 iid candidates 的六条无序边另作 natural-pair efficiency
-   arm；它是 prompt-level U-statistic，必须按 prompt 聚类，不能把六条相关边当成六个独立
-   prompts。
+若该集合为空，实验停止且不定义正式 `beta_0`；formal outcomes 产生后不得再改变。
+
+正式部署为
+
+$$
+d_\ell^{deploy}
+=
+\frac{u_{\ell,\mathrm{train}}}{\beta_0},
+\qquad
+\ell\in\{\mathrm{BT},\mathrm{ProRM+},\mathrm{oracle}\}.
+$$
+
+因此固定 `beta_0` 保留 natural direction 的角度与范数校准误差，且不同 formal seeds 确实
+对应同一个 downstream decision problem。learner-specific 或 formal-seed-specific line
+search、norm normalization 与 beta calibration 都被禁止；seed-conditional `K_cal`
+规则仅作 pilot train-only 尺度诊断。正式 sensitivity 只允许预注册的
+`c in {0.5, 2.0}`，并直接使用 `beta=c*beta_0`；formal-seed curvature 对 beta
+没有任何选择权。
+
+主 finite-policy utility 使用 updated-policy trajectories 上的
+$D_{\mathrm{KL}}(\pi_{d_\ell}\Vert\pi_0)$：
+
+$$
+J_\ell^*
+=
+\mathbb E_{x,y\sim\pi_{d_\ell}}[r^*(x,y)]
+-\beta_0
+D_{\rm KL}(\pi_{d_\ell}\Vert\pi_0).
+$$
+
+fixed-history $D_{\mathrm{KL}}(\pi_0\Vert\pi_{d_\ell})$、fixed-K normalization、
+constrained regret、Fisher cosine 与 learner-specific matched-KL rollout 只是 secondary
+diagnostics。test Fisher/moment 仍只用于 held-out re-solve，不参与 deployed train direction。
+任何 formal mean/tail KL safety violation 都 fail closed，不触发缩放。
+
+Pilot 是 target-free engineering stage：只发布 train convergence/rank/controls、
+`widetilde beta_s`、response length/EOS/max-length 与 on-policy KL。它不得调用 held-out
+evaluator、开启 final oracle scoring、计算 reward/utility/regret/learner ordering，或序列化
+prompt/response text、token IDs、head/direction vectors。oracle finite-step utility control
+第一次只在 fresh formal campaign 中评估。
+
+Phase 2 还要求 raw-prompt 语义完全一致。Qwen2.5 用自己的 tokenizer/chat template 在
+`truncation=False` 下渲染完整 raw prompt。对 pinned MultiPref 5,323 个 unique prompts 的
+确定性 local audit 得到 88 个超过 1024 policy tokens（`1.65%`），所以先建立 5,235 个
+length-eligible prompts 的 pool，再做 seeded shuffle/split；旧顺序会让三个 pilot seeds
+分别包含 39、34、36 个超限 prompt 并 fail closed。artifact 绑定
+unique/eligible/excluded/selected ID-list hashes 以及每个 selected prompt 的 token/hash
+evidence，任何 mismatch 都硬失败。这将 Phase 2 的 prompt law 明确定义为
+MultiPref 条件于 Qwen2.5-rendered length `<=1024`，而不是通过 silent truncation 改变同一
+raw prompt 的语义。
+
+Skywork Qwen3 对同一 raw prompt 加 assistant response 使用自己的 pinned tokenizer/chat
+template 独立重渲染，绝不复用 Qwen2.5 token IDs。这样模型家族可以不同，但两者看到的语义
+内容不能因 template 混用而不同。上述长度统计是固定输入 precheck，不是 pilot outcome。
 
 这项新实验不重写已完成 Phase 1。Phase 1 的 learner-specific matched-KL rollout 仍是合法的
 fixed-K transfer test，其 `not_passed` 状态保持不变。
@@ -1028,7 +1101,7 @@ fixed-K transfer test，其 `not_passed` 状态保持不变。
 |---|---|---|
 | Local reward/KL Taylor model is adequate | ProRM identity cannot be extrapolated to a large update | One update; measured-KL budget `0.01` |
 | Theoretical and measured KL orientations are interchangeable only locally | Finite-step fixed-K matching could differ from the policy-to-reference regularized objective | Record explicit argument order; interpret Phase 1 matching as an operational secondary estimand |
-| Candidates are sampled from `pi_0` | Score identity and Fisher distribution are wrong | Same FP32 instance; exact tokens; no filtering |
+| Candidates are sampled from `pi_0` | Score identity and Fisher distribution are wrong | Same FP32 instance; exact tokens; no post-generation filtering |
 | Tangent coordinates match | Objective weights unusable policy directions | Fixed-A, zero-B, identical layout/scale/hash |
 | Edge law is natural `Q_0` | Pair moment no longer identifies `A_0r` without correction | Canonical `0-1` endpoints are independent base samples |
 | Repeated labels are conditionally iid BTL | `h` no longer identifies one target margin | Controlled Phase 1 oracle; human data only robustness |
@@ -1054,12 +1127,13 @@ Public terminology is ProRM/ProRM+. The repository and Python namespace remain `
 | `m_hat`, reported quadratic, envelope weights | `src/smart_reward/objective.py` |
 | matrix-free Fisher and PCG | `src/smart_reward/linear.py`, `pcg.py` |
 | fixed-A LoRA score/layout | `src/smart_reward/hf.py`, `scores.py` |
-| BT-MLE / ProRM+ fixed-step trainers | `src/smart_reward/training.py` |
+| BT-MLE / ProRM+ base trainers | `src/smart_reward/training.py` |
+| Phase-2 objective-specific convergence and positive controls | `src/smart_reward/phase2_training.py`, `phase2_controls.py` |
 | held-out policy geometry | `src/smart_reward/metrics.py` |
 | fixed-β/fixed-K estimands | `src/smart_reward/metrics.py`, `estimand_audit.py` |
 | natural directions and both measured-KL orientations | `src/smart_reward/rollout.py`, `policy_update.py` |
 | common-β calibration and finite-policy utility | `src/smart_reward/common_beta.py` |
-| real-model orchestration | `src/smart_reward/phase1.py`, `phase1_rollout.py` |
+| real-model orchestration | `src/smart_reward/phase1.py`, `phase1_rollout.py`, `phase2_rollout.py`, `phase2_hf.py` |
 
 The public CLI is `prorm`; the historical `smart-reward` executable remains a compatibility alias during
 migration.
@@ -1088,8 +1162,25 @@ These ingredients are not individually claimed as new. The proposed combination 
 2. reduce the global bilevel objective to a local Fisher-inverse ProRM target;
 3. identify its reward-error moment from natural pairs using randomized repeated labels;
 4. train the resulting ProRM+ objective with a matrix-free Fisher–GMM dual;
-5. test the mechanism under fixed tangent coordinates, leakage isolation and matched measured-KL policy
-   optimization.
+5. test the mechanism under fixed tangent coordinates, leakage isolation, held-out geometry, and a
+   globally shared fixed-`beta` policy update; keep matched measured-KL as a secondary transfer diagnostic.
+
+### 11.1 AuxDPO as an experimental precedent
+
+The paper *Why DPO is a Misspecified Estimator and How to Fix It* motivates a
+useful evidence pattern: pair a clean analytic misspecification construction
+with matched data/compute, capacity stress, many seeds, base/oracle controls,
+and separate ID/OOD evaluation. Phase 2 adopts that pattern and strengthens the
+primary campaign to the exact preregistered ordered list of 30 paired formal
+seeds `20260901` through `20260930`; stopping after observing outcomes is not
+permitted.
+
+The method itself is not imported. AuxDPO's auxiliary null-space
+parameterization and IPO/DPOP comparisons concern direct preference
+optimization. ProRM+ concerns reward-model estimation for downstream policy
+regret, so repeated-label BT-MLE remains the primary baseline. Capacity,
+sample-size, all-six-pair and OOD/human experiments test robustness or external
+validity; they cannot replace the fixed-global-beta controlled mechanism test.
 
 ## 12. Paper claim boundary
 
@@ -1101,9 +1192,16 @@ These ingredients are not individually claimed as new. The proposed combination 
 5. Fixed-`L` human data supports only truncated ProRM+ robustness.
 6. The closed-form example proves a population ProRM/BT-MLE ordering reversal, not the ProRM+ repeated-label
    theorem or an empirical effect.
-7. Preference NLL, accuracy and probability MAE are diagnostics. A positive mechanism claim requires both
-   held-out policy geometry and matched measured-KL rollout evidence.
+7. Preference NLL, accuracy and probability MAE are diagnostics. A Phase 2
+   positive mechanism claim requires the intersection of held-out
+   fixed-global-beta geometry, ProRM+ versus BT-MLE finite utility, ProRM+
+   versus zero-B improvement, and oracle-step versus zero-B positive control.
 8. The pinned HPC4 five-seed Phase 1 campaign has completed with preregistered status `not_passed`.
    Consequently, the repository makes no empirical claim that ProRM+ outperforms BT-MLE under this locked
    setting. This result does not alter the population identity above; see
    [phase1_results.md](phase1_results.md).
+9. Phase 2 is a one-reference, one-step LoRA-B policy test. It is not PPO,
+   multi-step RLHF, or evidence that the local expansion remains accurate for
+   arbitrary policy shifts.
+10. The pilot is target-free and non-confirmatory. Its convergence, beta,
+    length, and KL diagnostics cannot be interpreted as learner efficacy.

@@ -85,7 +85,7 @@ class PercentileConfidenceInterval:
     lower: float
     upper: float
     confidence_level: float = DEFAULT_CONFIDENCE_LEVEL
-    method: str = "paired_bootstrap_percentile"
+    method: str = "paired_seed_percentile_bootstrap"
 
     def __post_init__(self) -> None:
         lower = _finite_float(self.lower, "lower")
@@ -93,7 +93,7 @@ class PercentileConfidenceInterval:
         confidence = _confidence_level(self.confidence_level)
         if lower > upper:
             raise ValueError("confidence interval lower bound must not exceed upper bound")
-        if self.method != "paired_bootstrap_percentile":
+        if self.method != "paired_seed_percentile_bootstrap":
             raise ValueError("unsupported confidence interval method")
         object.__setattr__(self, "lower", lower)
         object.__setattr__(self, "upper", upper)
@@ -250,7 +250,7 @@ class PairedMetricsAggregate:
             "bootstrap": {
                 "resamples": self.bootstrap_resamples,
                 "seed": self.bootstrap_seed,
-                "method": "paired_bootstrap_percentile",
+                "method": "paired_seed_percentile_bootstrap",
             },
             "metrics": {item.metric: item.to_dict() for item in self.metrics},
         }

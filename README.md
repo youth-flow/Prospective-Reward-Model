@@ -56,7 +56,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Item | Status |
 |---|---|
 | Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
-| Automated test suite | `334 passed, 2 skipped` locally; synthetic runs validate the pipeline, not an effect claim |
+| Automated test suite | **671 passed locally** for the pilot commit candidate; all four Phase 2 scripts separately passed `bash -n` on HPC4, while real CUDA execution remains the index-0 canary gate |
 | Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
@@ -68,7 +68,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Five-seed accepted main experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
 | Formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
-| Post-Phase-1 repair | Fixed-`beta`/fixed-`K` and optimization audits, common-`beta` primitives, policy-to-reference KL, oracle-direction and `R=4` label primitives implemented; new HPC4 campaign not yet run |
+| Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed aggregation implemented; target-free pilot and formal campaign not yet run |
 
 The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
 manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
@@ -109,9 +109,11 @@ or silently truncated.
 
 The original `128`-token horizon was also active for roughly `74%–80%` of
 accepted candidates. Those are valid samples from the declared capped action
-space, but they limit external validity. The new design uses a frozen
-`256`-token horizon and reports EOS, length-limit rate and token-length
-distributions separately for every policy arm.
+space, but they limit external validity. `256` tokens is currently only a
+candidate horizon, not a frozen formal choice. A pilot excluded from the
+formal campaign will select a horizon using only maximum-length/EOS
+diagnostics; every policy arm will then report its length-limit rate and
+token-length distribution under the frozen choice.
 
 ## 1. From future policy utility to a reward-model loss
 
@@ -316,7 +318,7 @@ MultiPref prompts
 |---|---|
 | Prompts | MultiPref pinned revision; local `data/train-*.parquet`; `1536/256/256` prompt-level split |
 | Reference policy | Pinned Qwen2.5-0.5B-Instruct, FP32 |
-| Candidates | Four independent base-distribution samples per prompt; no filtering or deduplication |
+| Candidates | Four independent base-distribution samples per prompt from the frozen length-eligible prompt pool; no post-generation filtering or deduplication |
 | Policy tangent | Last four `q_proj/v_proj` modules, rank-4 fixed-A LoRA-B |
 | Oracle | Pinned Skywork-Reward-V2-Qwen3-0.6B, FP32 |
 | Repeated labels | Canonical candidate `0-1`; geometric continuation `gamma=0.9`, hence `E[N]=10` |
@@ -370,51 +372,158 @@ The completed campaign has preregistered status `not_passed`; no positive mechan
 
 ### Next experiment: common-beta deployment
 
-The next experiment has a new design identity. For each seed, define the
-train-only damped oracle natural direction
+The complete post-audit decision record is
+[docs/phase2_design_decisions.md](docs/phase2_design_decisions.md). In
+particular, the current Phase 2 configuration is a pilot-capable engineering
+candidate, not an accepted confirmatory identity.
+
+Phase 2 also freezes a single operational-oracle coordinate system across
+seeds: `b_0=-4.500244140625` and `tau_0=2.7715682983398438`. They are the
+componentwise medians of the train-only robust transforms from the five
+Phase-1 seeds, all of which are excluded from Phase 2. The config binds those
+five artifact-metadata hashes, and materialization reuses the resulting
+`RobustOracleTransform` without fitting the current pilot/formal seed. Thus
+both `r*` and `beta_0` are global quantities in the confirmatory estimand.
+
+The fixed-A LoRA tangent basis is global too. Phase 2 always uses initialization
+seed `946081152281754541` from excluded Phase-1 seed `20260722` and verifies
+the expected A fingerprint
+`a2b5804109396f76b96cde98d1e2060f175a47724b1ca9fef317c7a10cb9a838`
+during both materialization and policy reload. Formal seeds therefore vary
+data and stochastic streams without silently changing the policy class.
+
+The excluded pilot computes, for each pilot seed, the train-only damped oracle
+natural direction
 
 $$
-u_*^{\mathrm{tr}}
+u_{*,s}^{\mathrm{tr}}
 =(F_{\mathrm{tr}}+\lambda I)^{-1}g_*^{\mathrm{tr}},
 $$
 
-and freeze
+and the calibration candidate
 
 $$
-\boxed{
-\beta_{\mathrm{common}}
+\widetilde\beta_s
 =
 \sqrt{
-\frac{(u_*^{\mathrm{tr}})^\top F_{\mathrm{tr}}u_*^{\mathrm{tr}}}
+\frac{(u_{*,s}^{\mathrm{tr}})^\top F_{\mathrm{tr}}u_{*,s}^{\mathrm{tr}}}
 {2K_{\mathrm{cal}}}
-}},
+},
 \qquad K_{\mathrm{cal}}=0.003.
 $$
 
-This produces one seed-specific scalar shared by every policy arm; it is not a
-learner-specific beta. The primary chain is:
+The calibration pilot publishes these train-only candidates plus convergence,
+rank, response-length/EOS, and on-policy KL diagnostics. A strict aggregate
+over permanently excluded seeds `20260801`, `20260802`, and `20260803`
+selects their maximum. A second, separately hashed freeze-pilot
+identity binds that aggregate SHA-256 and deploys the same beta to every
+seed/arm. Neither stage invokes the
+held-out evaluator, opens a final oracle-scoring session, or computes/serializes
+reward, utility, regret, head vectors, prompt/response text, token IDs, or
+learner ordering.
 
-1. use only train operational-oracle rewards and train Fisher to calibrate one
-   `beta_common` by the formula above;
-2. freeze that value before reading validation/test oracle metrics;
-3. deploy `u_BT/beta_common` and `u_ProRM+/beta_common` directly, with no learner-specific line search
-   or norm normalization, and deploy `u_oracle/beta_common` as a positive control;
-4. estimate `KL(pi_updated || pi_0)` on trajectories sampled from each updated policy and evaluate
-   `J*=E[r*]-beta_common*KL(pi_updated || pi_0)`; retain fixed-history
+The calibration base and the freeze grid are:
+
+$$
+\beta_{\mathrm{base}}
+=
+\max_{s\in\mathcal S_{\mathrm{pilot}}}\widetilde\beta_s,
+\qquad
+\beta^{(k)}=2^k\beta_{\mathrm{base}},\quad k=0,1,\ldots.
+$$
+
+If pilot-only worst-arm KL safety requires a larger value, the only allowed
+adjustment is a new freeze identity at the next member of
+`{beta_base, 2 beta_base, 4 beta_base, ...}`. The first freeze binds the calibration
+aggregate; every later freeze binds the immediately preceding non-length
+safety failure and its exact `next_global_beta=2*previous_beta`. It cannot skip
+a grid point. The horizon-parent hash remains a separate binding to the
+calibration aggregate that accepted that horizon. Mean/p95/p99/prompt-max/sequence-max KL
+caps are `0.02/0.02/0.05/0.10/0.20`; the all-arm maximum-length-rate cap is
+`0.05`. Horizons follow `[256,512,1024]`: a length failure requires a new
+calibration identity at the next horizon, bound to the failed aggregate hash,
+and then a complete freeze rerun. Only an accepted freeze aggregate may source
+the confirmatory identity. If
+
+$$
+k_*=\min\{k\ge 0:\text{the freeze at }\beta^{(k)}
+\text{ passes every frozen gate}\},
+\qquad
+\boxed{\beta_0=2^{k_*}\beta_{\mathrm{base}}},
+$$
+
+then `beta_0` is the single confirmatory scalar. If no permitted grid point
+passes, the campaign stops and no confirmatory `beta_0` is defined.
+Confirmatory sensitivity is restricted to the frozen multiples
+`beta in {0.5 beta_0, 2.0 beta_0}` for every sensitivity seed and arm.
+Seed-specific `K_cal` calibration remains a pilot-only train diagnostic and
+cannot choose any confirmatory step size.
+
+The confirmatory chain is:
+
+1. train BT-MLE and ProRM+ from the same zero head until each passes its own
+   frozen full-gradient gate; retain step 720 only as a compute-matched
+   secondary snapshot;
+2. deploy `u_BT/beta_0`, `u_ProRM+/beta_0`, and the oracle-step control directly,
+   with no learner- or seed-specific line search or norm normalization;
+3. measure `KL(pi_updated || pi_0)` on each updated policy's own histories and
+   evaluate `J*=E[r*]-beta_0*KL(pi_updated || pi_0)`; retain fixed-history
    `KL(pi_0 || pi_updated)` only as a secondary diagnostic;
-5. apply a prespecified measured policy-to-reference KL safety cap of `0.02`; a violation fails closed
-   and never retunes beta;
-6. treat fixed-`beta` regret and common-`beta` target utility as primary, while fixed-`K` constrained regret,
-   Fisher cosine and matched-KL rollout remain secondary diagnostics.
+4. fail closed on frozen mean/tail KL, optimization, rank, identity, numerical,
+   horizon, or positive-control gates;
+5. require the intersection of held-out fixed-`beta_0` regret, ProRM+ versus
+   BT-MLE utility, ProRM+ versus zero-B utility, and oracle-step versus zero-B
+   utility—not preference accuracy alone.
 
-`K_cal=0.001` and `0.01` are scale-sensitivity arms, not alternative primary endpoints. Candidate KL is
-kept per sequence, candidates are averaged within prompt, and uncertainty is computed over prompt
-clusters and seeds. The existing five seeds are used only for a clearly labeled post-Phase-1 estimand
-audit. A confirmatory claim requires a frozen fresh ten-seed run after the oracle/exact-margin positive
-controls pass. Its noisy-label primary arm averages four independent `gamma=0.9` unbiased `h`
-replicates per pair; an all-six-pairs arm reuses the four already generated candidates as a prompt-level
-U-statistic. BT-MLE receives every underlying Bernoulli label in the corresponding arm. This design does
-not modify or supersede the locked Phase-1 `not_passed` result.
+Candidate values are averaged within prompt, and every seed contributes one
+paired scalar. The five Phase 1 seeds and all pilot/design-development seeds
+are permanently excluded. The confirmatory campaign is the exact ordered
+30-seed list `20260901` through `20260930`; outcome-dependent early stopping is
+forbidden. Its formal estimand is the RNG expectation of each paired contrast
+conditional on the frozen eligible prompt pool, models, oracle, and design—not
+an unrestricted human-prompt population. The four required positive contrasts
+form one intersection-union test: a two-sided 95% paired-seed percentile
+interval must have lower endpoint above zero for every component. This is an
+effective one-sided component level of `0.025`; no Bonferroni correction is
+needed for the single conjunctive claim, while separate endpoint claims are
+forbidden without multiplicity control. With 30 seeds, the prospective
+normal-approximation 80%-power threshold is about `0.53` paired standard
+deviations for one component; the weakest component determines conjunctive
+power. The noisy primary arm averages four independent
+`gamma=0.9` unbiased `h` replicates per edge, while BT-MLE receives all
+underlying Bernoulli labels. Because `E[N]=10`, this costs 40 labels per
+canonical edge in expectation and has an unbounded geometric tail; exact
+unbiasedness is statistically useful but annotation-expensive.
+
+Phase 2 also fails closed on prompt semantics. Qwen2.5 renders the complete
+original user prompt with its own tokenizer/chat template and
+`truncation=False`. A reproducible local audit of all 5,323 unique prompts in
+the pinned MultiPref snapshot found 88 over the frozen 1024-policy-token cap
+(`1.65%`), leaving 5,235 eligible prompts. The three pilot seeds would have
+selected 39, 34, and 36 over-limit prompts under the old
+shuffle-before-length-check order, so silent truncation and late failure are
+both removed: Phase 2 first constructs the `<=1024` eligible pool, then applies
+the seeded shuffle/split.
+
+Materialization records total/eligible/excluded/selected counts and prompt-ID
+list hashes, while each selected record binds the raw-text hash, policy token
+count, prefix hash, cap, and `truncated=false`. The declared Phase 2 prompt
+population is consequently the length-eligible MultiPref subset. Skywork Qwen3
+receives the same raw prompt plus assistant response and independently rerenders
+them with its pinned Qwen3 tokenizer/template; Qwen2.5 tokens are never reused
+by the oracle. These counts are an input precheck, not an experiment result.
+
+The experimental evidence architecture borrows from AuxDPO: an analytic
+misspecification example, matched data/compute, capacity and sample-size stress,
+exactly 30 preregistered paired formal seeds, controls, and separate OOD/human
+evaluation. It does not copy
+AuxDPO's null-space parameterization or promote IPO/DPOP to the primary
+reward-model baseline. The scientific object here is reward-model training for
+downstream regret, so repeated-label BT-MLE remains the primary comparator.
+Capacity, all-six-pair, frozen-global-beta sensitivity, and OOD studies are
+secondary to the locked common-`beta_0` mechanism test. Seed-specific beta is
+forbidden in the confirmatory estimand. None of these changes rewrites Phase 1:
+its authoritative status remains `not_passed`.
 
 ## 6. Local verification
 
@@ -422,6 +531,7 @@ not modify or supersede the locked Phase-1 `not_passed` result.
 python -m pip install -e ".[dev]"
 prorm config-check configs/smoke.yaml
 prorm config-check configs/main.yaml
+prorm phase2-config-check configs/common_beta_pilot.yaml
 prorm closed-form-check --output outputs/closed-form.json
 prorm synthetic-check --seed 0 --output outputs/synthetic.json
 # With downloaded Phase-1 artifacts:
@@ -441,8 +551,33 @@ BT-MLE. Real Hugging Face execution additionally needs:
 python -m pip install -e ".[llm,dev]"
 ```
 
+`common_beta_pilot.yaml` is deliberately a three-seed,
+outcome-blind, non-confirmatory identity. Passing `phase2-config-check`
+establishes only that its source binding and design contract are valid; it is
+not evidence that the optimization/KL/horizon pilot has run or passed.
+
 `prorm` is the public CLI name. The historical `smart-reward` executable and `smart_reward` import package
 remain compatibility surfaces while artifacts and scripts migrate.
+
+The Phase 2 control-plane commands have the following positional contracts;
+`--help` lists the identity-bound parent and device flags:
+
+```text
+phase2-config-check OVERLAY
+phase2-run OVERLAY ARTIFACT MANIFEST OUTPUT --seed SEED
+phase2-pilot-aggregate OVERLAY OUTPUT RESULT...
+phase2-aggregate OVERLAY OUTPUT RESULT...
+phase2-sensitivity-run OVERLAY ARTIFACT MANIFEST PRIMARY_RESULT OUTPUT --seed SEED
+phase2-sensitivity-aggregate OVERLAY PRIMARY_AGGREGATE OUTPUT RESULT...
+phase2-mechanism-run OVERLAY ARTIFACT MANIFEST PRIMARY_RESULT OUTPUT --seed SEED
+phase2-mechanism-aggregate OVERLAY PRIMARY_AGGREGATE OUTPUT RESULT...
+phase2-failure-manifest OVERLAY SPEC OUTPUT
+phase2-campaign-finalize OVERLAY OUTPUT AGGREGATE_OUTPUT TERMINAL...
+```
+
+The Slurm wrappers remain the required HPC4 entry points. Direct CLI invocation
+is for tests, detached compute jobs, and forensic replay—not login-node model
+execution.
 
 ## 7. HKUST HPC4 entry
 
@@ -658,6 +793,56 @@ the validated **SIF SHA256**; it does not require the source commit to equal ima
 accepted smoke record. See [hpc4.md](docs/hpc4.md) for exact aggregation acceptance and scratch-retention
 commands.
 
+Phase 2 uses a dedicated outcome-blind entry point and the **base** config for
+HF inventory staging:
+
+```bash
+bash scripts/hpc4/submit_hf_stage.sh \
+  configs/common_beta_pilot_base.yaml amd 02:00:00
+
+export PRORM_PHASE2_ARRAY_CONCURRENCY=2
+bash scripts/hpc4/submit_phase2_pilot.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  gpu-l20 1-00:00:00
+```
+
+The executable Phase 2 pilot is hardware-locked to `gpu-l20` (NVIDIA L20).
+Its dedicated submit entry rejects every other GPU partition. The future
+confirmatory wrapper must preserve this guard before any formal seed runs;
+pilot aggregation remains a CPU-only `amd|intel` job.
+
+The three-seed pilot writes only convergence/rank, train-only beta candidate,
+response-length/EOS and on-policy KL evidence under
+`$PRORM_PROJECT_ROOT/runs/phase2-pilot/<design-sha>/`. It has not yet produced a
+formal result; exact acceptance paths and forbidden outcome fields are defined
+in [docs/hpc4.md](docs/hpc4.md).
+
+After all three declared seeds have immutable `SUCCESS` directories, aggregate
+them on a CPU node; never run Apptainer on the login node:
+
+```bash
+design_sha=REPLACE_WITH_COMMITTED_DESIGN_SHA256
+aggregate_dir="${PRORM_PROJECT_ROOT}/runs/phase2-pilot/${design_sha}/aggregate"
+mkdir -p "${aggregate_dir}"
+
+bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
+  configs/common_beta_pilot.yaml \
+  configs/common_beta_pilot_base.yaml \
+  "${aggregate_dir}/calibration.json" \
+  amd 01:00:00 \
+  REPLACE_WITH_20260801_SUCCESS_DIR \
+  REPLACE_WITH_20260802_SUCCESS_DIR \
+  REPLACE_WITH_20260803_SUCCESS_DIR
+```
+
+For freeze and retry identities, both the GPU pilot submission and CPU
+aggregate submission bind the same required parent evidence. The first freeze
+uses the accepted calibration aggregate as both `--beta-source-aggregate` and
+`--horizon-parent-aggregate`. A beta-grid retry uses the immediately preceding
+failed freeze as its beta source while retaining the accepted calibration as
+its horizon parent. Exact commands are in [docs/hpc4.md](docs/hpc4.md).
+
 ## 8. Documentation and code map
 
 | Goal | Entry point |
@@ -666,12 +851,13 @@ commands.
 | Three-edge closed-form population ordering reversal | [docs/closed_form_example.md](docs/closed_form_example.md) |
 | Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
 | Formal five-seed results and scientific conclusion | [docs/phase1_results.md](docs/phase1_results.md) |
+| Phase 2 pilot boundary, global-beta decision and formal gates | [docs/phase2_design_decisions.md](docs/phase2_design_decisions.md) |
 | HPC4 environment closure and Slurm execution | [docs/hpc4.md](docs/hpc4.md) |
-| Formal design identity | [configs/main.yaml](configs/main.yaml), [configs/identities.json](configs/identities.json) |
+| Config identities | [configs/main.yaml](configs/main.yaml), [configs/common_beta_pilot.yaml](configs/common_beta_pilot.yaml), [configs/identities.json](configs/identities.json) |
 
 ```text
 Smart-Reward-Model/             # retained repository name
-├── configs/                    # closed-schema smoke/main designs
+├── configs/                    # Phase 1 identities and Phase 2 base/overlay designs
 ├── containers/                 # digest-locked HPC4 definition and exact runtime lock
 ├── docs/                       # theory, examples, protocol, HPC4 runbook
 ├── scripts/hpc4/               # preflight, driver probe, staging, GPU smoke, arrays
@@ -681,6 +867,13 @@ Smart-Reward-Model/             # retained repository name
 │   ├── training.py             # paired BT-MLE / ProRM+ trainers
 │   ├── phase1.py               # immutable real-model materialization
 │   ├── rollout.py              # natural directions and measured-KL updates
+│   ├── phase2_training.py      # objective-specific convergence and controls
+│   ├── phase2_rollout.py       # global-beta one-step deployment
+│   ├── phase2_aggregate.py     # formal paired-seed gates
+│   ├── phase2_pilot_aggregate.py # target-free calibration/freeze decisions
+│   ├── phase2_campaign.py      # exact-30 terminal-slot finalization
+│   ├── phase2_sensitivity.py   # frozen ridge/beta sensitivity grid
+│   ├── phase2_mechanism.py     # exact-target and low-dimensional qualifiers
 │   ├── statistics.py           # paired-seed aggregation
 │   └── cli.py                  # fail-closed control plane
 └── tests/
@@ -688,12 +881,29 @@ Smart-Reward-Model/             # retained repository name
 
 ## 9. Claim boundary and execution order
 
-1. Freeze and validate the image, environment lock and offline cache.
-2. Pass GPU environment smoke and the controlled model smoke.
-3. Run the five paired Phase 1 seeds without changing design identity.
-4. Aggregate only complete identity-matched runs.
-5. Scale reward-model capacity only after the controlled mechanism result is known.
-6. Treat CoVal as human-label robustness, not as a test of the exact Phase 1 theorem.
+1. Preserve the completed Phase 1 aggregate and its `not_passed` conclusion.
+2. Freeze and verify the Phase 2 implementation, image, base inventory, and
+   dual base/overlay identities.
+3. Run the three-seed target-free calibration pilot and strict aggregate.
+   If the length gate fails, rerun calibration under a new identity at the next
+   horizon in `[256, 512, 1024]`, binding the failed parent aggregate SHA-256.
+4. Run a second target-free freeze pilot with one global beta for every
+   seed/arm. Start at the maximum calibration candidate; failures may only
+   issue a new identity at the next `beta*=2` grid point, byte-bound to the
+   immediately preceding failed freeze aggregate.
+5. Bind the accepted freeze aggregate SHA-256, global `beta_0`, and all
+   numerical/KL/horizon gates into a new confirmatory identity.
+6. Before any formal allocation, complete and audit the confirmatory GPU/CPU
+   Slurm wrappers, including the success-after-infrastructure-retry attempt
+   ledger. The current executable wrapper is pilot-only.
+7. Run exactly paired seeds `20260901`–`20260930`. Every seed must occupy one
+   terminal slot: a valid result or an immutable failure manifest. A failed
+   seed is never deleted or replaced; any such failure terminates the campaign
+   without a primary CI. A complete valid campaign may still return the
+   scientifically meaningful status `not_passed`.
+8. Only afterward run the frozen ridge/beta sensitivity grid, mechanism
+   qualifiers, capacity/sample-size, all-six-pair, and OOD/human-label
+   robustness experiments as secondary evidence.
 
 With fixed finite labels, CoVal identifies only a truncated logit series. It must be reported as
 **candidate-restricted truncated ProRM+ robustness** and cannot inherit the exact unbiasedness or human-

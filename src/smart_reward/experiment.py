@@ -209,6 +209,18 @@ class TrainingTensorData:
     def reward_dimension(self) -> int:
         return self.reward_features.shape[2]
 
+    def to(self, device: torch.device | str) -> TrainingTensorData:
+        """Return the frozen training tensors on one explicit compute device."""
+
+        return TrainingTensorData(
+            prompt_ids=self.prompt_ids,
+            policy_scores=self.policy_scores.to(device=device),
+            reward_features=self.reward_features.to(device=device),
+            h=self.h.to(device=device),
+            left_wins=self.left_wins.to(device=device),
+            num_annotations=self.num_annotations.to(device=device),
+        )
+
     def to_training_batch(self) -> FeatureTrainingBatch:
         """Materialize the canonical 0-vs-1 edge and all-node Fisher batch."""
 
