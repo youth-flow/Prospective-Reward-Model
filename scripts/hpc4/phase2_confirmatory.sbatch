@@ -1186,7 +1186,8 @@ finalize_run() {
     hf-inventory-verification.json gpu-check.log env-report.log \
     run-manifest.json materialize.log memory-materialize.json \
     artifact-materialization.json artifact-verification.json \
-    phase2-run.log memory-phase2.json phase2-result.json \
+    phase2-run.log memory-phase2.json phase2-failure-evidence.json \
+    phase2-result.json \
     phase2-result.rollouts.jsonl phase2-output-verification.json \
     attempt-evidence.log phase2-attempt-ledger.json phase2-success-spec.json \
     phase2-success-manifest.log phase2-success-validation-receipt.json; do
@@ -1550,6 +1551,7 @@ printf '%s  %s\n' \
 assert_execution_checkout
 "${container[@]}" env \
   "PRORM_MEMORY_REPORT=${job_dir}/memory-phase2.json" \
+  "PRORM_FAILURE_EVIDENCE=${job_dir}/phase2-failure-evidence.json" \
   python -m smart_reward.cli phase2-run \
   "${execution_overlay}" "${artifact_dir}" "${manifest}" "${phase2_result}" \
   --seed "${seed}" --device cuda \

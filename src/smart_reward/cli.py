@@ -9,7 +9,7 @@ import math
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from numbers import Real
 from pathlib import Path
@@ -53,6 +53,42 @@ def _resolve_run_seed(config: dict[str, object], requested_seed: int | None) -> 
 
 def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True))
+
+
+def _write_failure_evidence(
+    error: BaseException,
+    *,
+    command: object,
+    destination: str | None,
+) -> bool:
+    """Publish structured exception evidence when a formal job requests it.
+
+    Only exceptions exposing a strict-JSON mapping named ``evidence`` are
+    eligible.  This keeps ordinary CLI errors terse while preserving the full
+    train-only convergence trace carried by ``OptimizationConvergenceError``.
+    """
+
+    if destination in (None, ""):
+        return False
+    evidence = getattr(error, "evidence", None)
+    if not isinstance(evidence, Mapping):
+        return False
+    command_name = command if isinstance(command, str) and command else "unknown"
+    payload = {
+        "schema_version": "prorm-structured-failure-evidence/v1",
+        "status": "failed",
+        "command": command_name,
+        "exception": {
+            "module": type(error).__module__,
+            "type": type(error).__qualname__,
+            "message": str(error),
+        },
+        "evidence": dict(evidence),
+    }
+    # Validate JSON safety before creating a destination file.
+    json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True)
+    atomic_write_json(destination, payload, overwrite=False)
+    return True
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -2175,6 +2211,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         ValueError,
     ) as error:
         status = "error"
+        try:
+            _write_failure_evidence(
+                error,
+                command=getattr(arguments, "command", None),
+                destination=os.environ.get("PRORM_FAILURE_EVIDENCE"),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as evidence_error:
+            print(
+                f"error: failed to write structured failure evidence: {evidence_error}",
+                file=sys.stderr,
+            )
         print(f"error: {error}", file=sys.stderr)
         exit_code = 2
     if memory_destination and torch is not None:

@@ -206,12 +206,14 @@ def test_phase2_job_persists_evidence_and_atomic_terminal_marker() -> None:
         "artifact-verification.json",
         "phase2-run.log",
         "memory-phase2.json",
+        "phase2-failure-evidence.json",
         "phase2-pilot-diagnostics.json",
         "phase2-pilot-diagnostics.diagnostics.jsonl",
         "phase2-output-verification.json",
     ):
         assert filename in job
     assert "atomic_sync_file()" in job
+    assert '"PRORM_FAILURE_EVIDENCE=${job_dir}/phase2-failure-evidence.json"' in job
     assert "atomic_write_marker()" in job
     assert "schema_version=prorm-phase2-run-status/v1" in job
     assert 'if (( final_exit == 0 )); then marker="SUCCESS"; else marker="FAILED"; fi' in job

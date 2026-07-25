@@ -398,6 +398,8 @@ def test_job_materializes_fresh_artifact_and_runs_registered_phase2() -> None:
     assert '--horizon-parent-aggregate "${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE}"' in job
     assert 'phase2_result="${job_dir}/phase2-result.json"' in job
     assert 'phase2_rollouts="${job_dir}/phase2-result.rollouts.jsonl"' in job
+    assert '"PRORM_FAILURE_EVIDENCE=${job_dir}/phase2-failure-evidence.json"' in job
+    assert "phase2-failure-evidence.json" in job
     assert "common-beta-finite-policy/v2" in job
     assert "common-beta-frozen-global/v1" in job
     assert "phase2-pre-oracle-safety-gate/v1" in job

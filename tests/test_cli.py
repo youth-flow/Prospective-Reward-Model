@@ -181,6 +181,61 @@ def test_cli_rejects_conflicting_canonical_and_legacy_memory_paths(
     assert "conflicting PRORM_MEMORY_REPORT" in capsys.readouterr().err
 
 
+def test_main_publishes_structured_failure_evidence_without_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "failure-evidence.json"
+
+    class EvidentiaryError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("objective did not converge")
+            self.evidence = {
+                "schema_version": "objective-first-order-convergence/v1",
+                "converged": False,
+                "checks": [{"step": 20, "gradient_ratio": 0.4}],
+            }
+
+    class Parser:
+        @staticmethod
+        def parse_args(_argv: object) -> argparse.Namespace:
+            def fail(_arguments: argparse.Namespace) -> int:
+                raise EvidentiaryError
+
+            return argparse.Namespace(command="phase2-run", handler=fail)
+
+    monkeypatch.setattr(cli_module, "build_parser", Parser)
+    monkeypatch.setenv("PRORM_FAILURE_EVIDENCE", str(destination))
+
+    assert cli_module.main([]) == 2
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    assert payload == {
+        "schema_version": "prorm-structured-failure-evidence/v1",
+        "status": "failed",
+        "command": "phase2-run",
+        "exception": {
+            "module": __name__,
+            "type": (
+                "test_main_publishes_structured_failure_evidence_without_overwrite."
+                "<locals>.EvidentiaryError"
+            ),
+            "message": "objective did not converge",
+        },
+        "evidence": {
+            "schema_version": "objective-first-order-convergence/v1",
+            "converged": False,
+            "checks": [{"step": 20, "gradient_ratio": 0.4}],
+        },
+    }
+    assert "objective did not converge" in capsys.readouterr().err
+
+    original = destination.read_bytes()
+    assert cli_module.main([]) == 2
+    assert destination.read_bytes() == original
+    assert "failed to write structured failure evidence" in capsys.readouterr().err
+
+
 def test_data_check_validates_training_edge_jsonl(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -450,7 +450,8 @@ finalize_run() {
     hf-inventory-verification.json gpu-check.log env-report.log \
     run-manifest.json materialize.log memory-materialize.json \
     artifact-materialization.json artifact-verification.json \
-    phase2-run.log memory-phase2.json phase2-pilot-diagnostics.json \
+    phase2-run.log memory-phase2.json phase2-failure-evidence.json \
+    phase2-pilot-diagnostics.json \
     phase2-pilot-diagnostics.diagnostics.jsonl phase2-output-verification.json; do
     atomic_sync_file "${job_dir}/${filename}" "${filename}" || sync_exit=1
   done
@@ -719,6 +720,7 @@ fi
 assert_execution_checkout
 "${container[@]}" env \
   "PRORM_MEMORY_REPORT=${job_dir}/memory-phase2.json" \
+  "PRORM_FAILURE_EVIDENCE=${job_dir}/phase2-failure-evidence.json" \
   python -m smart_reward.cli phase2-run \
   "${execution_overlay}" "${artifact_dir}" "${manifest}" "${phase2_result}" \
   --seed "${seed}" --device cuda "${phase2_aggregate_flags[@]}" \
