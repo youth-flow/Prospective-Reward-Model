@@ -24,14 +24,19 @@ from smart_reward.phase2_config import (
     PHASE2_PILOT_BASE_CONFIG,
     PHASE2_PILOT_CONFIG,
     PHASE2_PILOT_SEEDS,
+    PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION,
     PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
     PHASE2_RECOVERY_PILOT_CONFIG,
     PHASE2_RECOVERY_SCHEMA_VERSION,
+    PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA,
+    PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA,
+    PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA,
     PHASE2_SCHEMA_VERSION,
     load_phase2_config,
     load_phase2_config_bundle,
     phase2_design_identity,
     validate_phase2_config,
+    validate_post_recovery_authorization_reference,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,6 +166,38 @@ def _recovery_pilot(pilot: dict[str, Any]) -> dict[str, Any]:
         "downstream_utility_allowed": False,
         "one_shot_no_further_adaptation": True,
         "failure_action": "hard_fail_no_second_recovery",
+    }
+    return overlay
+
+
+def _post_recovery_calibration_pilot(pilot: dict[str, Any]) -> dict[str, Any]:
+    overlay = _recovery_pilot(pilot)
+    overlay["schema_version"] = PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION
+    overlay["design"]["name"] = "common-beta-post-recovery-calibration-v1"
+    del overlay["recovery_control"]
+    protocol = overlay["reward_model"]["optimizer_protocol"]
+    protocol["schema_version"] = "deterministic-adamw-lr-decay/v1"
+    del protocol["one_time_recovery"]
+    protocol["role"] = "frozen_post_recovery_phase2_optimizer"
+    protocol["source_recovery_authorization_sha256"] = "a" * 64
+    overlay["recovery_success_reference"] = {
+        "schema_version": PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA,
+        "artifact_sha256": "a" * 64,
+        "authorization_projection": {
+            "schema_version": PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA,
+            "source_schema_version": PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA,
+            "recovery_design_sha256": EXPECTED_RECOVERY_IDENTITY,
+            "optimizer_schedule_sha256": PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+            "source_array_job_id": "1648125",
+            "execution_revision": 2,
+            "ordered_seeds": [20260801, 20260802, 20260803],
+            "recovery_status": "all_three_seeds_success",
+            "full_calibration_authorized": True,
+            "authorized_information": "optimizer_schedule_only",
+            "recovery_outputs_reusable": False,
+            "validation_or_heldout_access_authorized": False,
+            "policy_or_final_utility_access_authorized": False,
+        },
     }
     return overlay
 
@@ -351,6 +388,309 @@ def test_recovery_bundle_compiles_the_tracked_exact_schedule() -> None:
         {"first_update": 8761, "last_update": 10760, "learning_rate": 3.0e-5},
         {"first_update": 10761, "last_update": 12760, "learning_rate": 1.0e-5},
     ]
+
+
+def test_post_recovery_calibration_schema_admits_only_the_frozen_schedule_reference(
+    pilot_config: dict[str, Any],
+) -> None:
+    post_recovery = _post_recovery_calibration_pilot(pilot_config)
+    validated = validate_phase2_config(
+        post_recovery,
+        base_config=load_config(BASE_PATH),
+    )
+
+    assert validated["schema_version"] == PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION
+    assert validated["design"]["name"] == "common-beta-post-recovery-calibration-v1"
+    assert "recovery_control" not in validated
+    assert (
+        validated["reward_model"]["optimizer_protocol"]["learning_rate_schedule"]["schedule_sha256"]
+        == PHASE2_RECOVERY_LR_SCHEDULE_SHA256
+    )
+    assert validated["reward_model"]["adaptive_convergence"]["maximum_steps"] == 12760
+    protocol = validated["reward_model"]["optimizer_protocol"]
+    assert protocol["schema_version"] == "deterministic-adamw-lr-decay/v1"
+    assert protocol["role"] == "frozen_post_recovery_phase2_optimizer"
+    assert protocol["source_recovery_authorization_sha256"] == "a" * 64
+    assert "one_time_recovery" not in protocol
+    reference = validated["recovery_success_reference"]
+    assert reference["schema_version"] == PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA
+    assert reference["artifact_sha256"] == "a" * 64
+    authorization = reference["authorization_projection"]
+    assert authorization["schema_version"] == PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA
+    assert authorization["source_schema_version"] == PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA
+    assert authorization["authorized_information"] == "optimizer_schedule_only"
+    assert authorization["recovery_outputs_reusable"] is False
+    assert authorization["validation_or_heldout_access_authorized"] is False
+    assert authorization["policy_or_final_utility_access_authorized"] is False
+    assert not any("head" in key.lower() or "path" in key.lower() for key in authorization)
+    assert phase2_design_identity(validated) not in {
+        EXPECTED_PILOT_IDENTITY,
+        EXPECTED_RECOVERY_IDENTITY,
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        (
+            "recovery_success_reference.artifact_sha256",
+            "A" * 64,
+            "must be a lowercase SHA256 digest",
+        ),
+        (
+            "recovery_success_reference.authorization_projection.recovery_design_sha256",
+            "0" * 64,
+            "must equal",
+        ),
+        (
+            "recovery_success_reference.authorization_projection.optimizer_schedule_sha256",
+            "0" * 64,
+            "must equal",
+        ),
+        (
+            "recovery_success_reference.authorization_projection.source_array_job_id",
+            "1648094",
+            "must equal '1648125'",
+        ),
+        (
+            "recovery_success_reference.authorization_projection.execution_revision",
+            1,
+            "must equal 2",
+        ),
+        (
+            "recovery_success_reference.authorization_projection.ordered_seeds",
+            [20260803, 20260802, 20260801],
+            "must equal",
+        ),
+        (
+            "recovery_success_reference.authorization_projection.recovery_status",
+            "two_of_three_success",
+            "must equal 'all_three_seeds_success'",
+        ),
+        (
+            ("recovery_success_reference.authorization_projection.full_calibration_authorized"),
+            False,
+            "must be true",
+        ),
+        (
+            "recovery_success_reference.authorization_projection.authorized_information",
+            "optimizer_schedule_and_reward_parameters",
+            "must equal 'optimizer_schedule_only'",
+        ),
+        (
+            ("recovery_success_reference.authorization_projection.recovery_outputs_reusable"),
+            True,
+            "must be false",
+        ),
+        (
+            (
+                "recovery_success_reference.authorization_projection."
+                "validation_or_heldout_access_authorized"
+            ),
+            True,
+            "must be false",
+        ),
+        (
+            (
+                "recovery_success_reference.authorization_projection."
+                "policy_or_final_utility_access_authorized"
+            ),
+            True,
+            "must be false",
+        ),
+        (
+            "reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256",
+            "0" * 64,
+            "does not bind",
+        ),
+        (
+            "reward_model.adaptive_convergence.maximum_steps",
+            5760,
+            "must equal 12760",
+        ),
+    ],
+)
+def test_post_recovery_authorization_and_schedule_tampering_fail_closed(
+    pilot_config: dict[str, Any],
+    path: str,
+    value: object,
+    match: str,
+) -> None:
+    post_recovery = _post_recovery_calibration_pilot(pilot_config)
+    _set_path(post_recovery, path, value)
+
+    with pytest.raises(ConfigError, match=match):
+        validate_phase2_config(post_recovery)
+
+
+@pytest.mark.parametrize("forbidden_key", ["head_paths", "head_weights_sha256"])
+def test_post_recovery_authorization_rejects_reward_head_fields(
+    pilot_config: dict[str, Any],
+    forbidden_key: str,
+) -> None:
+    post_recovery = _post_recovery_calibration_pilot(pilot_config)
+    post_recovery["recovery_success_reference"]["authorization_projection"][forbidden_key] = (
+        "forbidden"
+    )
+
+    with pytest.raises(ConfigError, match="unknown keys"):
+        validate_phase2_config(post_recovery)
+
+
+def test_post_recovery_schema_requires_authorization_and_rejects_recovery_control(
+    pilot_config: dict[str, Any],
+) -> None:
+    missing_authorization = _post_recovery_calibration_pilot(pilot_config)
+    del missing_authorization["recovery_success_reference"]
+    with pytest.raises(ConfigError, match="missing keys"):
+        validate_phase2_config(missing_authorization)
+
+    mixed_control_planes = _post_recovery_calibration_pilot(pilot_config)
+    mixed_control_planes["recovery_control"] = _recovery_pilot(pilot_config)["recovery_control"]
+    with pytest.raises(ConfigError, match="unknown keys"):
+        validate_phase2_config(mixed_control_planes)
+
+
+def test_decay_protocol_modes_cannot_cross_recovery_and_adopted_schemas(
+    pilot_config: dict[str, Any],
+) -> None:
+    post_recovery_with_recovery_protocol = _post_recovery_calibration_pilot(pilot_config)
+    post_recovery_with_recovery_protocol["reward_model"]["optimizer_protocol"] = copy.deepcopy(
+        _recovery_pilot(pilot_config)["reward_model"]["optimizer_protocol"]
+    )
+    with pytest.raises(ConfigError, match="missing keys|unknown keys"):
+        validate_phase2_config(post_recovery_with_recovery_protocol)
+
+    recovery_with_adopted_protocol = _recovery_pilot(pilot_config)
+    recovery_with_adopted_protocol["reward_model"]["optimizer_protocol"] = copy.deepcopy(
+        _post_recovery_calibration_pilot(pilot_config)["reward_model"]["optimizer_protocol"]
+    )
+    with pytest.raises(ConfigError, match="missing keys|unknown keys"):
+        validate_phase2_config(recovery_with_adopted_protocol)
+
+
+def test_post_recovery_lineage_keeps_decay_for_freeze_retry_and_confirmatory(
+    pilot_config: dict[str, Any],
+) -> None:
+    calibration = _post_recovery_calibration_pilot(pilot_config)
+    calibration_validated = validate_phase2_config(calibration)
+
+    freeze = _pilot_freeze(calibration, beta=2.5)
+    freeze["design"]["name"] = "common-beta-post-recovery-freeze-v1"
+    freeze_validated = validate_phase2_config(freeze)
+
+    retry = _pilot_freeze(calibration, beta=5.0, calibration_aggregate_sha256="c" * 64)
+    retry["design"]["name"] = "common-beta-post-recovery-freeze-beta-grid-retry-v1"
+    retry_validated = validate_phase2_config(retry)
+
+    confirmatory, base = _future_confirmatory(calibration)
+    confirmatory["design"]["name"] = "common-beta-post-recovery-confirmatory-v1"
+    confirmatory_validated = validate_phase2_config(confirmatory, base_config=base)
+
+    for validated in (
+        calibration_validated,
+        freeze_validated,
+        retry_validated,
+        confirmatory_validated,
+    ):
+        protocol = validated["reward_model"]["optimizer_protocol"]
+        reference = validated["recovery_success_reference"]
+        assert protocol["schema_version"] == "deterministic-adamw-lr-decay/v1"
+        assert protocol["learning_rate_schedule"]["schedule_sha256"] == (
+            PHASE2_RECOVERY_LR_SCHEDULE_SHA256
+        )
+        assert protocol["source_recovery_authorization_sha256"] == (reference["artifact_sha256"])
+        assert validated["reward_model"]["adaptive_convergence"]["maximum_steps"] == 12760
+        assert "one_time_recovery" not in protocol
+
+    assert freeze_validated["design"]["pilot_phase"] == "freeze"
+    assert retry_validated["objective"]["common_beta"]["frozen_global_beta"] == 5.0
+    assert confirmatory_validated["design"]["stage"] == "confirmatory"
+    assert confirmatory_validated["run"]["seeds"] == list(PHASE2_CONFIRMATORY_SEEDS)
+
+
+def test_legacy_v2_cannot_carry_post_recovery_lineage_fields(
+    pilot_config: dict[str, Any],
+) -> None:
+    post_recovery = _post_recovery_calibration_pilot(pilot_config)
+    legacy_disguise = copy.deepcopy(post_recovery)
+    legacy_disguise["schema_version"] = PHASE2_SCHEMA_VERSION
+
+    with pytest.raises(ConfigError, match="unknown keys"):
+        validate_phase2_config(legacy_disguise)
+
+    legacy_freeze = _pilot_freeze(pilot_config)
+    validated_legacy = validate_phase2_config(legacy_freeze)
+    assert validated_legacy["schema_version"] == PHASE2_SCHEMA_VERSION
+    assert "optimizer_protocol" not in validated_legacy["reward_model"]
+    assert "recovery_success_reference" not in validated_legacy
+    assert validated_legacy["reward_model"]["adaptive_convergence"]["maximum_steps"] == 5760
+
+
+def test_authorization_reference_validates_real_artifact_projection() -> None:
+    reference = _post_recovery_calibration_pilot(load_phase2_config(PILOT_PATH))[
+        "recovery_success_reference"
+    ]
+    payload = {
+        **{
+            key: copy.deepcopy(value)
+            for key, value in reference["authorization_projection"].items()
+            if key not in {"schema_version", "source_schema_version"}
+        },
+        "schema_version": reference["authorization_projection"]["source_schema_version"],
+        "source_config_hash": "b" * 64,
+        "provenance": {"aggregator_source_sha256": "c" * 64},
+    }
+
+    validated = validate_post_recovery_authorization_reference(
+        reference,
+        authorization_payload_sha256="a" * 64,
+        authorization_payload=payload,
+    )
+    assert validated == reference
+
+    with pytest.raises(ConfigError, match="payload bytes do not match"):
+        validate_post_recovery_authorization_reference(
+            reference,
+            authorization_payload_sha256="b" * 64,
+            authorization_payload=payload,
+        )
+
+    tampered_projection = copy.deepcopy(payload)
+    tampered_projection["source_array_job_id"] = "1648094"
+    with pytest.raises(ConfigError, match="must equal '1648125'"):
+        validate_post_recovery_authorization_reference(
+            reference,
+            authorization_payload_sha256="a" * 64,
+            authorization_payload=tampered_projection,
+        )
+
+    head_exposure = copy.deepcopy(payload)
+    head_exposure["reward_head_paths"] = ["forbidden"]
+    with pytest.raises(ConfigError, match="must not expose reward-head fields"):
+        validate_post_recovery_authorization_reference(
+            reference,
+            authorization_payload_sha256="a" * 64,
+            authorization_payload=head_exposure,
+        )
+
+
+def test_authorization_aggregate_cannot_masquerade_as_reference_envelope(
+    pilot_config: dict[str, Any],
+) -> None:
+    reference = _post_recovery_calibration_pilot(pilot_config)["recovery_success_reference"]
+    assert reference["schema_version"] != reference["authorization_projection"]["schema_version"]
+    assert reference["authorization_projection"]["source_schema_version"] == (
+        PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA
+    )
+
+    with pytest.raises(ConfigError, match="missing keys|unknown keys"):
+        validate_post_recovery_authorization_reference(reference["authorization_projection"])
+
+    confused = copy.deepcopy(reference)
+    confused["schema_version"] = PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA
+    with pytest.raises(ConfigError, match="must equal"):
+        validate_post_recovery_authorization_reference(confused)
 
 
 @pytest.mark.parametrize(

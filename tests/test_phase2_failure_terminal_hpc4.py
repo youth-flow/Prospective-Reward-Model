@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -14,6 +17,16 @@ VALIDATOR = ROOT / "scripts" / "hpc4" / "validate_phase2_terminal.py"
 COMPUTE_TERMINALIZER = ROOT / "scripts" / "hpc4" / "terminalize_phase2_compute_failure.sh"
 SCHEDULER_TERMINALIZER = ROOT / "scripts" / "hpc4" / "terminalize_phase2_scheduler_failure.sh"
 PUBLISHER = ROOT / "scripts" / "hpc4" / "publish_phase2_terminal_bundle.py"
+WAVE_TASKS = (
+    (0, 1, 2, 3),
+    (4, 5, 6, 7),
+    (8, 9, 10, 11),
+    (12, 13, 14, 15),
+    (16, 17, 18, 19),
+    (20, 21, 22, 23),
+    (24, 25, 26, 27),
+    (28, 29),
+)
 
 
 def _write_json(path: Path, value: object) -> bytes:
@@ -29,6 +42,214 @@ def _write_json(path: Path, value: object) -> bytes:
     ).encode()
     path.write_bytes(raw)
     return raw
+
+
+def _load_validator() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "_test_phase2_terminal_validator",
+        VALIDATOR,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_fixed_wave_plan(
+    registry: Path,
+    *,
+    design: str,
+    base: str,
+    commit: str,
+    freeze: str,
+    image: str,
+    inventory: str,
+) -> tuple[dict[str, object], str, str]:
+    job_tuple = {
+        "account": "sigroup",
+        "partition": "gpu-l20",
+        "qos": "l20_qos",
+        "nodes": 1,
+        "tasks": 1,
+        "cpus_per_task": 8,
+        "memory": "64G",
+        "gpus_per_node": 1,
+        "walltime": "08:00:00",
+        "no_requeue": True,
+        "held_before_registry_commit": True,
+        "script": "scripts/hpc4/phase2_confirmatory.sbatch",
+        "script_file_sha256": hashlib.sha256(
+            (ROOT / "scripts" / "hpc4" / "phase2_confirmatory.sbatch").read_bytes()
+        ).hexdigest(),
+    }
+    producer = {
+        "overlay_file_sha256": "2" * 64,
+        "base_file_sha256": "3" * 64,
+        "identities_file_sha256": "4" * 64,
+        "image_sha256": image,
+        "hf_inventory_sha256": inventory,
+    }
+    plan: dict[str, object] = {
+        "schema_version": "prorm-phase2-fixed-wave-campaign-plan/v1",
+        "status": "precommitted_before_first_slurm_submission",
+        "phase2_design_sha256": design,
+        "base_config_hash": base,
+        "git_commit": commit,
+        "accepted_freeze_aggregate_sha256": freeze,
+        "ordered_seeds": list(range(20260901, 20260931)),
+        "attempt_index": 1,
+        "retry_policy": "single_predeclared_attempt_no_retry",
+        "replacement_seed_allowed": False,
+        "optional_stopping_allowed": False,
+        "max_submitted_tasks": 4,
+        "max_running_tasks": 2,
+        "waves": [
+            {
+                "wave_index": index,
+                "array_spec": f"{tasks[0]}-{tasks[-1]}%2",
+                "array_task_ids": list(tasks),
+                "seeds": [20260901 + task for task in tasks],
+            }
+            for index, tasks in enumerate(WAVE_TASKS)
+        ],
+        "job_tuple": job_tuple,
+        "producer": producer,
+        "created_at_utc": "2026-07-25T00:00:00Z",
+    }
+    raw = _write_json(registry / "campaign-plan.json", plan)
+    plan_sha = hashlib.sha256(raw).hexdigest()
+    admissions = registry / "admissions"
+    admissions.mkdir(exist_ok=True)
+    snapshot: list[object] = []
+    admission_raw = _write_json(
+        admissions / "wave-0.json",
+        {
+            "schema_version": "prorm-phase2-wave-admission/v1",
+            "status": "committed_before_current_wave_scheduler_submission",
+            "campaign_plan_sha256": plan_sha,
+            "wave_index": 0,
+            "wave": plan["waves"][0],
+            "admission_rule": "predecessor_terminal_completeness_only_outcome_independent",
+            "predecessor_wave_index": None,
+            "predecessor_admission_sha256": None,
+            "predecessor_submission_sha256": None,
+            "predecessor_terminal_snapshot": snapshot,
+            "predecessor_terminal_snapshot_sha256": hashlib.sha256(b"[]\n").hexdigest(),
+            "created_at_utc": "2026-07-25T00:00:00Z",
+        },
+    )
+    return plan, plan_sha, hashlib.sha256(admission_raw).hexdigest()
+
+
+def _fixed_wave_submission(
+    plan: dict[str, object],
+    *,
+    plan_sha: str,
+    admission_sha: str,
+    wave_index: int,
+    array_job_id: str,
+) -> dict[str, object]:
+    tasks = WAVE_TASKS[wave_index]
+    command = str(ROOT / "scripts" / "hpc4" / "phase2_confirmatory.sbatch")
+    work_dir = str(ROOT)
+    array_spec = f"{tasks[0]}-{tasks[-1]}%2"
+    raw_scontrol = " ".join(
+        (
+            f"JobId={array_job_id}",
+            f"ArrayJobId={array_job_id}",
+            f"JobName=prorm-p2-{plan_sha[:12]}-w{wave_index}",
+            f"ArrayTaskId={array_spec}",
+            "ArrayTaskThrottle=2",
+            "JobState=PENDING",
+            "Reason=JobHeldUser",
+            "Account=sigroup",
+            "Partition=gpu-l20",
+            "QOS=l20_qos",
+            "Requeue=0",
+            "Restarts=0",
+            "NumNodes=1-1",
+            "NumTasks=1",
+            "NumCPUs=8",
+            "CPUs/Task=8",
+            "MinMemoryNode=64G",
+            f"TimeLimit={plan['job_tuple']['walltime']}",
+            "TRES=cpu=8,mem=64G,node=1,billing=8,gres/gpu=1",
+            "TresPerNode=gres:gpu:1",
+            f"Command={command}",
+            f"WorkDir={work_dir}",
+        )
+    )
+    scheduler_request = {
+        "schema_version": "prorm-phase2-held-scheduler-request/v1",
+        "captured_while_held": True,
+        "raw_scontrol_record": raw_scontrol,
+        "raw_scontrol_sha256": hashlib.sha256(raw_scontrol.encode()).hexdigest(),
+        "normalized": {
+            "array_job_id": array_job_id,
+            "job_name": f"prorm-p2-{plan_sha[:12]}-w{wave_index}",
+            "array_spec": array_spec,
+            "array_task_throttle": 2,
+            "account": "sigroup",
+            "partition": "gpu-l20",
+            "qos": "l20_qos",
+            "nodes": 1,
+            "tasks": 1,
+            "cpus": 8,
+            "cpus_per_task": 8,
+            "memory": "64G",
+            "gpus_per_node": 1,
+            "walltime": plan["job_tuple"]["walltime"],
+            "tres": {"cpu": "8", "gres/gpu": "1", "mem": "64G", "node": "1"},
+            "tres_per_node": "gres:gpu:1",
+            "requeue": False,
+            "restarts": 0,
+            "command": command,
+            "work_dir": work_dir,
+        },
+    }
+    scheduler_request_sha = hashlib.sha256(
+        (
+            json.dumps(
+                scheduler_request,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+    ).hexdigest()
+    return {
+        "schema_version": "prorm-phase2-campaign-submission/v3",
+        "status": "committed_while_slurm_held",
+        "campaign_plan_sha256": plan_sha,
+        "wave_admission_sha256": admission_sha,
+        "scheduler_request_sha256": scheduler_request_sha,
+        "scheduler_request": scheduler_request,
+        "wave_index": wave_index,
+        "phase2_design_sha256": plan["phase2_design_sha256"],
+        "base_config_hash": plan["base_config_hash"],
+        "git_commit": plan["git_commit"],
+        "accepted_freeze_aggregate_sha256": plan["accepted_freeze_aggregate_sha256"],
+        "array_job_id": array_job_id,
+        "submitted_cluster": "hpc4",
+        "array_spec": array_spec,
+        "attempt_index": 1,
+        "entries": [
+            {
+                "seed": 20260901 + task,
+                "attempt_index": 1,
+                "array_job_id": array_job_id,
+                "array_task_id": task,
+            }
+            for task in tasks
+        ],
+        "job_tuple": plan["job_tuple"],
+        "producer": plan["producer"],
+        "replacement_seed_allowed": False,
+        "created_at_utc": "2026-07-25T00:00:00Z",
+    }
 
 
 def _write_claim(
@@ -84,31 +305,22 @@ def _scheduler_terminal_tree(tmp_path: Path) -> tuple[Path, list[str]]:
     registry = job.parent.parent.parent / "campaign-registry"
     for name in ("submissions", "executions", "recoveries", "scheduler-terminals"):
         (registry / name).mkdir(parents=True, exist_ok=True)
-    submission = {
-        "schema_version": "prorm-phase2-campaign-submission/v1",
-        "status": "committed_while_slurm_held",
-        "phase2_design_sha256": design,
-        "base_config_hash": base,
-        "git_commit": commit,
-        "accepted_freeze_aggregate_sha256": freeze,
-        "array_job_id": "900",
-        "submitted_cluster": "hpc4",
-        "array_spec": "0",
-        "attempt_index": 1,
-        "entries": [
-            {
-                "seed": 20260901,
-                "attempt_index": 1,
-                "array_job_id": "900",
-                "array_task_id": 0,
-            }
-        ],
-        "job_tuple": {},
-        "producer": {},
-        "prior_recovery": None,
-        "replacement_seed_allowed": False,
-        "created_at_utc": "2026-07-25T00:00:00Z",
-    }
+    plan, plan_sha, admission_sha = _write_fixed_wave_plan(
+        registry,
+        design=design,
+        base=base,
+        commit=commit,
+        freeze=freeze,
+        image=image,
+        inventory=inventory,
+    )
+    submission = _fixed_wave_submission(
+        plan,
+        plan_sha=plan_sha,
+        admission_sha=admission_sha,
+        wave_index=0,
+        array_job_id="900",
+    )
     submission_raw = _write_json(
         registry / "submissions" / "array-900.json",
         submission,
@@ -269,6 +481,27 @@ def _scheduler_terminal_tree(tmp_path: Path) -> tuple[Path, list[str]]:
         image,
         inventory,
     ]
+
+
+def test_fixed_wave_validator_rejects_seed_task_misbinding(tmp_path: Path) -> None:
+    terminal, _ = _scheduler_terminal_tree(tmp_path)
+    validator = _load_validator()
+    claim = validator.parse_key_value(
+        terminal.parent.parent / "CLAIM",
+        name="attempt claim",
+    )
+    claim["seed"] = "20260902"
+    registry = terminal.parent.parent.parent.parent / "campaign-registry"
+
+    with pytest.raises(
+        SystemExit,
+        match="seed does not match its immutable global array task",
+    ):
+        validator._validate_fixed_wave_submission(
+            registry=registry,
+            submissions=registry / "submissions",
+            claim=claim,
+        )
 
 
 def test_scheduler_terminal_failure_validates_without_fabricated_gpu_evidence(
@@ -499,17 +732,21 @@ def test_scheduler_registry_heredoc_binds_exact_scheduler_tuple(
     )
 
     staging = tmp_path / "staging"
-    submissions = tmp_path / "submissions"
+    campaign_registry = tmp_path / "campaign-registry"
+    submissions = campaign_registry / "submissions"
     executions = tmp_path / "executions"
     for directory in (staging, submissions, executions):
-        directory.mkdir()
+        directory.mkdir(parents=True)
     design = "a" * 64
     base = "b" * 64
     runtime = "c" * 64
     commit = "d" * 40
     freeze = "e" * 64
     scheduler = tmp_path / "sacct.raw"
-    scheduler.write_text("hpc4|777|900_0|NODE_FAIL|1:0\n", encoding="utf-8")
+    scheduler.write_text(
+        "hpc4|777|900_0|CANCELLED by 4242|1:0\n",
+        encoding="utf-8",
+    )
     scheduler_sha = hashlib.sha256(scheduler.read_bytes()).hexdigest()
     classification = tmp_path / "classification.json"
     _write_json(
@@ -523,26 +760,24 @@ def test_scheduler_registry_heredoc_binds_exact_scheduler_tuple(
             "evidence_availability": {},
         },
     )
+    plan, plan_sha, admission_sha = _write_fixed_wave_plan(
+        campaign_registry,
+        design=design,
+        base=base,
+        commit=commit,
+        freeze=freeze,
+        image="1" * 64,
+        inventory="2" * 64,
+    )
     _write_json(
         submissions / "array-900.json",
-        {
-            "schema_version": "prorm-phase2-campaign-submission/v1",
-            "status": "committed_while_slurm_held",
-            "phase2_design_sha256": design,
-            "base_config_hash": base,
-            "git_commit": commit,
-            "accepted_freeze_aggregate_sha256": freeze,
-            "submitted_cluster": "hpc4",
-            "replacement_seed_allowed": False,
-            "entries": [
-                {
-                    "seed": 20260901,
-                    "attempt_index": 1,
-                    "array_job_id": "900",
-                    "array_task_id": 0,
-                }
-            ],
-        },
+        _fixed_wave_submission(
+            plan,
+            plan_sha=plan_sha,
+            admission_sha=admission_sha,
+            wave_index=0,
+            array_job_id="900",
+        ),
     )
     result = subprocess.run(
         [
@@ -564,6 +799,7 @@ def test_scheduler_registry_heredoc_binds_exact_scheduler_tuple(
             commit,
             "hpc4",
             freeze,
+            str(campaign_registry),
             str(submissions),
             str(executions),
         ],
@@ -585,7 +821,25 @@ def test_scheduler_registry_heredoc_binds_exact_scheduler_tuple(
         assert value["slurm_job_id"] == "777"
     assert record["phase2_runtime_contract_sha256"] == runtime
     assert record["scheduler_raw_evidence_sha256"] == scheduler_sha
+    assert record["scheduler_state"] == "CANCELLED"
     assert ledger["attempts"][-1]["slurm_job_id"] == "777"
+
+    bad_seed_staging = tmp_path / "bad-seed-staging"
+    bad_seed_staging.mkdir()
+    bad_seed_args = list(result.args)
+    bad_seed_args[5] = str(bad_seed_staging)
+    bad_seed_args[6] = "20260902"
+    bad_seed = subprocess.run(
+        bad_seed_args,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bad_seed.returncode != 0
+    assert (
+        "scheduler terminal seed does not match its immutable global array task" in bad_seed.stderr
+    )
 
     bad_submission = json.loads((submissions / "array-900.json").read_text(encoding="utf-8"))
     bad_submission["submitted_cluster"] = "forged-cluster"
@@ -602,7 +856,7 @@ def test_scheduler_registry_heredoc_binds_exact_scheduler_tuple(
         check=False,
     )
     assert rejected.returncode != 0
-    assert "held-array registry" in rejected.stderr
+    assert "fixed-wave registry" in rejected.stderr
 
 
 def test_terminal_bundle_publication_recovers_after_injected_mid_bundle_kill(

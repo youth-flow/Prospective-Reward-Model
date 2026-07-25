@@ -51,6 +51,7 @@ from .phase2_config import (
     PHASE2_CONFIRMATORY_EXCLUDED_SEEDS,
     PHASE2_CONFIRMATORY_SEEDS,
     PHASE2_PILOT_SEEDS,
+    PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION,
     PHASE2_RECOVERY_SCHEMA_VERSION,
     Phase2ConfigBundle,
     phase2_design_identity,
@@ -65,6 +66,10 @@ from .phase2_controls import (
     build_exact_margin_canonical_arm,
     sample_canonical_r4_noisy_arm,
     select_seeded_orthonormal_tangent,
+)
+from .repeated_label_diagnostics import (
+    build_repeated_label_tail_diagnostics,
+    validate_repeated_label_tail_diagnostics,
 )
 from .rollout import policy_direction_from_head
 from .training import (
@@ -226,10 +231,18 @@ class LearningRateStage:
 
 @dataclass(frozen=True, slots=True)
 class AdamWRecoveryProtocol:
-    """Hash-bound one-time deterministic AdamW learning-rate recovery path."""
+    """Hash-bound deterministic AdamW decay path and its adoption mode.
+
+    The default ``recovery`` mode preserves the original one-shot recovery
+    serialization.  ``adopted`` uses the identical numerical path but records
+    that a fresh Phase-2 design inherited only the schedule through an
+    immutable recovery-success authorization.
+    """
 
     stages: tuple[LearningRateStage, ...]
     schedule_sha256: str
+    mode: Literal["recovery", "adopted"] = "recovery"
+    source_recovery_authorization_sha256: str | None = None
     legacy_boundary_snapshot_steps: int = 5760
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1.0e-8
@@ -264,6 +277,22 @@ class AdamWRecoveryProtocol:
         }
         if self.schedule_sha256 != _canonical_sha256(schedule_payload):
             raise ValueError("schedule_sha256 does not bind the declared recovery schedule")
+        if self.mode not in {"recovery", "adopted"}:
+            raise ValueError("optimizer decay protocol mode must be recovery or adopted")
+        if self.mode == "recovery":
+            if self.source_recovery_authorization_sha256 is not None:
+                raise ValueError(
+                    "recovery optimizer protocol must not bind a success authorization"
+                )
+        else:
+            if self.source_recovery_authorization_sha256 is None:
+                raise ValueError(
+                    "adopted optimizer protocol requires a recovery-success authorization"
+                )
+            _validate_digest(
+                self.source_recovery_authorization_sha256,
+                name="source_recovery_authorization_sha256",
+            )
         if self.legacy_boundary_snapshot_steps != 5760:
             raise ValueError("legacy_boundary_snapshot_steps must equal 5760")
         if self.stages[0].last_update != self.legacy_boundary_snapshot_steps:
@@ -309,9 +338,7 @@ class AdamWRecoveryProtocol:
         raise ValueError(f"update {update} is outside the locked recovery schedule")
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": "deterministic-adamw-lr-decay-recovery/v1",
-            "one_time_recovery": True,
+        result: dict[str, object] = {
             "scope": "every_phase2_first_order_convergence_trainer",
             "initialization": "exact_zero_head_and_fresh_optimizer_state",
             "learning_rate_schedule": {
@@ -339,6 +366,18 @@ class AdamWRecoveryProtocol:
             "one_optimizer_update_per_step": self.one_optimizer_update_per_step,
             "tie_break": self.tie_break,
             "validation_or_test_selection": False,
+        }
+        if self.mode == "recovery":
+            return {
+                "schema_version": "deterministic-adamw-lr-decay-recovery/v1",
+                "one_time_recovery": True,
+                **result,
+            }
+        return {
+            "schema_version": "deterministic-adamw-lr-decay/v1",
+            "role": "frozen_post_recovery_phase2_optimizer",
+            "source_recovery_authorization_sha256": (self.source_recovery_authorization_sha256),
+            **result,
         }
 
 
@@ -701,7 +740,10 @@ def _settings_from_overlay(
     convergence = reward["adaptive_convergence"]
     identifiability = reward["identifiability"]
     optimizer_protocol: AdamWRecoveryProtocol | None = None
-    if normalized["schema_version"] == PHASE2_RECOVERY_SCHEMA_VERSION:
+    if normalized["schema_version"] in {
+        PHASE2_RECOVERY_SCHEMA_VERSION,
+        PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION,
+    }:
         declared_protocol = reward["optimizer_protocol"]
         declared_schedule = declared_protocol["learning_rate_schedule"]
         optimizer_protocol = AdamWRecoveryProtocol(
@@ -714,6 +756,16 @@ def _settings_from_overlay(
                 for stage in declared_schedule["stages"]
             ),
             schedule_sha256=str(declared_schedule["schedule_sha256"]),
+            mode=(
+                "recovery"
+                if normalized["schema_version"] == PHASE2_RECOVERY_SCHEMA_VERSION
+                else "adopted"
+            ),
+            source_recovery_authorization_sha256=(
+                None
+                if normalized["schema_version"] == PHASE2_RECOVERY_SCHEMA_VERSION
+                else str(normalized["recovery_success_reference"]["artifact_sha256"])
+            ),
             legacy_boundary_snapshot_steps=int(
                 declared_protocol["legacy_constant_lr_boundary_snapshot_steps"]
             ),
@@ -827,6 +879,7 @@ class LabelStreamEvidence:
     replicate_h_sha256: str
     mean_h_sha256: str
     label_stream_sha256: str
+    repeated_label_tail_diagnostics: Mapping[str, object]
     realized_total_annotations: int
     realized_annotations_per_edge: float
     expected_annotations_per_edge: float
@@ -869,6 +922,19 @@ class LabelStreamEvidence:
             )
         if self.num_replicates != 4 or self.gamma != 0.9:
             raise ValueError("label evidence must describe the locked R=4, gamma=0.9 arm")
+        normalized_tail_diagnostics = validate_repeated_label_tail_diagnostics(
+            self.repeated_label_tail_diagnostics,
+            expected_num_edges=self.num_edges,
+            replicate_count_sha256=self.replicate_count_sha256,
+            replicate_h_sha256=self.replicate_h_sha256,
+            mean_h_sha256=self.mean_h_sha256,
+            name="repeated_label_tail_diagnostics",
+        )
+        object.__setattr__(
+            self,
+            "repeated_label_tail_diagnostics",
+            normalized_tail_diagnostics,
+        )
         if (
             self.bt_target != "pooled_raw_wins_and_totals"
             or self.prorm_target != "mean_of_per_replicate_h"
@@ -3187,11 +3253,21 @@ def _head_tuple(model: FrozenFeatureLinearReward) -> tuple[float, ...]:
 
 
 def _pcg_evidence(evaluation: object) -> dict[str, object]:
+    if isinstance(evaluation, Mapping):
+        iterations = evaluation["iterations"]
+        residual_norm = evaluation["residual_norm"]
+        relative_residual = evaluation["relative_residual"]
+        converged = evaluation["converged"]
+    else:
+        iterations = evaluation.pcg_iterations
+        residual_norm = evaluation.pcg_residual_norm
+        relative_residual = evaluation.pcg_relative_residual
+        converged = evaluation.pcg_converged
     return {
-        "iterations": int(evaluation.pcg_iterations),
-        "residual_norm": float(evaluation.pcg_residual_norm),
-        "relative_residual": float(evaluation.pcg_relative_residual),
-        "converged": bool(evaluation.pcg_converged),
+        "iterations": int(iterations),
+        "residual_norm": float(residual_norm),
+        "relative_residual": float(relative_residual),
+        "converged": bool(converged),
         "cold_start": True,
     }
 
@@ -4014,6 +4090,18 @@ def train_phase2_heads(
     )
     final_generator_state_sha = _tensor_sha256(generator.get_state())
     labels = noisy_arm.repeated_labels
+    replicate_count_sha = _tensor_sha256(labels.counts)
+    replicate_win_sha = _tensor_sha256(labels.wins)
+    replicate_h_sha = _tensor_sha256(labels.replicate_h)
+    mean_h_sha = _tensor_sha256(noisy_arm.training.h)
+    repeated_label_tail_diagnostics = build_repeated_label_tail_diagnostics(
+        replicate_counts=labels.counts,
+        replicate_h=labels.replicate_h,
+        mean_h=noisy_arm.training.h,
+        replicate_count_sha256=replicate_count_sha,
+        replicate_h_sha256=replicate_h_sha,
+        mean_h_sha256=mean_h_sha,
+    )
     label_payload = {
         "namespace": compiled.label_rng_namespace,
         "base_seed": base_seed,
@@ -4022,10 +4110,13 @@ def train_phase2_heads(
         "initial_state_sha256": initial_generator_state_sha,
         "final_state_sha256": final_generator_state_sha,
         "probability_sha256": noisy_arm.audit.probability_sha256,
-        "replicate_count_sha256": _tensor_sha256(labels.counts),
-        "replicate_win_sha256": _tensor_sha256(labels.wins),
-        "replicate_h_sha256": _tensor_sha256(labels.replicate_h),
-        "mean_h_sha256": _tensor_sha256(noisy_arm.training.h),
+        "replicate_count_sha256": replicate_count_sha,
+        "replicate_win_sha256": replicate_win_sha,
+        "replicate_h_sha256": replicate_h_sha,
+        "mean_h_sha256": mean_h_sha,
+        "repeated_label_tail_diagnostics_sha256": repeated_label_tail_diagnostics[
+            "diagnostics_sha256"
+        ],
         "realized_total_annotations": labels.total_annotations,
     }
     label_stream_sha = _canonical_sha256(label_payload)
@@ -4044,6 +4135,7 @@ def train_phase2_heads(
         replicate_h_sha256=label_payload["replicate_h_sha256"],
         mean_h_sha256=label_payload["mean_h_sha256"],
         label_stream_sha256=label_stream_sha,
+        repeated_label_tail_diagnostics=repeated_label_tail_diagnostics,
         realized_total_annotations=labels.total_annotations,
         realized_annotations_per_edge=noisy_arm.audit.realized_annotations_per_edge,
         expected_annotations_per_edge=noisy_arm.audit.expected_annotations_per_edge,
@@ -4087,9 +4179,10 @@ def train_phase2_heads(
         objective_name=PRORM_PLUS,
         rank_diagnostic=prorm_moment_map_identifiability,
     )
-    prorm_final_pcg = prorm_convergence.final.inner_solver
-    if prorm_final_pcg is None or prorm_final_pcg.get("converged") is not True:
+    prorm_final_solver = prorm_convergence.final.inner_solver
+    if prorm_final_solver is None or prorm_final_solver.get("converged") is not True:
         raise RuntimeError("final ProRM+ cold-start FP64 PCG audit did not converge")
+    prorm_final_pcg = _pcg_evidence(prorm_final_solver)
     bt_evidence = _make_head_evidence(
         arm=PRIMARY_TRAINING_ARM,
         method=BT_MLE,
@@ -4197,9 +4290,10 @@ def train_phase2_heads(
         objective_name="exact_margin_prorm_plus",
         rank_diagnostic=prorm_moment_map_identifiability,
     )
-    exact_final_pcg = exact_convergence.final.inner_solver
-    if exact_final_pcg is None or exact_final_pcg.get("converged") is not True:
+    exact_final_solver = exact_convergence.final.inner_solver
+    if exact_final_solver is None or exact_final_solver.get("converged") is not True:
         raise RuntimeError("final exact-margin cold-start FP64 PCG audit did not converge")
+    exact_final_pcg = _pcg_evidence(exact_final_solver)
     exact_head = _make_head_evidence(
         arm="exact_margin_positive_control",
         method=PRORM_PLUS,

@@ -29,6 +29,7 @@ for name in \
   PRORM_PHASE2_OVERLAY_FILE_SHA256 PRORM_PHASE2_BASE_FILE_SHA256 \
   PRORM_IDENTITIES_FILE_SHA256 PRORM_PHASE2_DESIGN_SHA256 \
   PRORM_PHASE2_BASE_CONFIG_HASH PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256 \
+  PRORM_PHASE2_CAMPAIGN_PLAN_SHA256 \
   PRORM_GIT_COMMIT \
   PRORM_PHASE2_TERMINAL_COUNT PRORM_PHASE2_CAMPAIGN_OUTPUT_DIR \
   PRORM_PHASE2_CAMPAIGN_TERMINAL_OUTPUT PRORM_PHASE2_PRIMARY_AGGREGATE_OUTPUT; do
@@ -213,7 +214,8 @@ for name in \
   PRORM_PHASE2_OVERLAY_FILE_SHA256 PRORM_PHASE2_BASE_FILE_SHA256 \
   PRORM_IDENTITIES_FILE_SHA256 PRORM_PHASE2_DESIGN_SHA256 \
   PRORM_PHASE2_BASE_CONFIG_HASH \
-  PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256; do
+  PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256 \
+  PRORM_PHASE2_CAMPAIGN_PLAN_SHA256; do
   [[ "${!name}" =~ ^[0-9a-f]{64}$ ]] || die "${name} must be lowercase SHA256"
 done
 [[ "${PRORM_GIT_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]] || die "invalid Git commit"
@@ -247,6 +249,11 @@ campaign_root="$(realpath -e -- "${campaign_root_expected}")" \
 [[ "${campaign_root}" = "${campaign_root_expected}" \
   && -d "${campaign_root}" && ! -L "${campaign_root_expected}" ]] \
   || die "confirmatory design run root is unsafe"
+campaign_plan="${campaign_root}/campaign-registry/campaign-plan.json"
+[[ -f "${campaign_plan}" && ! -L "${campaign_plan}" ]] \
+  || die "fixed-wave campaign plan is missing or unsafe"
+printf '%s  %s\n' "${PRORM_PHASE2_CAMPAIGN_PLAN_SHA256}" "${campaign_plan}" \
+  | sha256sum --check --status || die "fixed-wave campaign plan SHA256 mismatch"
 [[ "${PRORM_PHASE2_CAMPAIGN_OUTPUT_DIR}" = "${campaign_root}/campaign-final" ]] \
   || die "campaign publication is locked to the one-shot campaign-final directory"
 [[ ! -e "${PRORM_PHASE2_CAMPAIGN_OUTPUT_DIR}" \
@@ -337,7 +344,7 @@ campaign_inputs_snapshot="$(
   || die "campaign input snapshot digest is invalid"
 
 terminals=()
-source_bindings=()
+source_bindings=("${campaign_plan}:${PRORM_PHASE2_CAMPAIGN_PLAN_SHA256}")
 declare -A seen_terminal_paths=()
 for index in {0..29}; do
   printf -v slot '%02d' "${index}"
@@ -749,6 +756,7 @@ python3 -I -S - \
   "${PRORM_GIT_COMMIT}" "${SLURM_JOB_ID}" \
   "${PRORM_PHASE2_DESIGN_SHA256}" "${PRORM_PHASE2_BASE_CONFIG_HASH}" \
   "${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256}" \
+  "${PRORM_PHASE2_CAMPAIGN_PLAN_SHA256}" \
   "${PRORM_IMAGE_SHA256}" "${PRORM_HF_INVENTORY_SHA256}" \
   "${campaign_inputs_snapshot}" \
   "${source_bindings[@]}" <<'PY'
@@ -771,6 +779,7 @@ from pathlib import Path
     design_sha,
     base_hash,
     freeze_sha,
+    campaign_plan_sha,
     image_sha,
     inventory_sha,
     campaign_inputs_sha,
@@ -787,7 +796,7 @@ for binding in bindings:
         raise SystemExit("invalid publication input SHA256")
     digests.append(digest)
 payload = {
-    "schema_version": "phase2-campaign-publication-receipt/v1",
+    "schema_version": "phase2-campaign-publication-receipt/v2",
     "publication_commit": "atomic_directory_rename",
     "canonical_output_directory": "campaign-final",
     "publication_mode": mode,
@@ -796,6 +805,7 @@ payload = {
     "source_config_hash": base_hash,
     "phase2_design_sha256": design_sha,
     "accepted_freeze_aggregate_sha256": freeze_sha,
+    "campaign_plan_sha256": campaign_plan_sha,
     "image_sha256": image_sha,
     "hf_inventory_sha256": inventory_sha,
     "campaign_inputs_snapshot_sha256": campaign_inputs_sha,

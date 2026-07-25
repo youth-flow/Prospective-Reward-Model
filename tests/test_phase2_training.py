@@ -17,6 +17,7 @@ from smart_reward.config import load_config
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.experiment import TrainingTensorData
 from smart_reward.phase2_config import (
+    PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION,
     PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
     PHASE2_RECOVERY_PILOT_CONFIG,
     load_phase2_config_bundle,
@@ -44,6 +45,27 @@ from smart_reward.phase2_training import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_final_pcg_evidence_projects_rich_inner_solver_to_locked_schema() -> None:
+    rich_inner_solver = {
+        "method": "pcg",
+        "dtype": "float64",
+        "cold_start": True,
+        "warm_start_used": False,
+        "iterations": 7,
+        "residual_norm": 1.0e-8,
+        "relative_residual": 1.0e-8,
+        "converged": True,
+    }
+
+    assert phase2_training._pcg_evidence(rich_inner_solver) == {
+        "iterations": 7,
+        "residual_norm": 1.0e-8,
+        "relative_residual": 1.0e-8,
+        "converged": True,
+        "cold_start": True,
+    }
 
 
 def _training() -> TrainingTensorData:
@@ -209,6 +231,78 @@ def test_recovery_settings_compile_hash_bound_schedule_for_every_controller() ->
     ]
 
 
+def test_post_recovery_calibration_compiles_the_identical_audited_schedule() -> None:
+    recovery_bundle = load_phase2_config_bundle(ROOT / PHASE2_RECOVERY_PILOT_CONFIG)
+    post_recovery = copy.deepcopy(recovery_bundle.config)
+    post_recovery["schema_version"] = PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION
+    post_recovery["design"]["name"] = "common-beta-post-recovery-calibration-v1"
+    del post_recovery["recovery_control"]
+    declared_protocol = post_recovery["reward_model"]["optimizer_protocol"]
+    declared_protocol["schema_version"] = "deterministic-adamw-lr-decay/v1"
+    del declared_protocol["one_time_recovery"]
+    declared_protocol["role"] = "frozen_post_recovery_phase2_optimizer"
+    declared_protocol["source_recovery_authorization_sha256"] = "a" * 64
+    post_recovery["recovery_success_reference"] = {
+        "schema_version": "prorm-phase2-recovery-success-reference/v1",
+        "artifact_sha256": "a" * 64,
+        "authorization_projection": {
+            "schema_version": "prorm-phase2-recovery-success-projection/v1",
+            "source_schema_version": ("prorm-phase2-recovery-success-authorization/v1"),
+            "recovery_design_sha256": (
+                "9602b0f00a73880545fd57ce1886ec65d7901385cce2b919fd72f3efec4592d4"
+            ),
+            "optimizer_schedule_sha256": PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+            "source_array_job_id": "1648125",
+            "execution_revision": 2,
+            "ordered_seeds": [20260801, 20260802, 20260803],
+            "recovery_status": "all_three_seeds_success",
+            "full_calibration_authorized": True,
+            "authorized_information": "optimizer_schedule_only",
+            "recovery_outputs_reusable": False,
+            "validation_or_heldout_access_authorized": False,
+            "policy_or_final_utility_access_authorized": False,
+        },
+    }
+
+    settings = compile_phase2_training_settings(
+        {
+            "config": post_recovery,
+            "base_config": recovery_bundle.base_config,
+        }
+    )
+    protocol = settings.convergence.optimizer_protocol
+
+    assert protocol is not None
+    assert settings.to_dict()["schema_version"] == "phase2-training-settings/v3"
+    assert settings.convergence.max_steps == 12760
+    assert protocol.schedule_sha256 == PHASE2_RECOVERY_LR_SCHEDULE_SHA256
+    assert protocol.mode == "adopted"
+    assert protocol.source_recovery_authorization_sha256 == "a" * 64
+    serialized = protocol.to_dict()
+    assert serialized["schema_version"] == "deterministic-adamw-lr-decay/v1"
+    assert serialized["role"] == "frozen_post_recovery_phase2_optimizer"
+    assert serialized["source_recovery_authorization_sha256"] == "a" * 64
+    assert "one_time_recovery" not in serialized
+
+    recovery_protocol = compile_phase2_training_settings(
+        recovery_bundle
+    ).convergence.optimizer_protocol
+    assert recovery_protocol is not None
+    assert recovery_protocol.mode == "recovery"
+    assert recovery_protocol.source_recovery_authorization_sha256 is None
+    assert recovery_protocol.to_dict()["schema_version"] == (
+        "deterministic-adamw-lr-decay-recovery/v1"
+    )
+    assert recovery_protocol.to_dict()["one_time_recovery"] is True
+    assert [
+        protocol.learning_rate_for_update(update)
+        for update in (1, 5760, 5761, 6760, 6761, 8760, 8761, 10760, 10761, 12760)
+    ] == [
+        recovery_protocol.learning_rate_for_update(update)
+        for update in (1, 5760, 5761, 6760, 6761, 8760, 8761, 10760, 10761, 12760)
+    ]
+
+
 def test_recovery_identifiability_is_tie_break_bound_and_separation_aware() -> None:
     settings = compile_phase2_training_settings(
         load_phase2_config_bundle(ROOT / PHASE2_RECOVERY_PILOT_CONFIG)
@@ -352,6 +446,41 @@ def test_named_label_stream_records_rng_hash_routing_and_cost(trained_result) ->
     assert evidence.prorm_target == "mean_of_per_replicate_h"
     assert evidence.raw_labels_retained is False
     assert evidence.raw_node_rewards_retained is False
+    tail = evidence.repeated_label_tail_diagnostics
+    assert tail["schema_version"] == "repeated-label-tail-diagnostics/v1"
+    assert tail["split"] == "train"
+    assert tail["gamma"] == 0.9
+    assert tail["num_replicates"] == 4
+    assert tail["scalar_only"] is True
+    assert tail["descriptive_only"] is True
+    assert tail["used_for_clipping"] is False
+    assert tail["used_for_selection"] is False
+    assert tail["used_for_gating"] is False
+    assert tail["source_tensor_sha256"] == {
+        "replicate_count_sha256": evidence.replicate_count_sha256,
+        "replicate_h_sha256": evidence.replicate_h_sha256,
+        "mean_h_sha256": evidence.mean_h_sha256,
+    }
+    assert tail["metrics"]["replicate_count"]["sample_size"] == 4 * training.num_prompts
+    assert tail["metrics"]["abs_replicate_h"]["sample_size"] == 4 * training.num_prompts
+    assert tail["metrics"]["abs_mean_h"]["sample_size"] == training.num_prompts
+    assert len(tail["diagnostics_sha256"]) == 64
+    label_payload = {
+        "namespace": evidence.namespace,
+        "base_seed": evidence.base_seed,
+        "derived_seed": evidence.derived_seed,
+        "derivation_sha256": evidence.derivation_sha256,
+        "initial_state_sha256": evidence.initial_state_sha256,
+        "final_state_sha256": evidence.final_state_sha256,
+        "probability_sha256": evidence.canonical_probability_sha256,
+        "replicate_count_sha256": evidence.replicate_count_sha256,
+        "replicate_win_sha256": evidence.replicate_win_sha256,
+        "replicate_h_sha256": evidence.replicate_h_sha256,
+        "mean_h_sha256": evidence.mean_h_sha256,
+        "repeated_label_tail_diagnostics_sha256": tail["diagnostics_sha256"],
+        "realized_total_annotations": evidence.realized_total_annotations,
+    }
+    assert phase2_training._canonical_sha256(label_payload) == evidence.label_stream_sha256
     for name in (
         "derivation_sha256",
         "oracle_reward_sha256",
@@ -363,6 +492,15 @@ def test_named_label_stream_records_rng_hash_routing_and_cost(trained_result) ->
         "label_stream_sha256",
     ):
         assert len(getattr(evidence, name)) == 64
+
+
+def test_label_stream_rejects_tail_diagnostic_semantic_tampering(trained_result) -> None:
+    _, _, result = trained_result
+    tampered = copy.deepcopy(result.label_stream.repeated_label_tail_diagnostics)
+    tampered["used_for_selection"] = True
+
+    with pytest.raises(ValueError, match="used_for_selection"):
+        replace(result.label_stream, repeated_label_tail_diagnostics=tampered)
 
 
 def test_objective_specific_convergence_and_fixed_snapshot_are_bound(
@@ -422,8 +560,13 @@ def test_objective_specific_convergence_and_fixed_snapshot_are_bound(
     assert result.exact_soft_label_bt_control.head.final_pcg is None
     assert result.prorm_plus.final_pcg["converged"] is True
     assert result.prorm_plus.final_pcg["cold_start"] is True
-    assert result.prorm_plus.final_pcg["dtype"] == "float64"
-    assert result.prorm_plus.final_pcg["warm_start_used"] is False
+    assert set(result.prorm_plus.final_pcg) == {
+        "iterations",
+        "residual_norm",
+        "relative_residual",
+        "converged",
+        "cold_start",
+    }
     assert result.exact_margin_control.head.final_pcg["converged"] is True
 
     primary = result.primary_optimization_audit

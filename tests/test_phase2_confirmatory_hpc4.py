@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -74,8 +76,7 @@ def test_submit_requires_frozen_formal_identity_and_exact_seed_order() -> None:
     submit = _text(SUBMIT)
 
     assert (
-        "<overlay.yaml> <base.yaml> <accepted-freeze-aggregate.json> "
-        "<gpu-partition> <walltime> [0-29]"
+        "<overlay.yaml> <base.yaml> <accepted-freeze-aggregate.json> <gpu-partition> <walltime>"
     ) in submit
     assert "Phase-2 confirmatory submission requires a clean Git worktree" in submit
     assert "configs/identities.json" in submit
@@ -117,41 +118,27 @@ def test_submit_requires_one_accepted_freeze_for_beta_and_horizon() -> None:
     assert "PRORM_PHASE2_FROZEN_GLOBAL_BETA=" in submit
 
 
-def test_submit_accepts_only_the_complete_exact_30_array() -> None:
+def test_submit_uses_one_precommitted_exact_30_fixed_wave_plan() -> None:
     submit = _text(SUBMIT)
-    assert "formal campaign must submit the exact complete seed array" in submit
-    assert (
-        "initial campaign registry commit must reserve exact ordered tasks 0 through 29" in submit
-    )
-    assert 'or [entry["array_task_id"] for entry in entries] != list(range(30))' in submit
-    assert 'array_spec="${array_start}-${array_end}%${concurrency}"' in submit
-    assert "PRORM_PHASE2_ARRAY_CONCURRENCY must be 1 or 2" in submit
-    assert 'value.get("array_spec") not in {"0-29%1", "0-29%2"}' in submit
+    assert "prorm-phase2-fixed-wave-campaign-plan/v1" in submit
+    assert '"status": "precommitted_before_first_slurm_submission"' in submit
+    assert '"ordered_seeds": seeds' in submit
+    assert '"attempt_index": 1' in submit
+    assert '"retry_policy": "single_predeclared_attempt_no_retry"' in submit
+    assert '"replacement_seed_allowed": False' in submit
+    assert '"optional_stopping_allowed": False' in submit
+    assert '"max_submitted_tasks": 4' in submit
+    assert '"max_running_tasks": 2' in submit
+    assert "list(range(0, 4))" in submit
+    assert "list(range(24, 28))" in submit
+    assert "list(range(28, 30))" in submit
+    assert '"array_spec": f"{tasks[0]}-{tasks[-1]}%2"' in submit
+    assert "formal fixed-wave concurrency is immutable" in submit
+    assert "PRORM_PHASE2_ARRAY_CONCURRENCY must be 1 or 2" not in submit
+    assert '--array="${array_spec}"' in submit
+    assert "--state" in submit
+    assert "campaign-plan.json" in submit
     assert ("^[1-9][0-9]*-[0-9]{2}:[0-9]{2}:[0-9]{2}$|^[0-9]{2}:[0-9]{2}:[0-9]{2}$") in submit
-
-    bash = _bash()
-    if bash is None:
-        return
-    predicate = _shell_function_source(submit, "formal_array_shape_is_valid")
-    for start, end, count, accepted in (
-        (0, 29, 30, True),
-        (0, 5, 30, False),
-        (7, 7, 30, False),
-        (1, 29, 30, False),
-        (0, 30, 31, False),
-    ):
-        result = subprocess.run(
-            [
-                bash,
-                "-c",
-                f"{predicate}\nformal_array_shape_is_valid {start} {end} {count}",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert (result.returncode == 0) is accepted
 
 
 def test_submit_is_l20_locked_held_no_requeue_and_cluster_exact() -> None:
@@ -177,15 +164,46 @@ def test_submit_is_l20_locked_held_no_requeue_and_cluster_exact() -> None:
     assert "sbatch cluster identity differs from scontrol ClusterName" in submit
 
 
+def test_submit_binds_plan_walltime_and_live_hpc4_scheduler_resources() -> None:
+    submit = _text(SUBMIT)
+
+    assert "caller walltime differs from the immutable campaign plan" in submit
+    assert 'walltime="${plan_walltime}"' in submit
+    assert 'fields.get("TimeLimit") != walltime' in submit
+    assert 'fields.get("NumNodes") not in {"1", "1-1"}' in submit
+    assert 'fields.get("NumTasks") != "1"' in submit
+    assert 'fields.get("CPUs/Task") != "8"' in submit
+    assert 'fields.get("MinMemoryNode") != "64G"' in submit
+    assert 'fields.get("ArrayTaskThrottle") != "2"' in submit
+    assert 'fields.get("QOS") != "l20_qos"' in submit
+    assert 'fields.get("Restarts") != "0"' in submit
+    assert r"gres(?::|/)gpu(?::[A-Za-z0-9_.-]+)?:1" in submit
+    assert '"raw_scontrol_record": record' in submit
+    assert '"raw_scontrol_sha256": hashlib.sha256(record.encode()).hexdigest()' in submit
+    assert '"scheduler_request_sha256": scheduler_request_sha' in submit
+
+
 def test_registry_commit_is_durable_before_release_and_fail_closed() -> None:
     submit = _text(SUBMIT)
 
     assert 'campaign_registry="${formal_design_root}/campaign-registry"' in submit
     assert 'exec {registry_lock_fd}> "${registry_lock}"' in submit
     assert "formal campaign registry lock is not a non-symlink regular file" in submit
-    assert "prorm-phase2-campaign-submission/v1" in submit
+    assert "prorm-phase2-fixed-wave-campaign-plan/v1" in submit
+    assert "prorm-phase2-campaign-submission/v3" in submit
+    assert "--admit" in submit
+    assert 'registry_admissions="${campaign_registry}/admissions"' in submit
+    assert "prorm-phase2-held-scheduler-request/v1" in submit
+    assert '"campaign_plan_sha256": plan_sha' in submit
+    assert '"wave_index": wave_index' in submit
     assert "committed_while_slurm_held" in submit
     assert "mv -T --no-clobber --" in submit
+    plan_commit = submit.index(
+        'mv -T --no-clobber -- "${campaign_plan_staging}" "${campaign_plan}"'
+    )
+    admission_commit = submit.index(
+        'mv -T --no-clobber -- "${admission_staging}" "${admission_record}"'
+    )
     held_submit = submit.index("submission_output=")
     registry_commit = submit.index(
         'mv -T --no-clobber -- "${submission_staging}" "${submission_record}"'
@@ -195,50 +213,42 @@ def test_registry_commit_is_durable_before_release_and_fail_closed() -> None:
         registry_commit,
     )
     release = submit.index('scontrol release "${held_array_job_id}"')
-    assert held_submit < registry_commit < record_fsync < release
-    cleanup = submit[submit.index("cleanup_held_array()") : held_submit]
-    assert 'scancel -- "${held_array_job_id}"' in cleanup
-    assert "submission_record" not in cleanup
-    assert "rm " not in cleanup
+    assert plan_commit < admission_commit < held_submit < registry_commit < record_fsync < release
+    assert "scancel" not in submit
     assert "for directory in (path, path.parent):" in submit
     lock = submit.index('flock -x "${registry_lock_fd}"')
     no_recovery = submit.index(
         "formal no-retry campaign recovery registry must remain empty",
         lock,
     )
-    resume = submit.index("committed_submission_info", no_recovery)
-    assert lock < no_recovery < resume
+    resolve_state = submit.index("resolve_phase2_campaign_registry.py", no_recovery)
+    assert lock < no_recovery < resolve_state
 
 
-def test_commit_release_crash_resumes_exact_registered_array_without_sbatch() -> None:
+def test_commit_release_crashes_reuse_the_same_deterministic_wave_without_replacement() -> None:
     submit = _text(SUBMIT)
-
-    resume_comment = submit.index(
-        "A SIGKILL after the immutable registry commit but before `scontrol release`"
-    )
-    committed_scan = submit.index("committed_submission_info", resume_comment)
-    scheduler_lookup = submit.index(
-        'scontrol show job --oneliner "${committed_array_job_id}"',
-        committed_scan,
-    )
-    resumed_release = submit.index(
+    deterministic_name = 'wave_job_name="prorm-p2-${campaign_plan_sha256:0:12}-w${wave_index}"'
+    assert deterministic_name in submit
+    active = submit.index('if [[ "${campaign_status}" = "active" ]]')
+    active_release = submit.index(
         'scontrol release "${committed_array_job_id}"',
-        scheduler_lookup,
+        active,
     )
-    resume_exit = submit.index("exit 0", resumed_release)
     fresh_submit = submit.index("submission_output=")
-    assert resume_comment < committed_scan < scheduler_lookup < resumed_release
-    assert resumed_release < resume_exit < fresh_submit
-    resume_block = submit[resume_comment:fresh_submit]
-    assert "committed campaign submission differs from this exact invocation" in resume_block
-    assert "Slurm job differs from the committed held-array identity" in resume_block
-    assert 'parsed[0].get("ArrayTaskId") == array_spec' in resume_block
-    assert 'parsed[0].get("Reason") == "JobHeldUser"' in resume_block
-    assert "records = [line for line in record.splitlines() if line]" in resume_block
-    assert "committed array is held by an unexpected scheduler authority" in resume_block
-    assert "ALREADY_RELEASED" in resume_block
-    assert "sbatch " not in resume_block
-    assert "printf '%s;%s\\n'" in resume_block
+    assert active < active_release < fresh_submit
+    assert 'squeue --noheader --user="$(id -un)" --name="${wave_job_name}"' in submit
+    assert "sacct -X" in submit
+    assert 'sacct_starttime="${plan_created_at_utc%Z}"' in submit
+    assert "historical unregistered fixed-wave identity exists" in submit
+    assert "ambiguous historical scheduler identity" in submit
+    assert "Recover the only possible crash-window array by its deterministic job name" in submit
+    assert "An accepted scheduler identity is never cancelled and replaced" in submit
+    assert "unregistered fixed wave was externally released; no replacement is permitted" in submit
+    assert 'parsed[0].get("ArrayTaskId") == array_spec' in submit
+    assert 'parsed[0].get("Reason") == "JobHeldUser"' in submit
+    assert "records = [line for line in record.splitlines() if line]" in submit
+    assert "ALREADY_RELEASED" in submit
+    assert "scancel" not in submit
 
 
 def test_formal_contract_has_one_predeclared_attempt_and_no_retry_surface() -> None:
@@ -290,12 +300,94 @@ def test_job_is_detached_offline_and_rechecks_formal_compute_identity() -> None:
     assert "detached execution checkout became dirty" in job
     assert "formal Phase-2 compute must execute on Slurm cluster hpc4" in job
     assert "array task does not preserve the preregistered formal seed order" in job
-    assert "formal compute identity differs from the exact held-array schema" in job
+    assert "formal compute identity differs from the fixed-wave schema" in job
+    assert "prorm-phase2-fixed-wave-campaign-plan/v1" in job
+    assert "prorm-phase2-campaign-submission/v3" in job
+    assert "prorm-phase2-wave-admission/v1" in job
+    assert "prorm-phase2-held-scheduler-request/v1" in job
+    assert "PRORM_PHASE2_WAVE_ADMISSION_SHA256" in job
+    assert "running task resources differ from the immutable scheduler request" in job
+    assert "campaign_plan_sha256" in job
+    assert "wave_index" in job
     assert "set(value) != expected_fields" in job
     assert 'value.get("entries") != expected_entries' in job
-    assert 're.fullmatch(r"0-29%[12]"' in job
     assert 'set(job_tuple) != set(expected_job_tuple) | {"walltime"}' in job
     assert 'value.get("producer") != expected_producer' in job
+
+
+def test_compute_registry_heredoc_accepts_one_complete_v3_wave_binding(
+    tmp_path: Path,
+) -> None:
+    fixture_path = ROOT / "tests" / "test_phase2_fixed_wave_registry.py"
+    spec = importlib.util.spec_from_file_location(
+        "_confirmatory_fixed_wave_fixture",
+        fixture_path,
+    )
+    assert spec is not None and spec.loader is not None
+    fixture = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fixture
+    spec.loader.exec_module(fixture)
+
+    design_root, identities, plan, plan_sha = fixture._make_registry(tmp_path)
+    admission_sha = fixture._write_admission(
+        design_root,
+        plan_sha=plan_sha,
+        wave_index=0,
+    )
+    fixture._write_submission(
+        design_root,
+        plan=plan,
+        plan_sha=plan_sha,
+        wave_index=0,
+        array_job_id="900",
+        admission_sha=admission_sha,
+    )
+    programs = _embedded_python_sources(_text(JOB))
+    program = next(
+        item
+        for item in programs
+        if "formal compute lacks its immutable fixed-wave campaign plan" in item
+    )
+    registry = design_root / "campaign-registry"
+    submission = registry / "submissions" / "array-900.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            program,
+            str(registry / "campaign-plan.json"),
+            plan_sha,
+            str(registry / "admissions" / "wave-0.json"),
+            admission_sha,
+            "0",
+            str(registry / "submissions"),
+            "900",
+            "0",
+            "20260901",
+            "1",
+            identities["design"],
+            identities["base"],
+            identities["commit"],
+            identities["freeze"],
+            "hpc4",
+            identities["image"],
+            identities["inventory"],
+            str(plan["producer"]["overlay_file_sha256"]),
+            str(plan["producer"]["base_file_sha256"]),
+            str(plan["producer"]["identities_file_sha256"]),
+            str(JOB),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    output = result.stdout.splitlines()
+    assert output[0] == str(submission)
+    assert output[2] == "08:00:00"
 
 
 def test_job_rejects_requeue_before_any_compute_or_attempt_claim() -> None:

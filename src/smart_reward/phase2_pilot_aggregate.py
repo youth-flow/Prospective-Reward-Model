@@ -19,15 +19,28 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 from collections.abc import Mapping, Sequence
 from numbers import Real
 from pathlib import Path, PurePosixPath
 
 from .paths import relative_posix_reference
+from .phase2_aggregate import validate_post_recovery_pilot_head_training
 from .phase2_config import (
     PHASE2_PILOT_SEEDS,
+    PHASE2_POST_RECOVERY_SCHEMA_VERSION,
+    load_phase2_config_bundle,
     phase2_design_identity,
     validate_phase2_config,
+    validate_post_recovery_authorization_reference,
+)
+from .phase2_post_recovery_control import (
+    POST_RECOVERY_OUTPUT_VERIFICATION_SCHEMA,
+    POST_RECOVERY_RUN_STATUS_SCHEMA,
+    verify_post_recovery_aggregate_success_receipt,
+    verify_post_recovery_submission_evidence,
+    verify_post_recovery_terminal_evidence,
+    verify_recovery_authorization_file,
 )
 from .phase2_rollout import (
     KL_HISTORY_SOURCE,
@@ -184,6 +197,46 @@ _AGGREGATE_SOURCE_KEYS = frozenset(
         "output_verification_sha256",
         "success_receipt",
         "success_receipt_sha256",
+    }
+)
+_POST_RECOVERY_AGGREGATE_SCHEMA = "common-beta-pilot-selection-aggregate/v3"
+_POST_RECOVERY_PROJECT_ROOT = Path("/project/sigroup/smart-reward-model")
+_POST_RECOVERY_CONTROL_KEYS = frozenset(
+    {
+        "schema_version",
+        "recovery_authorization",
+        "recovery_authorization_sha256",
+        "optimizer_schedule_sha256",
+        "submission_intent",
+        "submission_intent_sha256",
+        "submission_ledger",
+        "submission_ledger_sha256",
+        "pilot_phase",
+        "pilot_terminal_evidence",
+        "pilot_terminal_evidence_sha256",
+        "pilot_array_job_id",
+        "ordered_seeds",
+        "materialization_mode",
+        "recovery_outputs_reused",
+        "all_tasks_terminal_completed_zero_exit",
+        "phase2_overlay",
+        "phase2_overlay_repo_relative",
+        "phase2_overlay_sha256",
+        "phase2_overlay_git_blob_sha1",
+        "phase2_overlay_git_commit",
+        "normalized_phase2_config",
+        "normalized_phase2_config_sha256",
+        "phase2_deep_validator_source_sha256",
+        "post_recovery_validator_source_sha256",
+    }
+)
+_POST_RECOVERY_SOURCE_KEYS = frozenset(
+    set(_AGGREGATE_SOURCE_KEYS)
+    | {
+        "array_task_id",
+        "job_id",
+        "post_recovery_output_verification",
+        "post_recovery_output_verification_sha256",
     }
 )
 _AGGREGATE_PREDECESSOR_KEYS = frozenset({"beta_source_aggregate", "horizon_parent_aggregate"})
@@ -1407,7 +1460,11 @@ def _fixed_sibling(
     return sibling
 
 
-def _parse_success_receipt(path: Path) -> tuple[Mapping[str, object], bytes]:
+def _parse_success_receipt(
+    path: Path,
+    *,
+    post_recovery: bool,
+) -> tuple[Mapping[str, object], bytes]:
     raw = _read_regular(path, name="pilot SUCCESS receipt", max_bytes=64 * 1024)
     if not raw or not raw.endswith(b"\n"):
         raise ValueError(f"{path} must be a non-empty newline-terminated receipt")
@@ -1423,27 +1480,61 @@ def _parse_success_receipt(path: Path) -> tuple[Mapping[str, object], bytes]:
         if not key or key in fields:
             raise ValueError(f"{path}:{line_number} has an invalid or duplicate key")
         fields[key] = value
+    legacy_keys = {
+        "schema_version",
+        "status",
+        "workload_exit_code",
+        "final_exit_code",
+        "array_job_id",
+        "array_task_id",
+        "seed",
+        "phase2_design_sha256",
+        "base_config_hash",
+        "git_commit",
+        "beta_source_aggregate_present",
+        "beta_source_aggregate_sha256",
+        "horizon_parent_aggregate_present",
+        "horizon_parent_aggregate_sha256",
+        "created_at_utc",
+    }
+    post_recovery_keys = {
+        "schema_version",
+        "status",
+        "workload_exit_code",
+        "final_exit_code",
+        "slurm_job_id",
+        "allocation_job_id_raw",
+        "slurm_array_task_job_id",
+        "array_job_id",
+        "array_task_id",
+        "pilot_phase",
+        "seed",
+        "cluster",
+        "account",
+        "partition",
+        "restart_count",
+        "phase2_design_sha256",
+        "base_config_hash",
+        "git_commit",
+        "recovery_authorization_sha256",
+        "optimizer_schedule_sha256",
+        "submission_intent_sha256",
+        "submission_ledger_sha256",
+        "materialization_mode",
+        "recovery_outputs_mounted",
+        "hf_root_mount_mode",
+        "datasets_cache_scope",
+        "artifact_metadata_sha256",
+        "phase2_result_sha256",
+        "phase2_output_verification_sha256",
+        "post_recovery_output_verification_sha256",
+        "created_at_utc",
+    }
     return (
         _exact_keys(
             fields,
             name=str(path),
-            expected={
-                "schema_version",
-                "status",
-                "workload_exit_code",
-                "final_exit_code",
-                "array_job_id",
-                "array_task_id",
-                "seed",
-                "phase2_design_sha256",
-                "base_config_hash",
-                "git_commit",
-                "beta_source_aggregate_present",
-                "beta_source_aggregate_sha256",
-                "horizon_parent_aggregate_present",
-                "horizon_parent_aggregate_sha256",
-                "created_at_utc",
-            },
+            expected=post_recovery_keys if post_recovery else legacy_keys,
         ),
         raw,
     )
@@ -1537,6 +1628,9 @@ def _validate_seed_provenance(
     diagnostic_records: int,
     safety_passed: bool,
     design: Phase2Design,
+    post_recovery: bool,
+    post_recovery_authorization_sha256: str | None,
+    post_recovery_schedule_sha256: str | None,
 ) -> dict[str, object]:
     artifact_reference = result["artifact_dir"]
     if artifact_reference != "artifact":
@@ -1701,32 +1795,148 @@ def _validate_seed_provenance(
         raise ValueError(f"{verification_path} does not bind the verified pilot result")
 
     success_path = result_path.parent / "SUCCESS"
-    success, success_raw = _parse_success_receipt(success_path)
+    success, success_raw = _parse_success_receipt(
+        success_path,
+        post_recovery=post_recovery,
+    )
     beta_source = design.beta_source_aggregate_sha256
     horizon_parent = design.parent_pilot_aggregate_sha256
     expected_beta_present = "1" if beta_source is not None else "0"
     expected_horizon_present = "1" if horizon_parent is not None else "0"
     array_job_id = str(success["array_job_id"])
     array_task_id = str(success["array_task_id"])
-    if (
-        success["schema_version"] != "prorm-phase2-run-status/v1"
-        or success["status"] != "SUCCESS"
+    common_invalid = (
+        success["status"] != "SUCCESS"
         or success["workload_exit_code"] != "0"
         or success["final_exit_code"] != "0"
         or success["seed"] != str(seed)
         or success["phase2_design_sha256"] != expected_design_sha256
         or success["base_config_hash"] != expected_source_config_hash
         or success["git_commit"] != environment["git_commit"]
-        or success["beta_source_aggregate_present"] != expected_beta_present
-        or success["beta_source_aggregate_sha256"] != (beta_source or "none")
-        or success["horizon_parent_aggregate_present"] != expected_horizon_present
-        or success["horizon_parent_aggregate_sha256"] != (horizon_parent or "none")
         or not array_job_id.isdigit()
         or array_job_id.startswith("0")
         or not array_task_id.isdigit()
         or int(array_task_id) != seed - min(PHASE2_PILOT_SEEDS)
         or result_path.parent.name != f"job-{array_job_id}_{array_task_id}"
         or not success["created_at_utc"]
+    )
+    if post_recovery:
+        if post_recovery_authorization_sha256 is None or post_recovery_schedule_sha256 is None:
+            raise ValueError("post-recovery provenance requires authorization and schedule")
+        strict_path = result_path.parent / "post-recovery-output-verification.json"
+        strict_raw = _read_regular(
+            strict_path,
+            name="post-recovery output verification",
+            max_bytes=16 * 1024 * 1024,
+        )
+        strict = _exact_keys(
+            _strict_json_bytes(strict_raw, path=strict_path),
+            name=str(strict_path),
+            expected={
+                "schema_version",
+                "status",
+                "slurm_job_id_raw",
+                "allocation_job_id_raw",
+                "slurm_array_task_job_id",
+                "array_job_id",
+                "array_task_id",
+                "pilot_phase",
+                "seed",
+                "phase2_design_sha256",
+                "source_config_hash",
+                "result_sha256",
+                "phase2_output_verification_sha256",
+                "diagnostics_sha256",
+                "recovery_authorization_sha256",
+                "optimizer_schedule_sha256",
+                "materialization_mode",
+                "recovery_outputs_reused",
+                "five_head_adopted_schedule_verified",
+                "five_head_training",
+                "target_free_information_boundary_verified",
+            },
+        )
+        result_sha256 = _sha256_bytes(
+            _read_regular(
+                result_path,
+                name="post-recovery pilot result",
+                max_bytes=64 * 1024 * 1024,
+            )
+        )
+        strict_sha256 = _sha256_bytes(strict_raw)
+        five_heads = _mapping(
+            strict["five_head_training"],
+            name=f"{strict_path}:five_head_training",
+        )
+        expected_five_heads = {
+            "primary_bt_mle",
+            "primary_prorm_plus",
+            "low_dimensional_prorm_plus",
+            "exact_margin_prorm_plus",
+            "exact_soft_label_bt",
+        }
+        strict_head_invalid = set(five_heads) != expected_five_heads or any(
+            _mapping(
+                five_heads[head_name],
+                name=f"{strict_path}:five_head_training.{head_name}",
+            ).get("schedule_sha256")
+            != post_recovery_schedule_sha256
+            for head_name in five_heads
+        )
+        if (
+            common_invalid
+            or success["schema_version"] != POST_RECOVERY_RUN_STATUS_SCHEMA
+            or not success["slurm_job_id"].isdigit()
+            or success["slurm_job_id"].startswith("0")
+            or success["allocation_job_id_raw"] != success["slurm_job_id"]
+            or success["slurm_array_task_job_id"] != f"{array_job_id}_{array_task_id}"
+            or success["pilot_phase"] != pilot_phase
+            or success["cluster"] != "hpc4"
+            or success["account"] != "sigroup"
+            or success["partition"] != environment["partition"]
+            or success["restart_count"] != "0"
+            or success["recovery_authorization_sha256"] != post_recovery_authorization_sha256
+            or success["optimizer_schedule_sha256"] != post_recovery_schedule_sha256
+            or success["materialization_mode"] != "fresh"
+            or success["recovery_outputs_mounted"] != "false"
+            or success["hf_root_mount_mode"] != "read_only"
+            or success["datasets_cache_scope"] != "job_local"
+            or success["artifact_metadata_sha256"] != metadata_sha256
+            or success["phase2_result_sha256"] != result_sha256
+            or success["phase2_output_verification_sha256"] != _sha256_bytes(verification_raw)
+            or success["post_recovery_output_verification_sha256"] != strict_sha256
+            or strict["schema_version"] != POST_RECOVERY_OUTPUT_VERIFICATION_SCHEMA
+            or strict["status"] != "passed"
+            or strict["slurm_job_id_raw"] != success["slurm_job_id"]
+            or strict["allocation_job_id_raw"] != success["slurm_job_id"]
+            or strict["slurm_array_task_job_id"] != success["slurm_array_task_job_id"]
+            or strict["array_job_id"] != array_job_id
+            or strict["array_task_id"] != array_task_id
+            or strict["pilot_phase"] != pilot_phase
+            or strict["seed"] != seed
+            or strict["phase2_design_sha256"] != expected_design_sha256
+            or strict["source_config_hash"] != expected_source_config_hash
+            or strict["result_sha256"] != result_sha256
+            or strict["phase2_output_verification_sha256"] != _sha256_bytes(verification_raw)
+            or strict["diagnostics_sha256"] != diagnostics_sha256
+            or strict["recovery_authorization_sha256"] != post_recovery_authorization_sha256
+            or strict["optimizer_schedule_sha256"] != post_recovery_schedule_sha256
+            or strict["materialization_mode"] != "fresh"
+            or strict["recovery_outputs_reused"] is not False
+            or strict["five_head_adopted_schedule_verified"] is not True
+            or strict["target_free_information_boundary_verified"] is not True
+            or strict_head_invalid
+        ):
+            raise ValueError(
+                f"{success_path} does not bind the successful post-recovery pilot attempt"
+            )
+    elif (
+        common_invalid
+        or success["schema_version"] != "prorm-phase2-run-status/v1"
+        or success["beta_source_aggregate_present"] != expected_beta_present
+        or success["beta_source_aggregate_sha256"] != (beta_source or "none")
+        or success["horizon_parent_aggregate_present"] != expected_horizon_present
+        or success["horizon_parent_aggregate_sha256"] != (horizon_parent or "none")
     ):
         raise ValueError(f"{success_path} does not bind the successful pilot attempt")
 
@@ -1755,6 +1965,7 @@ def _load_seed(
     prompts: int,
     candidates: int,
     max_prompt_tokens: int,
+    config: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     path = Path(raw_path).resolve()
     raw = _read_regular(path, name="pilot result", max_bytes=64 * 1024 * 1024)
@@ -1854,8 +2065,72 @@ def _load_seed(
         max_prompt_tokens=max_prompt_tokens,
         name=f"{path}:information_boundary",
     )
+    post_recovery = (
+        config is not None and config.get("schema_version") == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+    )
+    post_recovery_authorization_sha256: str | None = None
+    post_recovery_schedule_sha256: str | None = None
+    head_gate: dict[str, object] | None = None
     head = _mapping(value["head_training"], name=f"{path}:head_training")
-    if (
+    if post_recovery:
+        train_oracle = _exact_keys(
+            value["train_oracle_rescore"],
+            name=f"{path}:train_oracle_rescore",
+            expected={
+                "source",
+                "num_prompts",
+                "num_candidates",
+                "transformed_rewards_sha256",
+                "oracle_chat_template_sha256",
+                "frozen_transform",
+                "raw_oracle_logits_serialized",
+            },
+        )
+        if (
+            train_oracle["source"] != "saved_train_candidates_rescored_with_pinned_oracle"
+            or train_oracle["num_prompts"]
+            != _mapping(config["run"]["split_sizes"], name="overlay.run.split_sizes")["train"]
+            or train_oracle["num_candidates"] != candidates
+            or train_oracle["raw_oracle_logits_serialized"] is not False
+        ):
+            raise ValueError(f"{path} post-recovery train-oracle rescore is invalid")
+        train_oracle_reward_sha256 = _digest(
+            train_oracle["transformed_rewards_sha256"],
+            name=f"{path}:train_oracle_rescore.transformed_rewards_sha256",
+        )
+        _digest(
+            train_oracle["oracle_chat_template_sha256"],
+            name=f"{path}:train_oracle_rescore.oracle_chat_template_sha256",
+        )
+        reference = _mapping(
+            config["recovery_success_reference"],
+            name="overlay.recovery_success_reference",
+        )
+        protocol = _mapping(
+            config["reward_model"]["optimizer_protocol"],
+            name="overlay.reward_model.optimizer_protocol",
+        )
+        schedule = _mapping(
+            protocol["learning_rate_schedule"],
+            name="overlay.reward_model.optimizer_protocol.learning_rate_schedule",
+        )
+        post_recovery_authorization_sha256 = _digest(
+            reference["artifact_sha256"],
+            name="overlay.recovery_success_reference.artifact_sha256",
+        )
+        post_recovery_schedule_sha256 = _digest(
+            schedule["schedule_sha256"],
+            name=("overlay.reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256"),
+        )
+        head_gate = validate_post_recovery_pilot_head_training(
+            value["head_training"],
+            config=config,
+            design_sha256=expected_design_sha256,
+            seed=seed,
+            train_oracle_reward_sha256=train_oracle_reward_sha256,
+            name=f"{path}:head_training",
+        )
+    elif (
         head.get("training_design_sha256") != expected_design_sha256
         or head.get("head_weights_serialized") is not False
         or head.get("old_phase1_comparison_heads_reused") is not False
@@ -1874,6 +2149,9 @@ def _load_seed(
         diagnostic_records=len(rows),
         safety_passed=safety_passed,
         design=design,
+        post_recovery=post_recovery,
+        post_recovery_authorization_sha256=post_recovery_authorization_sha256,
+        post_recovery_schedule_sha256=post_recovery_schedule_sha256,
     )
     return {
         "seed": seed,
@@ -1884,6 +2162,7 @@ def _load_seed(
         "environment_identity": environment,
         "result_path": path,
         "result_sha256": result_sha,
+        "post_recovery_head_gate": head_gate,
         "sidecar_path": sidecar,
         "sidecar_sha256": sidecar_sha,
         **provenance,
@@ -2046,6 +2325,54 @@ def _validate_aggregate_information_boundary(value: object, *, name: str) -> Non
     )
     if any(boundary[field] is not False for field in _AGGREGATE_INFORMATION_BOUNDARY_KEYS):
         raise ValueError(f"{name} is not a strictly target-free aggregate boundary")
+
+
+def _post_recovery_tail_diagnostics_receipt(
+    loaded_seed: Mapping[str, object],
+    *,
+    name: str,
+) -> dict[str, object]:
+    """Extract the scalar diagnostics receipt from the mandatory deep head gate."""
+
+    deep_gate = _mapping(
+        loaded_seed.get("post_recovery_head_gate"),
+        name=f"{name}.post_recovery_head_gate",
+    )
+    gate_evidence = _mapping(
+        deep_gate.get("gate_evidence"),
+        name=f"{name}.post_recovery_head_gate.gate_evidence",
+    )
+    repeated = _mapping(
+        gate_evidence.get("r4_repeated_labels"),
+        name=f"{name}.post_recovery_head_gate.gate_evidence.r4_repeated_labels",
+    )
+    receipt = _exact_keys(
+        repeated.get("repeated_label_tail_diagnostics"),
+        name=f"{name}.repeated_label_tail_diagnostics",
+        expected={
+            "schema_version",
+            "diagnostics_sha256",
+            "scalar_only",
+            "descriptive_only",
+            "used_for_clipping",
+            "used_for_selection",
+            "used_for_gating",
+        },
+    )
+    if (
+        receipt["schema_version"] != "repeated-label-tail-diagnostics/v1"
+        or receipt["scalar_only"] is not True
+        or receipt["descriptive_only"] is not True
+        or receipt["used_for_clipping"] is not False
+        or receipt["used_for_selection"] is not False
+        or receipt["used_for_gating"] is not False
+    ):
+        raise ValueError(f"{name} has an invalid repeated-label tail diagnostics receipt")
+    _digest(
+        receipt["diagnostics_sha256"],
+        name=f"{name}.repeated_label_tail_diagnostics.diagnostics_sha256",
+    )
+    return dict(receipt)
 
 
 def _load_predecessor_reference(
@@ -2328,14 +2655,766 @@ def _validate_phase2_pilot_aggregate(
     )
 
 
+def _validate_post_recovery_source_aggregate(
+    path: Path,
+    value: Mapping[str, object],
+    *,
+    expected_authorization_sha256: str,
+    expected_schedule_sha256: str,
+    cache: dict[tuple[Path, str], Mapping[str, object]],
+    active: set[Path],
+) -> None:
+    """Validate a v3 post-recovery predecessor without weakening v2 replay."""
+
+    aggregate = _exact_keys(
+        value,
+        name=str(path),
+        expected=set(_PILOT_AGGREGATE_KEYS) | {"post_recovery_control"},
+    )
+    if (
+        aggregate["schema_version"] != _POST_RECOVERY_AGGREGATE_SCHEMA
+        or aggregate["formal_eligibility"] is not False
+        or aggregate["supports_formal_claim"] is not False
+        or aggregate["evidence_role"] != "target_free_design_selection_only"
+        or aggregate["seeds"] != list(PHASE2_PILOT_SEEDS)
+    ):
+        raise ValueError(f"{path} is not a post-recovery target-free pilot aggregate")
+    design_sha = _digest(
+        aggregate["phase2_design_sha256"],
+        name=f"{path}:phase2_design_sha256",
+    )
+    source_config_hash = _digest(
+        aggregate["source_config_hash"],
+        name=f"{path}:source_config_hash",
+    )
+    runtime_sha = _digest(
+        aggregate["phase2_runtime_contract_sha256"],
+        name=f"{path}:phase2_runtime_contract_sha256",
+    )
+    design = _phase2_design_from_runtime(
+        aggregate["phase2_runtime_contract"],
+        expected_phase=str(aggregate["pilot_phase"]),
+        expected_sha256=runtime_sha,
+        name=f"{path}:phase2_runtime_contract",
+    )
+    if aggregate["beta_source_aggregate_sha256"] != design.beta_source_aggregate_sha256:
+        raise ValueError(f"{path} beta-source identity differs from its runtime contract")
+    if design.beta_source_aggregate_sha256 is not None:
+        _digest(
+            aggregate["beta_source_aggregate_sha256"],
+            name=f"{path}:beta_source_aggregate_sha256",
+        )
+    control = _exact_keys(
+        aggregate["post_recovery_control"],
+        name=f"{path}:post_recovery_control",
+        expected=_POST_RECOVERY_CONTROL_KEYS,
+    )
+    if (
+        control["schema_version"] != "phase2-post-recovery-aggregation-control/v1"
+        or control["recovery_authorization_sha256"] != expected_authorization_sha256
+        or control["optimizer_schedule_sha256"] != expected_schedule_sha256
+        or control["ordered_seeds"] != list(PHASE2_PILOT_SEEDS)
+        or control["materialization_mode"] != "fresh"
+        or control["recovery_outputs_reused"] is not False
+        or control["all_tasks_terminal_completed_zero_exit"] is not True
+    ):
+        raise ValueError(f"{path} post-recovery control lineage is invalid")
+    _digest(
+        control["pilot_terminal_evidence_sha256"],
+        name=f"{path}:post_recovery_control.pilot_terminal_evidence_sha256",
+    )
+    submission_intent_sha256 = _digest(
+        control["submission_intent_sha256"],
+        name=f"{path}:post_recovery_control.submission_intent_sha256",
+    )
+    submission_ledger_sha256 = _digest(
+        control["submission_ledger_sha256"],
+        name=f"{path}:post_recovery_control.submission_ledger_sha256",
+    )
+    _digest(
+        control["post_recovery_validator_source_sha256"],
+        name=f"{path}:post_recovery_control.post_recovery_validator_source_sha256",
+    )
+    _digest(
+        control["phase2_deep_validator_source_sha256"],
+        name=f"{path}:post_recovery_control.phase2_deep_validator_source_sha256",
+    )
+    pilot_phase = control["pilot_phase"]
+    if (
+        pilot_phase not in {"calibration", "freeze"}
+        or pilot_phase != aggregate["pilot_phase"]
+        or pilot_phase != design.pilot_phase
+    ):
+        raise ValueError(f"{path} post-recovery pilot phase binding is invalid")
+    project_root = _POST_RECOVERY_PROJECT_ROOT.resolve()
+    if path.parent != (project_root / "aggregates"):
+        raise ValueError(f"{path} post-recovery aggregate leaves the locked namespace")
+    array_job_id = control["pilot_array_job_id"]
+    if (
+        not isinstance(array_job_id, str)
+        or not array_job_id.isdigit()
+        or array_job_id.startswith("0")
+    ):
+        raise ValueError(f"{path} post-recovery array job ID is invalid")
+    authorization_path = _resolved_aggregate_reference(
+        path,
+        control["recovery_authorization"],
+        name=f"{path}:post_recovery_control.recovery_authorization",
+    )
+    terminal_path = _resolved_aggregate_reference(
+        path,
+        control["pilot_terminal_evidence"],
+        name=f"{path}:post_recovery_control.pilot_terminal_evidence",
+    )
+    submission_intent_path = _resolved_aggregate_reference(
+        path,
+        control["submission_intent"],
+        name=f"{path}:post_recovery_control.submission_intent",
+    )
+    submission_ledger_path = _resolved_aggregate_reference(
+        path,
+        control["submission_ledger"],
+        name=f"{path}:post_recovery_control.submission_ledger",
+    )
+    expected_authorization_path = (
+        project_root / "runs" / "phase2-recovery-pilot" / "recovery-success-authorization.json"
+    )
+    expected_terminal_path = (
+        project_root
+        / "runs"
+        / f"phase2-post-recovery-{pilot_phase}"
+        / f"terminal-{array_job_id}.json"
+    )
+    expected_submission_root = Path(f"{path}.evidence") / "submission-registry"
+    if (
+        authorization_path != expected_authorization_path
+        or terminal_path != expected_terminal_path
+        or submission_intent_path != expected_submission_root / "intent.json"
+        or submission_ledger_path != expected_submission_root / "submission.json"
+    ):
+        raise ValueError(f"{path} post-recovery control references leave the locked namespace")
+    authorization_payload = verify_recovery_authorization_file(
+        authorization_path,
+        expected_sha256=expected_authorization_sha256,
+    )
+    terminal_evidence = verify_post_recovery_terminal_evidence(
+        terminal_path,
+        expected_sha256=str(control["pilot_terminal_evidence_sha256"]),
+        expected_array_job_id=array_job_id,
+        expected_pilot_phase=pilot_phase,
+    )
+    terminal_rows = terminal_evidence.get("rows")
+    if not isinstance(terminal_rows, list) or len(terminal_rows) != len(PHASE2_PILOT_SEEDS):
+        raise ValueError(f"{path} terminal evidence does not contain three task rows")
+    overlay_path = _resolved_aggregate_reference(
+        path,
+        control["phase2_overlay"],
+        name=f"{path}:post_recovery_control.phase2_overlay",
+    )
+    expected_evidence_configs = Path(f"{path}.evidence") / "configs"
+    if overlay_path.parent != expected_evidence_configs.resolve():
+        raise ValueError(f"{path} Phase-2 overlay is outside its evidence config bundle")
+    overlay_raw = _read_regular(
+        overlay_path,
+        name="post-recovery source Phase-2 overlay",
+        max_bytes=16 * 1024 * 1024,
+    )
+    overlay_sha256 = _digest(
+        control["phase2_overlay_sha256"],
+        name=f"{path}:post_recovery_control.phase2_overlay_sha256",
+    )
+    if _sha256_bytes(overlay_raw) != overlay_sha256:
+        raise ValueError(f"{path} source Phase-2 overlay SHA256 mismatch")
+    repo_relative = control["phase2_overlay_repo_relative"]
+    if not isinstance(repo_relative, str) or not repo_relative:
+        raise ValueError(f"{path} source Phase-2 repo-relative path is invalid")
+    pure_repo_relative = PurePosixPath(repo_relative)
+    if (
+        pure_repo_relative.is_absolute()
+        or "\\" in repo_relative
+        or ".." in pure_repo_relative.parts
+        or "." in pure_repo_relative.parts
+    ):
+        raise ValueError(f"{path} source Phase-2 repo-relative path is unsafe")
+    overlay_blob = _git_commit(
+        control["phase2_overlay_git_blob_sha1"],
+        name=f"{path}:post_recovery_control.phase2_overlay_git_blob_sha1",
+    )
+    if len(overlay_blob) != 40:
+        raise ValueError(f"{path} Phase-2 overlay Git blob must be SHA-1")
+    computed_blob = hashlib.sha1(
+        f"blob {len(overlay_raw)}\0".encode("ascii") + overlay_raw
+    ).hexdigest()
+    overlay_commit = _git_commit(
+        control["phase2_overlay_git_commit"],
+        name=f"{path}:post_recovery_control.phase2_overlay_git_commit",
+    )
+    aggregation_identity = _mapping(
+        aggregate["aggregation_identity"],
+        name=f"{path}:aggregation_identity",
+    )
+    if computed_blob != overlay_blob or overlay_commit != aggregation_identity.get(
+        "producer_git_commit"
+    ):
+        raise ValueError(f"{path} source Phase-2 Git identity is invalid")
+    repository = Path(__file__).resolve().parents[2]
+    git_object = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "show",
+            f"{overlay_commit}:{repo_relative}",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if git_object.returncode != 0 or git_object.stdout != overlay_raw:
+        raise ValueError(f"{path} source Phase-2 overlay is not the declared Git commit/blob")
+    aggregator_commit = aggregation_identity.get("aggregator_git_commit")
+    if not isinstance(aggregator_commit, str):
+        raise ValueError(f"{path} aggregation Git commit is invalid")
+    validator_sources = {
+        "src/smart_reward/phase2_pilot_aggregate.py": aggregation_identity.get(
+            "validator_source_sha256"
+        ),
+        "src/smart_reward/phase2_aggregate.py": control["phase2_deep_validator_source_sha256"],
+        "src/smart_reward/phase2_post_recovery_aggregate.py": control[
+            "post_recovery_validator_source_sha256"
+        ],
+    }
+    for source_name, expected_source_sha256 in validator_sources.items():
+        validator_object = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "show",
+                f"{aggregator_commit}:{source_name}",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if (
+            validator_object.returncode != 0
+            or _sha256_bytes(validator_object.stdout) != expected_source_sha256
+        ):
+            raise ValueError(f"{path} validator source {source_name!r} is not Git-bound")
+    parsed_source_config = load_phase2_config_bundle(overlay_path).config
+    embedded_source_config = _mapping(
+        control["normalized_phase2_config"],
+        name=f"{path}:post_recovery_control.normalized_phase2_config",
+    )
+    if parsed_source_config != embedded_source_config:
+        raise ValueError(f"{path} embedded Phase-2 config differs from parsed source overlay")
+    source_config = validate_phase2_config(
+        _mapping(
+            embedded_source_config,
+            name=f"{path}:post_recovery_control.normalized_phase2_config",
+        )
+    )
+    source_design = Phase2Design.from_phase2_config(source_config)
+    source_config_sha256 = _digest(
+        control["normalized_phase2_config_sha256"],
+        name=f"{path}:post_recovery_control.normalized_phase2_config_sha256",
+    )
+    if _canonical_sha256(source_config) != source_config_sha256:
+        raise ValueError(f"{path} normalized Phase-2 config SHA256 mismatch")
+    source_reference = _mapping(
+        source_config["recovery_success_reference"],
+        name="source recovery_success_reference",
+    )
+    validate_post_recovery_authorization_reference(
+        source_reference,
+        authorization_payload_sha256=expected_authorization_sha256,
+        authorization_payload=authorization_payload,
+    )
+    source_schedule = _mapping(
+        _mapping(
+            source_config["reward_model"]["optimizer_protocol"],
+            name="source reward_model.optimizer_protocol",
+        )["learning_rate_schedule"],
+        name="source reward_model.optimizer_protocol.learning_rate_schedule",
+    )
+    if (
+        source_config["schema_version"] != PHASE2_POST_RECOVERY_SCHEMA_VERSION
+        or phase2_design_identity(source_config) != design_sha
+        or source_design.to_dict() != design.to_dict()
+        or source_design.sha256 != runtime_sha
+        or _mapping(source_config["design"], name="source design")["source_config_hash"]
+        != source_config_hash
+        or source_reference["artifact_sha256"] != expected_authorization_sha256
+        or source_schedule["schedule_sha256"] != expected_schedule_sha256
+    ):
+        raise ValueError(f"{path} embedded Phase-2 config breaks post-recovery lineage")
+    source_run = _mapping(source_config["run"], name="source run")
+    source_split_sizes = _mapping(
+        source_run["split_sizes"],
+        name="source run.split_sizes",
+    )
+    source_data = _mapping(source_config["data"], name="source data")
+    source_policy = _mapping(source_config["policy"], name="source policy")
+    environment = _validate_environment(
+        aggregate["environment_identity"],
+        name=f"{path}:environment_identity",
+    )
+    aggregation_identity = _validate_aggregation_identity(
+        aggregate["aggregation_identity"],
+        producer_environment=environment,
+        name=f"{path}:aggregation_identity",
+        require_current_validator=False,
+    )
+    source_config_reference = _mapping(
+        source_config["design"],
+        name="source design",
+    )["source_config"]
+    if not isinstance(source_config_reference, str):
+        raise ValueError(f"{path} source config evidence reference is invalid")
+    source_config_pure = PurePosixPath(source_config_reference)
+    if (
+        source_config_pure.is_absolute()
+        or "\\" in source_config_reference
+        or ".." in source_config_pure.parts
+        or "." in source_config_pure.parts
+        or not source_config_pure.parts
+        or source_config_pure.parts[0] != "configs"
+    ):
+        raise ValueError(f"{path} source config evidence reference is unsafe")
+    source_config_path = Path(f"{path}.evidence").joinpath(*source_config_pure.parts)
+    source_config_raw = _read_regular(
+        source_config_path,
+        name="post-recovery source base config evidence",
+        max_bytes=16 * 1024 * 1024,
+    )
+    verify_post_recovery_submission_evidence(
+        submission_intent_path,
+        submission_ledger_path,
+        expected_pilot_phase=str(pilot_phase),
+        expected_design_sha256=design_sha,
+        expected_base_config_hash=source_config_hash,
+        expected_authorization_sha256=expected_authorization_sha256,
+        expected_optimizer_schedule_sha256=expected_schedule_sha256,
+        expected_git_commit=str(aggregation_identity["producer_git_commit"]),
+        expected_image_sha256=str(aggregation_identity["image_sha256"]),
+        expected_inventory_sha256=str(aggregation_identity["hf_inventory_sha256"]),
+        expected_overlay_sha256=str(control["phase2_overlay_sha256"]),
+        expected_base_sha256=_sha256_bytes(source_config_raw),
+        expected_overlay_repo_relative=str(control["phase2_overlay_repo_relative"]),
+        expected_base_repo_relative=source_config_reference,
+        expected_array_job_id=str(array_job_id),
+        expected_intent_sha256=submission_intent_sha256,
+        expected_submission_sha256=submission_ledger_sha256,
+        expected_project_root=os.fspath(project_root),
+    )
+    _validate_thresholds(aggregate["thresholds"], name=f"{path}:thresholds")
+    _validate_aggregate_information_boundary(
+        aggregate["information_boundary"],
+        name=f"{path}:information_boundary",
+    )
+    geometry = _exact_keys(
+        aggregate["rollout_geometry"],
+        name=f"{path}:rollout_geometry",
+        expected={
+            "materialized_prompts",
+            "test_prompts",
+            "candidates_per_prompt",
+            "max_prompt_tokens",
+        },
+    )
+    materialized_prompts = _integer(
+        geometry["materialized_prompts"],
+        name=f"{path}:rollout_geometry.materialized_prompts",
+        minimum=1,
+    )
+    prompts = _integer(
+        geometry["test_prompts"],
+        name=f"{path}:rollout_geometry.test_prompts",
+        minimum=1,
+    )
+    candidates = _integer(
+        geometry["candidates_per_prompt"],
+        name=f"{path}:rollout_geometry.candidates_per_prompt",
+        minimum=1,
+    )
+    max_prompt_tokens = _integer(
+        geometry["max_prompt_tokens"],
+        name=f"{path}:rollout_geometry.max_prompt_tokens",
+        minimum=1,
+    )
+    if (
+        materialized_prompts != source_run["num_prompts"]
+        or prompts != source_split_sizes["test"]
+        or candidates != source_data["num_candidates"]
+        or candidates != design.rollout_candidates_per_prompt
+        or max_prompt_tokens != source_policy["max_prompt_tokens"]
+    ):
+        raise ValueError(f"{path} rollout geometry differs from the Git-bound config")
+
+    raw_sources = aggregate["sources"]
+    if not isinstance(raw_sources, list) or len(raw_sources) != len(PHASE2_PILOT_SEEDS):
+        raise ValueError(f"{path}:sources must contain exactly three ordered seed records")
+    loaded: dict[int, dict[str, object]] = {}
+    observed_raw_job_ids: set[str] = set()
+    for task, (seed, raw_source) in enumerate(zip(PHASE2_PILOT_SEEDS, raw_sources, strict=True)):
+        source = _exact_keys(
+            raw_source,
+            name=f"{path}:sources.seed-{seed}",
+            expected=_POST_RECOVERY_SOURCE_KEYS,
+        )
+        if (
+            source["seed"] != seed
+            or source["array_task_id"] != task
+            or source["job_id"] != f"{array_job_id}_{task}"
+        ):
+            raise ValueError(f"{path}:post-recovery sources are not in array order")
+        expected_run = (
+            project_root
+            / "runs"
+            / f"phase2-post-recovery-{pilot_phase}"
+            / design_sha
+            / f"seed-{seed}"
+            / f"job-{array_job_id}_{task}"
+        )
+        expected_artifact_metadata = (
+            project_root
+            / "artifacts"
+            / f"phase2-post-recovery-{pilot_phase}"
+            / design_sha
+            / f"seed-{seed}"
+            / f"job-{array_job_id}_{task}"
+            / "metadata.json"
+        )
+        resolved: dict[str, Path] = {}
+        source_digest_fields = {
+            "result": "result_sha256",
+            "diagnostics_jsonl": "diagnostics_sha256",
+            "artifact_metadata": "artifact_metadata_sha256",
+            "run_manifest": "run_manifest_sha256",
+            "output_verification": "output_verification_sha256",
+            "post_recovery_output_verification": ("post_recovery_output_verification_sha256"),
+            "success_receipt": "success_receipt_sha256",
+        }
+        for field, digest_field in source_digest_fields.items():
+            artifact_path = _resolved_aggregate_reference(
+                path,
+                source[field],
+                name=f"{path}:sources.seed-{seed}.{field}",
+            )
+            expected_path = (
+                expected_artifact_metadata
+                if field == "artifact_metadata"
+                else expected_run
+                / {
+                    "result": "phase2-pilot-diagnostics.json",
+                    "diagnostics_jsonl": ("phase2-pilot-diagnostics.diagnostics.jsonl"),
+                    "run_manifest": "run-manifest.json",
+                    "output_verification": "phase2-output-verification.json",
+                    "post_recovery_output_verification": ("post-recovery-output-verification.json"),
+                    "success_receipt": "SUCCESS",
+                }[field]
+            )
+            if artifact_path != expected_path:
+                raise ValueError(f"{path}:sources.seed-{seed}.{field} leaves the locked namespace")
+            raw = _read_regular(
+                artifact_path,
+                name=f"post-recovery source {field}",
+                max_bytes=256 * 1024 * 1024,
+            )
+            if _sha256_bytes(raw) != source[digest_field]:
+                raise ValueError(f"{path}:sources.seed-{seed}.{field} SHA256 mismatch")
+            resolved[field] = artifact_path
+        loaded_seed = _load_seed(
+            resolved["result"],
+            expected_design_sha256=design_sha,
+            expected_runtime=design.to_dict(),
+            expected_runtime_sha256=runtime_sha,
+            expected_source_config_hash=source_config_hash,
+            expected_pilot_phase=str(aggregate["pilot_phase"]),
+            design=design,
+            materialized_prompts=materialized_prompts,
+            prompts=prompts,
+            candidates=candidates,
+            max_prompt_tokens=max_prompt_tokens,
+            config=source_config,
+        )
+        if loaded_seed["seed"] != seed:
+            raise ValueError(f"{path}:sources.seed-{seed} deep validation seed differs")
+        marker, _ = _parse_success_receipt(
+            resolved["success_receipt"],
+            post_recovery=True,
+        )
+        if (
+            marker["schema_version"] != POST_RECOVERY_RUN_STATUS_SCHEMA
+            or marker["status"] != "SUCCESS"
+            or marker["workload_exit_code"] != "0"
+            or marker["final_exit_code"] != "0"
+            or marker["array_job_id"] != array_job_id
+            or marker["array_task_id"] != str(task)
+            or marker["slurm_job_id"]
+            != str(
+                _mapping(
+                    terminal_rows[task],
+                    name=f"{path}:terminal.rows[{task}]",
+                )["job_id_raw"]
+            )
+            or marker["allocation_job_id_raw"] != marker["slurm_job_id"]
+            or marker["slurm_array_task_job_id"] != f"{array_job_id}_{task}"
+            or marker["pilot_phase"] != pilot_phase
+            or marker["seed"] != str(seed)
+            or marker["phase2_design_sha256"] != design_sha
+            or marker["base_config_hash"] != source_config_hash
+            or marker["recovery_authorization_sha256"] != expected_authorization_sha256
+            or marker["optimizer_schedule_sha256"] != expected_schedule_sha256
+            or marker["submission_intent_sha256"] != submission_intent_sha256
+            or marker["submission_ledger_sha256"] != submission_ledger_sha256
+            or marker["materialization_mode"] != "fresh"
+            or marker["recovery_outputs_mounted"] != "false"
+            or marker["phase2_result_sha256"] != source["result_sha256"]
+            or marker["phase2_output_verification_sha256"] != source["output_verification_sha256"]
+            or marker["post_recovery_output_verification_sha256"]
+            != source["post_recovery_output_verification_sha256"]
+            or marker["artifact_metadata_sha256"] != source["artifact_metadata_sha256"]
+        ):
+            raise ValueError(f"{path}:sources.seed-{seed} SUCCESS lineage is invalid")
+        if marker["slurm_job_id"] in observed_raw_job_ids:
+            raise ValueError(f"{path}:allocation JobIDRaw values must be unique")
+        observed_raw_job_ids.add(str(marker["slurm_job_id"]))
+        strict = _exact_keys(
+            _strict_json_bytes(
+                _read_regular(
+                    resolved["post_recovery_output_verification"],
+                    name="post-recovery output verification",
+                    max_bytes=16 * 1024 * 1024,
+                ),
+                path=resolved["post_recovery_output_verification"],
+            ),
+            name=f"{path}:sources.seed-{seed}.post_recovery_output_verification",
+            expected={
+                "schema_version",
+                "status",
+                "slurm_job_id_raw",
+                "allocation_job_id_raw",
+                "slurm_array_task_job_id",
+                "array_job_id",
+                "array_task_id",
+                "pilot_phase",
+                "seed",
+                "phase2_design_sha256",
+                "source_config_hash",
+                "result_sha256",
+                "phase2_output_verification_sha256",
+                "diagnostics_sha256",
+                "recovery_authorization_sha256",
+                "optimizer_schedule_sha256",
+                "materialization_mode",
+                "recovery_outputs_reused",
+                "five_head_adopted_schedule_verified",
+                "five_head_training",
+                "target_free_information_boundary_verified",
+            },
+        )
+        five_heads = _mapping(
+            strict["five_head_training"],
+            name=f"{path}:sources.seed-{seed}.five_head_training",
+        )
+        expected_entries = {
+            "primary_bt_mle",
+            "primary_prorm_plus",
+            "low_dimensional_prorm_plus",
+            "exact_margin_prorm_plus",
+            "exact_soft_label_bt",
+        }
+        if set(five_heads) != expected_entries:
+            raise ValueError(f"{path}:sources.seed-{seed} does not bind five heads")
+        for head_name in expected_entries:
+            head_gate = _exact_keys(
+                five_heads[head_name],
+                name=f"{path}:sources.seed-{seed}.five_head_training.{head_name}",
+                expected={
+                    "schedule_sha256",
+                    "fresh_zero_head",
+                    "fresh_optimizer_state",
+                    "completed_updates_observed",
+                    "per_update_state_checks_passed",
+                },
+            )
+            completed = _integer(
+                head_gate["completed_updates_observed"],
+                name=(
+                    f"{path}:sources.seed-{seed}.five_head_training."
+                    f"{head_name}.completed_updates_observed"
+                ),
+                minimum=5760,
+            )
+            if (
+                completed > 12760
+                or head_gate["schedule_sha256"] != expected_schedule_sha256
+                or head_gate["fresh_zero_head"] is not True
+                or head_gate["fresh_optimizer_state"] is not True
+                or head_gate["per_update_state_checks_passed"] is not True
+            ):
+                raise ValueError(f"{path}:sources.seed-{seed}.{head_name} schedule gate is invalid")
+        deep_gate = _mapping(
+            loaded_seed["post_recovery_head_gate"],
+            name=f"{path}:sources.seed-{seed}.deep_head_gate",
+        )
+        if five_heads != deep_gate.get("five_head_training"):
+            raise ValueError(
+                f"{path}:sources.seed-{seed} five-head receipt differs from "
+                "the deeply rederived trainer audit"
+            )
+        if (
+            strict["schema_version"] != POST_RECOVERY_OUTPUT_VERIFICATION_SCHEMA
+            or strict["status"] != "passed"
+            or strict["slurm_job_id_raw"] != marker["slurm_job_id"]
+            or strict["allocation_job_id_raw"] != marker["slurm_job_id"]
+            or strict["slurm_array_task_job_id"] != marker["slurm_array_task_job_id"]
+            or strict["array_job_id"] != array_job_id
+            or strict["array_task_id"] != str(task)
+            or strict["pilot_phase"] != pilot_phase
+            or strict["seed"] != seed
+            or strict["phase2_design_sha256"] != design_sha
+            or strict["source_config_hash"] != source_config_hash
+            or strict["result_sha256"] != source["result_sha256"]
+            or strict["diagnostics_sha256"] != source["diagnostics_sha256"]
+            or strict["recovery_authorization_sha256"] != expected_authorization_sha256
+            or strict["optimizer_schedule_sha256"] != expected_schedule_sha256
+            or strict["materialization_mode"] != "fresh"
+            or strict["recovery_outputs_reused"] is not False
+            or strict["five_head_adopted_schedule_verified"] is not True
+            or strict["target_free_information_boundary_verified"] is not True
+        ):
+            raise ValueError(f"{path}:sources.seed-{seed} strict receipt is invalid")
+        if loaded_seed["environment_identity"] != environment:
+            raise ValueError(f"{path}:source seed producer identity is inconsistent")
+        loaded[seed] = loaded_seed
+
+    predecessors = _exact_keys(
+        aggregate["predecessors"],
+        name=f"{path}:predecessors",
+        expected=_AGGREGATE_PREDECESSOR_KEYS,
+    )
+    predecessor_values: dict[
+        str,
+        tuple[Path, str, Mapping[str, object]] | None,
+    ] = {}
+    for field, expected_sha in (
+        ("beta_source_aggregate", design.beta_source_aggregate_sha256),
+        ("horizon_parent_aggregate", design.parent_pilot_aggregate_sha256),
+    ):
+        raw_reference = predecessors[field]
+        if expected_sha is None:
+            if raw_reference is not None:
+                raise ValueError(f"{path}:predecessors.{field} must be null")
+            predecessor_values[field] = None
+            continue
+        reference = _exact_keys(
+            raw_reference,
+            name=f"{path}:predecessors.{field}",
+            expected=_AGGREGATE_PREDECESSOR_REFERENCE_KEYS,
+        )
+        if reference["sha256"] != expected_sha:
+            raise ValueError(f"{path}:predecessors.{field} SHA256 differs")
+        predecessor_path = _resolved_aggregate_reference(
+            path,
+            reference["path"],
+            name=f"{path}:predecessors.{field}.path",
+        )
+        predecessor_values[field] = _load_source_aggregate(
+            predecessor_path,
+            expected_sha256=expected_sha,
+            expected_post_recovery=True,
+            expected_authorization_sha256=expected_authorization_sha256,
+            expected_schedule_sha256=expected_schedule_sha256,
+            _cache=cache,
+            _active=active,
+        )
+    source_binding = _beta_source_binding_for_design(
+        design,
+        expected_source_config_hash=source_config_hash,
+        predecessor=predecessor_values["beta_source_aggregate"],
+    )
+    horizon_binding = _horizon_parent_binding_for_design(
+        design,
+        predecessor=predecessor_values["horizon_parent_aggregate"],
+    )
+    expected_overlay_filename, expected_filename = _post_recovery_semantic_filenames(
+        design,
+        source_binding=source_binding,
+    )
+    if path.name != expected_filename:
+        raise ValueError(f"{path} post-recovery aggregate filename must be {expected_filename!r}")
+    if (
+        overlay_path.name != expected_overlay_filename
+        or repo_relative != f"configs/{expected_overlay_filename}"
+    ):
+        raise ValueError(
+            f"{path} post-recovery overlay must use the exact semantic name "
+            f"{expected_overlay_filename!r}"
+        )
+    (
+        _,
+        _,
+        all_length_passed,
+        _,
+        expected_selection,
+    ) = _selection_from_loaded_seeds(
+        pilot_phase=str(pilot_phase),
+        design=design,
+        declared_seeds=PHASE2_PILOT_SEEDS,
+        loaded=loaded,
+        source_binding=source_binding,
+    )
+    if aggregate["selection"] != expected_selection:
+        raise ValueError(f"{path}:selection differs from recomputed source evidence")
+    expected_per_seed = {
+        str(seed): {
+            "beta_common": loaded[seed]["beta_common"],
+            "pre_oracle_safety_passed": loaded[seed]["safety_passed"],
+            "observed_by_arm": loaded[seed]["observed_by_arm"],
+            "repeated_label_tail_diagnostics": (
+                _post_recovery_tail_diagnostics_receipt(
+                    loaded[seed],
+                    name=f"{path}:sources.seed-{seed}",
+                )
+            ),
+        }
+        for seed in PHASE2_PILOT_SEEDS
+    }
+    if aggregate["per_seed"] != expected_per_seed:
+        raise ValueError(f"{path}:per_seed differs from recomputed source evidence")
+    expected_horizon = {
+        "schema_version": "pilot-horizon-selection/v1",
+        "candidate_horizon_tokens": design.max_response_tokens,
+        "allowed_horizon_sequence": list(design.allowed_horizon_sequence),
+        "horizon_grid_index": design.horizon_grid_index,
+        "parent_pilot_aggregate_sha256": design.parent_pilot_aggregate_sha256,
+        "previous_horizon_failed_length_gate": design.previous_horizon_failed_length_gate,
+        "all_seed_length_gates_passed": all_length_passed,
+        "parent_binding_verified": (
+            design.parent_pilot_aggregate_sha256 is None or horizon_binding is not None
+        ),
+    }
+    if aggregate["horizon"] != expected_horizon:
+        raise ValueError(f"{path}:horizon differs from recomputed source evidence")
+
+
 def _load_source_aggregate(
     raw_path: str | os.PathLike[str],
     *,
     expected_sha256: str,
+    expected_post_recovery: bool = False,
+    expected_authorization_sha256: str | None = None,
+    expected_schedule_sha256: str | None = None,
     _cache: dict[tuple[Path, str], Mapping[str, object]] | None = None,
     _active: set[Path] | None = None,
 ) -> tuple[Path, str, Mapping[str, object]]:
     path = Path(raw_path).resolve()
+    if expected_post_recovery:
+        project_root = _POST_RECOVERY_PROJECT_ROOT.resolve()
+        if path.parent != (project_root / "aggregates"):
+            raise ValueError(f"{path} post-recovery aggregate leaves the locked namespace")
+        verify_post_recovery_aggregate_success_receipt(path)
     raw = _read_regular(path, name="pilot predecessor aggregate", max_bytes=64 * 1024 * 1024)
     observed_sha = _sha256_bytes(raw)
     if observed_sha != expected_sha256:
@@ -2350,12 +3429,24 @@ def _load_source_aggregate(
     value = _strict_json_bytes(raw, path=path)
     active.add(path)
     try:
-        _validate_phase2_pilot_aggregate(
-            path,
-            value,
-            cache=cache,
-            active=active,
-        )
+        if expected_post_recovery:
+            if expected_authorization_sha256 is None or expected_schedule_sha256 is None:
+                raise ValueError("post-recovery predecessor validation requires auth and schedule")
+            _validate_post_recovery_source_aggregate(
+                path,
+                value,
+                expected_authorization_sha256=expected_authorization_sha256,
+                expected_schedule_sha256=expected_schedule_sha256,
+                cache=cache,
+                active=active,
+            )
+        else:
+            _validate_phase2_pilot_aggregate(
+                path,
+                value,
+                cache=cache,
+                active=active,
+            )
     finally:
         active.remove(path)
     cache[key] = value
@@ -2370,6 +3461,47 @@ def _power_of_two_grid_index(value: float, base: float) -> int:
     if exponent < 0 or not _close(ratio, 2.0**exponent, tolerance=1.0e-12):
         raise ValueError("frozen pilot beta is outside the preregistered beta*=2 grid")
     return exponent
+
+
+def _post_recovery_semantic_filenames(
+    design: Phase2Design,
+    *,
+    source_binding: Mapping[str, object] | None,
+) -> tuple[str, str]:
+    """Derive the only admissible v3 overlay and aggregate filenames."""
+
+    if design.pilot_phase == "calibration":
+        overlay = (
+            "common_beta_post_recovery_calibration.yaml"
+            if design.horizon_grid_index == 0
+            else (f"common_beta_post_recovery_calibration_horizon_{design.horizon_grid_index}.yaml")
+        )
+        aggregate = (
+            "phase2-post-recovery-calibration-aggregate.json"
+            if design.horizon_grid_index == 0
+            else (
+                "phase2-post-recovery-calibration-"
+                f"horizon-{design.horizon_grid_index}-aggregate.json"
+            )
+        )
+        return overlay, aggregate
+    if design.pilot_phase != "freeze" or source_binding is None:
+        raise ValueError("post-recovery pilot filename derivation requires a bound pilot phase")
+    beta_grid_index = _integer(
+        source_binding.get("beta_grid_index"),
+        name="post-recovery beta_source_binding.beta_grid_index",
+    )
+    overlay = (
+        "common_beta_post_recovery_freeze.yaml"
+        if beta_grid_index == 0
+        else f"common_beta_post_recovery_freeze_retry_{beta_grid_index}.yaml"
+    )
+    aggregate = (
+        "phase2-post-recovery-freeze-aggregate.json"
+        if beta_grid_index == 0
+        else f"phase2-post-recovery-freeze-retry-{beta_grid_index}-aggregate.json"
+    )
+    return overlay, aggregate
 
 
 def _beta_source_binding_for_design(
@@ -2415,6 +3547,11 @@ def _beta_source_binding_for_design(
         source_phase = value.get("pilot_phase")
         current_beta = float(design.frozen_global_beta)
         if source_phase == "calibration":
+            if observed_sha != design.parent_pilot_aggregate_sha256:
+                raise ValueError(
+                    "the initial freeze beta source and accepted horizon parent "
+                    "must be the same calibration aggregate"
+                )
             base = _finite(
                 selection.get("recommended_pilot_freeze_beta"),
                 name=f"{path}:selection.recommended_pilot_freeze_beta",
@@ -2426,6 +3563,25 @@ def _beta_source_binding_for_design(
                 )
             grid_index = 0
         elif source_phase == "freeze":
+            predecessor_lineage = _exact_keys(
+                value.get("predecessors"),
+                name=f"{path}:predecessors",
+                expected=_AGGREGATE_PREDECESSOR_KEYS,
+            )
+            inherited_horizon_reference = _exact_keys(
+                predecessor_lineage.get("horizon_parent_aggregate"),
+                name=f"{path}:predecessors.horizon_parent_aggregate",
+                expected=_AGGREGATE_PREDECESSOR_REFERENCE_KEYS,
+            )
+            inherited_horizon_sha256 = _digest(
+                inherited_horizon_reference.get("sha256"),
+                name=(f"{path}:predecessors.horizon_parent_aggregate.sha256"),
+            )
+            if inherited_horizon_sha256 != design.parent_pilot_aggregate_sha256:
+                raise ValueError(
+                    "a retry freeze cannot substitute a different calibration "
+                    "horizon parent than its immediate beta predecessor"
+                )
             previous_beta = _finite(
                 selection.get("frozen_global_beta"),
                 name=f"{path}:selection.frozen_global_beta",
@@ -2495,6 +3651,27 @@ def verify_beta_source_aggregate(
     config = validate_phase2_config(overlay_config)
     design = Phase2Design.from_phase2_config(config)
     design_config = _mapping(config["design"], name="design")
+    post_recovery = config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+    authorization_sha256: str | None = None
+    schedule_sha256: str | None = None
+    if post_recovery:
+        authorization_sha256 = _digest(
+            _mapping(
+                config["recovery_success_reference"],
+                name="recovery_success_reference",
+            )["artifact_sha256"],
+            name="recovery_success_reference.artifact_sha256",
+        )
+        schedule_sha256 = _digest(
+            _mapping(
+                _mapping(
+                    config["reward_model"]["optimizer_protocol"],
+                    name="reward_model.optimizer_protocol",
+                )["learning_rate_schedule"],
+                name="reward_model.optimizer_protocol.learning_rate_schedule",
+            )["schedule_sha256"],
+            name="reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256",
+        )
     expected_sha = design.beta_source_aggregate_sha256
     if source_aggregate is None:
         predecessor = None
@@ -2504,6 +3681,9 @@ def verify_beta_source_aggregate(
         predecessor = _load_source_aggregate(
             source_aggregate,
             expected_sha256=expected_sha,
+            expected_post_recovery=post_recovery,
+            expected_authorization_sha256=authorization_sha256,
+            expected_schedule_sha256=schedule_sha256,
         )
     return _beta_source_binding_for_design(
         design,
@@ -2560,8 +3740,22 @@ def _horizon_parent_binding_for_design(
             or source_index != design.horizon_grid_index
         ):
             raise ValueError("horizon parent aggregate does not bind the same accepted horizon")
-        if design.pilot_phase is None:
-            selection = _mapping(value.get("selection"), name=f"{path}:selection")
+        selection = _mapping(value.get("selection"), name=f"{path}:selection")
+        if design.pilot_phase == "freeze":
+            if (
+                horizon.get("all_seed_length_gates_passed") is not True
+                or selection.get("schema_version") != "pilot-calibration-selection/v1"
+                or selection.get("freeze_validation_required") is not True
+                or selection.get("horizon_accepted") is not True
+                or selection.get("next_horizon_tokens") != design.max_response_tokens
+                or selection.get("selection_accepted") is not None
+                or selection.get("next_action") != "issue_pilot_freeze_identity_at_recommended_beta"
+            ):
+                raise ValueError(
+                    "freeze horizon parent calibration did not accept all length "
+                    "gates or authorize the freeze"
+                )
+        else:
             if selection.get("selection_accepted") is not True:
                 raise ValueError("confirmatory horizon parent was not accepted by the freeze pilot")
     return {
@@ -2581,6 +3775,27 @@ def verify_horizon_parent_aggregate(
 
     config = validate_phase2_config(overlay_config)
     design = Phase2Design.from_phase2_config(config)
+    post_recovery = config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+    authorization_sha256: str | None = None
+    schedule_sha256: str | None = None
+    if post_recovery:
+        authorization_sha256 = _digest(
+            _mapping(
+                config["recovery_success_reference"],
+                name="recovery_success_reference",
+            )["artifact_sha256"],
+            name="recovery_success_reference.artifact_sha256",
+        )
+        schedule_sha256 = _digest(
+            _mapping(
+                _mapping(
+                    config["reward_model"]["optimizer_protocol"],
+                    name="reward_model.optimizer_protocol",
+                )["learning_rate_schedule"],
+                name="reward_model.optimizer_protocol.learning_rate_schedule",
+            )["schedule_sha256"],
+            name="reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256",
+        )
     expected_sha = design.parent_pilot_aggregate_sha256
     if parent_aggregate is None:
         predecessor = None
@@ -2590,6 +3805,9 @@ def verify_horizon_parent_aggregate(
         predecessor = _load_source_aggregate(
             parent_aggregate,
             expected_sha256=expected_sha,
+            expected_post_recovery=post_recovery,
+            expected_authorization_sha256=authorization_sha256,
+            expected_schedule_sha256=schedule_sha256,
         )
     return _horizon_parent_binding_for_design(
         design,
@@ -2642,6 +3860,7 @@ def build_phase2_pilot_aggregate(
             prompts=int(split_sizes["test"]),
             candidates=int(data["num_candidates"]),
             max_prompt_tokens=int(policy["max_prompt_tokens"]),
+            config=config,
         )
         seed = int(seed_result["seed"])
         if seed not in declared_seeds:
@@ -2772,6 +3991,18 @@ def build_phase2_pilot_aggregate(
                 "beta_common": loaded[seed]["beta_common"],
                 "pre_oracle_safety_passed": loaded[seed]["safety_passed"],
                 "observed_by_arm": loaded[seed]["observed_by_arm"],
+                **(
+                    {
+                        "repeated_label_tail_diagnostics": (
+                            _post_recovery_tail_diagnostics_receipt(
+                                loaded[seed],
+                                name=f"seed-{seed}",
+                            )
+                        )
+                    }
+                    if loaded[seed]["post_recovery_head_gate"] is not None
+                    else {}
+                ),
             }
             for seed in declared_seeds
         },

@@ -25,7 +25,11 @@ from pathlib import Path, PurePosixPath
 
 from .contracts import BT_MLE, CANONICAL_LEARNERS, PRORM_PLUS
 from .paths import relative_posix_reference
-from .phase2_config import phase2_design_identity, validate_phase2_config
+from .phase2_config import (
+    PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION,
+    phase2_design_identity,
+    validate_phase2_config,
+)
 from .phase2_rollout import (
     KL_HISTORY_SOURCE,
     KL_ORIENTATION,
@@ -34,6 +38,8 @@ from .phase2_rollout import (
     PHASE2_ROLLOUT_SCHEMA,
     Phase2Design,
 )
+from .phase2_training import compile_phase2_training_settings
+from .repeated_label_diagnostics import validate_repeated_label_tail_diagnostics
 from .repro import atomic_write_json
 from .statistics import PairedMetricsAggregate, aggregate_paired_metrics
 
@@ -218,25 +224,29 @@ def _validate_reward_head_identifiability(
     value: object,
     *,
     config: Mapping[str, object],
+    decay_protocol: bool = False,
     expected_train_prompts: int,
     expected_reward_dimension: int,
     name: str,
 ) -> tuple[dict[str, object], str]:
     evidence = _mapping(value, name=name)
     expected_fields = {
-        "schema_version": "reward-head-identifiability/v1",
+        "schema_version": (
+            "reward-head-identifiability/v2" if decay_protocol else "reward-head-identifiability/v1"
+        ),
         "design_matrix": "canonical_edge_reward_feature_differences",
         "split": "train",
         "shape": [expected_train_prompts, expected_reward_dimension],
         "audit_dtype": "torch.float64",
         "role": config["role"],
         "require_full_column_rank": config["require_full_column_rank"],
-        "bt_unique_finite_optimum_sufficient_condition_only": True,
         "prorm_moment_map_full_rank_proved": False,
         "algorithmic_tie_break": config["algorithmic_tie_break"],
         "minimum_norm_solution_claimed": config["minimum_norm_claim"],
         "test_or_validation_data_accessed": False,
     }
+    if not decay_protocol:
+        expected_fields["bt_unique_finite_optimum_sufficient_condition_only"] = True
     for field, expected in expected_fields.items():
         _expect(evidence.get(field), expected, name=f"{name}.{field}")
     source_dtype = evidence.get("source_dtype")
@@ -323,6 +333,226 @@ def _validate_reward_head_identifiability(
     )
     if required and not full_column_rank:
         raise ValueError(f"{name} failed the design-bound full-column-rank gate")
+    if decay_protocol:
+        _expect(
+            evidence.get("full_design_rank_implication"),
+            (
+                "strict_convexity_at_finite_parameters_and_at_most_one_finite_minimizer;"
+                "does_not_exclude_complete_or_quasi_separation"
+            ),
+            name=f"{name}.full_design_rank_implication",
+        )
+        _expect(
+            evidence.get("full_design_rank_proves_finite_bt_minimizer_exists"),
+            False,
+            name=f"{name}.full_design_rank_proves_finite_bt_minimizer_exists",
+        )
+        mixed = _mapping(
+            evidence.get("mixed_outcome_edge_coercivity_diagnostic"),
+            name=f"{name}.mixed_outcome_edge_coercivity_diagnostic",
+        )
+        expected_mixed_fields = {
+            "schema_version",
+            "definition",
+            "split",
+            "orientation",
+            "num_total_edges",
+            "num_mixed_outcome_edges",
+            "mixed_outcome_mask_sha256",
+            "left_wins_sha256",
+            "num_annotations_sha256",
+            "design_matrix",
+            "shape",
+            "source_dtype",
+            "audit_dtype",
+            "design_matrix_sha256",
+            "relative_rank_tolerance",
+            "absolute_singular_value_threshold",
+            "singular_values_descending",
+            "singular_values_sha256",
+            "largest_singular_value",
+            "smallest_singular_value",
+            "smallest_retained_singular_value",
+            "numerical_rank",
+            "column_dimension",
+            "full_column_rank",
+            "retained_condition_number",
+            "sufficient_condition",
+            "sufficient_condition_observed",
+            "acceptance_gate_applied",
+            "role",
+            "raw_outcomes_serialized",
+            "test_or_validation_data_accessed",
+        }
+        if set(mixed) != expected_mixed_fields:
+            raise ValueError(
+                f"{name}.mixed_outcome_edge_coercivity_diagnostic has an invalid field set"
+            )
+        expected_mixed_scalars = {
+            "schema_version": "bt-mixed-outcome-coercivity-diagnostic/v1",
+            "definition": "0 < left_wins < num_annotations",
+            "split": "train",
+            "orientation": "candidate_0_minus_candidate_1",
+            "num_total_edges": expected_train_prompts,
+            "design_matrix": ("reward_feature_differences_restricted_to_mixed_outcome_edges"),
+            "audit_dtype": "torch.float64",
+            "column_dimension": expected_reward_dimension,
+            "sufficient_condition": (
+                "full_column_rank_implies_coercive_strictly_convex_binomial_bt;"
+                "therefore_a_unique_finite_minimizer_exists"
+            ),
+            "acceptance_gate_applied": False,
+            "role": "train_only_measure_and_interpret",
+            "raw_outcomes_serialized": False,
+            "test_or_validation_data_accessed": False,
+        }
+        for field, expected in expected_mixed_scalars.items():
+            _expect(mixed[field], expected, name=f"{name}.mixed_outcome.{field}")
+        mixed_count = _integer(
+            mixed["num_mixed_outcome_edges"],
+            name=f"{name}.mixed_outcome.num_mixed_outcome_edges",
+        )
+        if mixed_count > expected_train_prompts:
+            raise ValueError(f"{name}.mixed_outcome count exceeds the train edge count")
+        _expect(
+            mixed["shape"],
+            [mixed_count, expected_reward_dimension],
+            name=f"{name}.mixed_outcome.shape",
+        )
+        if mixed["source_dtype"] not in {"torch.float32", "torch.float64"}:
+            raise ValueError(f"{name}.mixed_outcome.source_dtype is invalid")
+        for field in (
+            "mixed_outcome_mask_sha256",
+            "left_wins_sha256",
+            "num_annotations_sha256",
+            "design_matrix_sha256",
+        ):
+            _digest(mixed[field], name=f"{name}.mixed_outcome.{field}")
+        mixed_tolerance = _finite(
+            mixed["relative_rank_tolerance"],
+            name=f"{name}.mixed_outcome.relative_rank_tolerance",
+        )
+        if not _close(mixed_tolerance, relative_tolerance, tolerance=1.0e-15):
+            raise ValueError(f"{name}.mixed_outcome rank tolerance differs from the overlay")
+        raw_spectrum = mixed["singular_values_descending"]
+        if not isinstance(raw_spectrum, list):
+            raise TypeError(f"{name}.mixed_outcome.singular_values_descending must be a list")
+        spectrum = [
+            _finite(
+                item,
+                name=f"{name}.mixed_outcome.singular_values_descending[{index}]",
+                nonnegative=True,
+            )
+            for index, item in enumerate(raw_spectrum)
+        ]
+        if any(left < right for left, right in zip(spectrum, spectrum[1:], strict=False)):
+            raise ValueError(f"{name}.mixed_outcome singular values are not descending")
+        if mixed_count == 0:
+            if spectrum:
+                raise ValueError(f"{name}.mixed_outcome empty design has a spectrum")
+            for field in (
+                "singular_values_sha256",
+                "largest_singular_value",
+                "smallest_singular_value",
+                "smallest_retained_singular_value",
+                "retained_condition_number",
+            ):
+                _expect(mixed[field], None, name=f"{name}.mixed_outcome.{field}")
+            mixed_largest = None
+        else:
+            expected_spectrum_size = min(mixed_count, expected_reward_dimension)
+            if len(spectrum) != expected_spectrum_size:
+                raise ValueError(f"{name}.mixed_outcome spectrum has the wrong length")
+            spectrum_payload = {
+                "dtype": "torch.float64",
+                "shape": [len(spectrum)],
+                "values_descending": spectrum,
+            }
+            _expect(
+                mixed["singular_values_sha256"],
+                _canonical_sha256(spectrum_payload),
+                name=f"{name}.mixed_outcome.singular_values_sha256",
+            )
+            mixed_largest = spectrum[0]
+            _expect(
+                mixed["largest_singular_value"],
+                mixed_largest,
+                name=f"{name}.mixed_outcome.largest_singular_value",
+            )
+            _expect(
+                mixed["smallest_singular_value"],
+                spectrum[-1],
+                name=f"{name}.mixed_outcome.smallest_singular_value",
+            )
+        mixed_threshold = _finite(
+            mixed["absolute_singular_value_threshold"],
+            name=f"{name}.mixed_outcome.absolute_singular_value_threshold",
+            nonnegative=True,
+        )
+        expected_mixed_threshold = 0.0 if mixed_largest is None else mixed_tolerance * mixed_largest
+        if not math.isclose(
+            mixed_threshold,
+            expected_mixed_threshold,
+            rel_tol=1.0e-10,
+            abs_tol=1.0e-14,
+        ):
+            raise ValueError(f"{name}.mixed_outcome singular-value threshold arithmetic failed")
+        mixed_retained = [item for item in spectrum if item > mixed_threshold]
+        mixed_rank = _integer(
+            mixed["numerical_rank"],
+            name=f"{name}.mixed_outcome.numerical_rank",
+        )
+        _expect(mixed_rank, len(mixed_retained), name=f"{name}.mixed_outcome.numerical_rank")
+        mixed_full_rank = mixed_rank == expected_reward_dimension
+        _expect(
+            mixed["full_column_rank"],
+            mixed_full_rank,
+            name=f"{name}.mixed_outcome.full_column_rank",
+        )
+        mixed_smallest_retained = mixed_retained[-1] if mixed_retained else None
+        _expect(
+            mixed["smallest_retained_singular_value"],
+            mixed_smallest_retained,
+            name=f"{name}.mixed_outcome.smallest_retained_singular_value",
+        )
+        expected_mixed_condition = (
+            mixed_largest / mixed_smallest_retained
+            if mixed_largest is not None
+            and mixed_smallest_retained is not None
+            and mixed_smallest_retained > 0.0
+            else None
+        )
+        if expected_mixed_condition is None:
+            _expect(
+                mixed["retained_condition_number"],
+                None,
+                name=f"{name}.mixed_outcome.retained_condition_number",
+            )
+        elif not math.isclose(
+            _finite(
+                mixed["retained_condition_number"],
+                name=f"{name}.mixed_outcome.retained_condition_number",
+            ),
+            expected_mixed_condition,
+            rel_tol=1.0e-10,
+            abs_tol=1.0e-14,
+        ):
+            raise ValueError(f"{name}.mixed_outcome retained condition number is invalid")
+        _expect(
+            mixed["sufficient_condition_observed"],
+            mixed_full_rank,
+            name=f"{name}.mixed_outcome.sufficient_condition_observed",
+        )
+        _expect(
+            evidence.get("bt_unique_finite_minimizer_sufficient_condition"),
+            "mixed_outcome_edge_difference_matrix_full_column_rank",
+            name=f"{name}.bt_unique_finite_minimizer_sufficient_condition",
+        )
+        _expect(
+            evidence.get("bt_unique_finite_minimizer_sufficient_condition_observed"),
+            mixed_full_rank,
+            name=(f"{name}.bt_unique_finite_minimizer_sufficient_condition_observed"),
+        )
     normalized = dict(evidence)
     return normalized, _canonical_sha256(normalized)
 
@@ -331,6 +561,7 @@ def _validate_prorm_moment_map_identifiability(
     value: object,
     *,
     config: Mapping[str, object],
+    decay_protocol: bool = False,
     expected_train_prompts: int,
     expected_policy_dimension: int,
     expected_reward_dimension: int,
@@ -406,9 +637,17 @@ def _validate_prorm_moment_map_identifiability(
         raise ValueError(f"{name} fields differ; missing={missing!r}, extra={extra!r}")
     expected_fields = {
         "schema_version": (
-            "projected-prorm-moment-map-identifiability/v1"
-            if projected
-            else "prorm-moment-map-identifiability/v1"
+            (
+                "projected-prorm-moment-map-identifiability/v2"
+                if projected
+                else "prorm-moment-map-identifiability/v2"
+            )
+            if decay_protocol
+            else (
+                "projected-prorm-moment-map-identifiability/v1"
+                if projected
+                else "prorm-moment-map-identifiability/v1"
+            )
         ),
         "design_matrix": (
             "canonical_train_edge_projected_moment_jacobian"
@@ -653,6 +892,286 @@ def _validate_prorm_moment_map_identifiability(
     return normalized, _canonical_sha256(normalized)
 
 
+def _decay_learning_rate_for_update(
+    optimizer_protocol: Mapping[str, object],
+    update: int,
+    *,
+    name: str,
+) -> float:
+    schedule = _mapping(
+        optimizer_protocol.get("learning_rate_schedule"),
+        name=f"{name}.learning_rate_schedule",
+    )
+    stages = schedule.get("stages")
+    if not isinstance(stages, list):
+        raise TypeError(f"{name}.learning_rate_schedule.stages must be a list")
+    for index, raw_stage in enumerate(stages):
+        stage = _mapping(
+            raw_stage,
+            name=f"{name}.learning_rate_schedule.stages[{index}]",
+        )
+        first = _integer(
+            stage.get("first_update"),
+            name=f"{name}.learning_rate_schedule.stages[{index}].first_update",
+            minimum=1,
+        )
+        last = _integer(
+            stage.get("last_update"),
+            name=f"{name}.learning_rate_schedule.stages[{index}].last_update",
+            minimum=first,
+        )
+        if first <= update <= last:
+            return _finite(
+                stage.get("learning_rate"),
+                name=f"{name}.learning_rate_schedule.stages[{index}].learning_rate",
+            )
+    raise ValueError(f"{name} does not define learning rate for update {update}")
+
+
+def _validate_decay_optimizer_execution(
+    value: object,
+    *,
+    expected_protocol: Mapping[str, object],
+    expected_selected_step: int,
+    expected_selected_head_sha256: str,
+    expected_fixed_snapshot_steps: int,
+    name: str,
+) -> dict[str, object]:
+    execution = _mapping(value, name=name)
+    expected_fields = {
+        "schema_version",
+        "protocol",
+        "optimizer_class",
+        "parameter_count",
+        "fresh_optimizer_state_before_first_update",
+        "reward_head_dtype_observed",
+        "first_order_audit_dtype_required",
+        "microbatch_order",
+        "one_optimizer_update_per_step",
+        "learning_rate_set_immediately_before_every_update",
+        "single_optimizer_instance_for_all_updates",
+        "optimizer_state_reset_at_lr_milestone",
+        "adamw_moments_preserved_at_learning_rate_boundaries",
+        "boundary_transitions",
+        "completed_updates_observed",
+        "per_update_state_checks",
+        "selected_primary_optimizer_state_restored_without_reconstruction",
+        "selected_primary_optimizer_state_restored_and_verified",
+        "selected_optimizer_object_identity_preserved",
+        "selected_optimizer_moments_restored_and_verified",
+        "selected_head_sha256",
+        "restored_head_sha256",
+        "selected_optimizer_state_sha256",
+        "restored_optimizer_state_sha256",
+        "selected_checkpoint_optimizer_state_dict_sha256",
+        "restored_optimizer_state_dict_sha256",
+        "selected_checkpoint_sha256",
+        "test_or_validation_data_accessed",
+    }
+    if set(execution) != expected_fields:
+        missing = sorted(expected_fields - set(execution))
+        extra = sorted(set(execution) - expected_fields)
+        raise ValueError(f"{name} fields differ; missing={missing!r}, extra={extra!r}")
+    expected_scalars = {
+        "schema_version": "deterministic-adamw-lr-decay-execution/v2",
+        "optimizer_class": "torch.optim.AdamW",
+        "parameter_count": 1,
+        "fresh_optimizer_state_before_first_update": True,
+        "reward_head_dtype_observed": "torch.float32",
+        "first_order_audit_dtype_required": "float64",
+        "microbatch_order": ("canonical_edge_order_contiguous_ascending_no_shuffle"),
+        "one_optimizer_update_per_step": True,
+        "learning_rate_set_immediately_before_every_update": True,
+        "single_optimizer_instance_for_all_updates": True,
+        "optimizer_state_reset_at_lr_milestone": False,
+        "adamw_moments_preserved_at_learning_rate_boundaries": True,
+        "selected_primary_optimizer_state_restored_without_reconstruction": True,
+        "selected_primary_optimizer_state_restored_and_verified": True,
+        "selected_optimizer_object_identity_preserved": True,
+        "selected_optimizer_moments_restored_and_verified": True,
+        "test_or_validation_data_accessed": False,
+    }
+    for field, expected in expected_scalars.items():
+        _expect(execution[field], expected, name=f"{name}.{field}")
+    protocol = _mapping(execution["protocol"], name=f"{name}.protocol")
+    if dict(protocol) != dict(expected_protocol):
+        raise ValueError(f"{name}.protocol does not match the adopted overlay protocol")
+    completed = _integer(
+        execution["completed_updates_observed"],
+        name=f"{name}.completed_updates_observed",
+        minimum=max(
+            expected_selected_step,
+            expected_fixed_snapshot_steps,
+            int(expected_protocol["legacy_constant_lr_boundary_snapshot_steps"]),
+        ),
+    )
+    schedule = _mapping(
+        expected_protocol["learning_rate_schedule"],
+        name="overlay.reward_model.optimizer_protocol.learning_rate_schedule",
+    )
+    stages = schedule["stages"]
+    if not isinstance(stages, list) or not stages:
+        raise ValueError("overlay decay schedule has no stages")
+    maximum_update = _integer(
+        _mapping(stages[-1], name="overlay decay final stage")["last_update"],
+        name="overlay decay final stage.last_update",
+        minimum=1,
+    )
+    if completed > maximum_update:
+        raise ValueError(f"{name}.completed_updates_observed exceeds the frozen schedule")
+
+    state_checks = _mapping(
+        execution["per_update_state_checks"],
+        name=f"{name}.per_update_state_checks",
+    )
+    expected_state_fields = {
+        "schema_version",
+        "before_update_checks",
+        "after_update_checks",
+        "first_pre_update_state_empty",
+        "completed_updates_covered",
+        "check_sequence_sha256",
+        "all_updates_checked_before_and_after",
+        "all_subsequent_pre_update_scalar_steps_exact",
+        "all_post_update_scalar_steps_exact",
+        "exp_avg_and_exp_avg_sq_shape_dtype_device_valid",
+    }
+    if set(state_checks) != expected_state_fields:
+        raise ValueError(f"{name}.per_update_state_checks has an invalid field set")
+    expected_state_scalars = {
+        "schema_version": "recovery-adamw-per-update-state-checks/v1",
+        "before_update_checks": completed,
+        "after_update_checks": completed,
+        "first_pre_update_state_empty": True,
+        "completed_updates_covered": completed,
+        "all_updates_checked_before_and_after": True,
+        "all_subsequent_pre_update_scalar_steps_exact": True,
+        "all_post_update_scalar_steps_exact": True,
+        "exp_avg_and_exp_avg_sq_shape_dtype_device_valid": True,
+    }
+    for field, expected in expected_state_scalars.items():
+        _expect(state_checks[field], expected, name=f"{name}.per_update_state_checks.{field}")
+    _digest(
+        state_checks["check_sequence_sha256"],
+        name=f"{name}.per_update_state_checks.check_sequence_sha256",
+    )
+
+    transitions = execution["boundary_transitions"]
+    if not isinstance(transitions, list):
+        raise TypeError(f"{name}.boundary_transitions must be a list")
+    expected_transitions: list[tuple[int, float, float]] = []
+    for previous, current in zip(stages, stages[1:], strict=False):
+        previous_stage = _mapping(previous, name="overlay decay previous stage")
+        current_stage = _mapping(current, name="overlay decay current stage")
+        next_update = _integer(
+            current_stage["first_update"],
+            name="overlay decay current stage.first_update",
+            minimum=2,
+        )
+        if next_update <= completed:
+            expected_transitions.append(
+                (
+                    next_update,
+                    _finite(
+                        previous_stage["learning_rate"],
+                        name="overlay decay previous stage.learning_rate",
+                    ),
+                    _finite(
+                        current_stage["learning_rate"],
+                        name="overlay decay current stage.learning_rate",
+                    ),
+                )
+            )
+    if len(transitions) != len(expected_transitions):
+        raise ValueError(f"{name}.boundary_transitions does not cover the executed schedule")
+    for index, (raw, expected) in enumerate(zip(transitions, expected_transitions, strict=True)):
+        transition = _mapping(raw, name=f"{name}.boundary_transitions[{index}]")
+        if set(transition) != {
+            "next_update",
+            "previous_learning_rate",
+            "new_learning_rate",
+            "moment_state_sha256_before_lr_assignment",
+            "moment_state_sha256_after_lr_assignment",
+            "same_optimizer_instance",
+            "moments_preserved",
+        }:
+            raise ValueError(f"{name}.boundary_transitions[{index}] has invalid fields")
+        _expect(
+            transition["next_update"],
+            expected[0],
+            name=f"{name}.boundary_transitions[{index}].next_update",
+        )
+        for field, expected_rate in (
+            ("previous_learning_rate", expected[1]),
+            ("new_learning_rate", expected[2]),
+        ):
+            if not _close(
+                _finite(
+                    transition[field],
+                    name=f"{name}.boundary_transitions[{index}].{field}",
+                ),
+                expected_rate,
+                tolerance=1.0e-15,
+            ):
+                raise ValueError(
+                    f"{name}.boundary_transitions[{index}].{field} "
+                    "does not match the frozen schedule"
+                )
+        before = _digest(
+            transition["moment_state_sha256_before_lr_assignment"],
+            name=f"{name}.boundary_transitions[{index}].moment_state_before",
+        )
+        after = _digest(
+            transition["moment_state_sha256_after_lr_assignment"],
+            name=f"{name}.boundary_transitions[{index}].moment_state_after",
+        )
+        if before != after:
+            raise ValueError(f"{name}.boundary_transitions[{index}] reset AdamW moments")
+        _expect(
+            transition["same_optimizer_instance"],
+            True,
+            name=f"{name}.boundary_transitions[{index}].same_optimizer_instance",
+        )
+        _expect(
+            transition["moments_preserved"],
+            True,
+            name=f"{name}.boundary_transitions[{index}].moments_preserved",
+        )
+
+    _expect(
+        execution["selected_head_sha256"],
+        expected_selected_head_sha256,
+        name=f"{name}.selected_head_sha256",
+    )
+    _expect(
+        execution["restored_head_sha256"],
+        expected_selected_head_sha256,
+        name=f"{name}.restored_head_sha256",
+    )
+    for selected, restored in (
+        ("selected_optimizer_state_sha256", "restored_optimizer_state_sha256"),
+        (
+            "selected_checkpoint_optimizer_state_dict_sha256",
+            "restored_optimizer_state_dict_sha256",
+        ),
+    ):
+        selected_digest = _digest(execution[selected], name=f"{name}.{selected}")
+        restored_digest = _digest(execution[restored], name=f"{name}.{restored}")
+        if selected_digest != restored_digest:
+            raise ValueError(f"{name} restored optimizer state differs from selection")
+    _digest(
+        execution["selected_checkpoint_sha256"],
+        name=f"{name}.selected_checkpoint_sha256",
+    )
+    return {
+        "passed": True,
+        "completed_updates_observed": completed,
+        "schedule_sha256": schedule["schedule_sha256"],
+        "per_update_state_checks_passed": True,
+        "selected_optimizer_state_restored_and_verified": True,
+    }
+
+
 def _validate_first_order_convergence(
     value: object,
     *,
@@ -663,8 +1182,10 @@ def _validate_first_order_convergence(
     expected_fixed_snapshot_steps: int,
     numeric_tolerances: Mapping[str, object],
     adaptive_convergence: Mapping[str, object],
+    expected_optimizer_protocol: Mapping[str, object] | None = None,
     name: str,
 ) -> dict[str, object]:
+    decay_protocol = expected_optimizer_protocol is not None
     ratio_tolerance = _finite(
         numeric_tolerances["outer_relative_gradient_ratio"],
         name=f"{_NUMERIC_GATE_CONFIG_PATH}.outer_relative_gradient_ratio",
@@ -712,30 +1233,45 @@ def _validate_first_order_convergence(
         tolerance=1.0e-15,
     ):
         raise ValueError("numeric and adaptive outer gradient-ratio tolerances disagree")
+    convergence_keys = {
+        "schema_version",
+        "objective",
+        "converged",
+        "fail_closed",
+        "spec",
+        "initial_zero_head_measurement",
+        "checks",
+        "selected_primary_step",
+        "selected_primary_head_sha256",
+        "consecutive_threshold_passes_at_selection",
+        "final_gate",
+        "fixed_step_compute_matched_snapshot",
+        "fixed_step_snapshot_steps",
+        "fixed_step_snapshot_is_not_primary_selection",
+        "solution_identification",
+        "test_or_validation_data_accessed",
+    }
+    if decay_protocol:
+        convergence_keys.update(
+            {
+                "gradient_ratio_formula",
+                "legacy_constant_lr_boundary_snapshot",
+                "optimizer_protocol_execution",
+            }
+        )
     convergence = _required(
         value,
         name=name,
-        keys={
-            "schema_version",
-            "objective",
-            "converged",
-            "fail_closed",
-            "spec",
-            "initial_zero_head_measurement",
-            "checks",
-            "selected_primary_step",
-            "selected_primary_head_sha256",
-            "consecutive_threshold_passes_at_selection",
-            "final_gate",
-            "fixed_step_compute_matched_snapshot",
-            "fixed_step_snapshot_steps",
-            "fixed_step_snapshot_is_not_primary_selection",
-            "solution_identification",
-            "test_or_validation_data_accessed",
-        },
+        keys=convergence_keys,
     )
+    if decay_protocol and set(convergence) != convergence_keys:
+        raise ValueError(f"{name} v2 evidence must contain exactly the audited field set")
     expected_scalars = {
-        "schema_version": "objective-first-order-convergence/v1",
+        "schema_version": (
+            "objective-first-order-convergence/v2"
+            if decay_protocol
+            else "objective-first-order-convergence/v1"
+        ),
         "objective": expected_objective_name,
         "converged": True,
         "fail_closed": True,
@@ -752,7 +1288,11 @@ def _validate_first_order_convergence(
     )
     spec = _mapping(convergence["spec"], name=f"{name}.spec")
     expected_spec = {
-        "schema_version": "objective-first-order-convergence-spec/v1",
+        "schema_version": (
+            "objective-first-order-convergence-spec/v2"
+            if decay_protocol
+            else "objective-first-order-convergence-spec/v1"
+        ),
         "gradient_ratio_tolerance": ratio_tolerance,
         "min_steps": min_steps,
         "max_steps": max_steps,
@@ -764,6 +1304,10 @@ def _validate_first_order_convergence(
         "denominator": "exact_zero_initialization_gradient_l2_norm",
         "validation_or_test_selection": False,
     }
+    if decay_protocol:
+        expected_spec["optimizer_protocol"] = dict(expected_optimizer_protocol)
+        if set(spec) != set(expected_spec):
+            raise ValueError(f"{name}.spec v2 fields differ from the adopted protocol")
     for field, expected in expected_spec.items():
         _expect(spec.get(field), expected, name=f"{name}.spec.{field}")
     selected_step = _integer(
@@ -793,6 +1337,12 @@ def _validate_first_order_convergence(
         name=f"{name}.initial_zero_head_measurement.gradient_l2_norm",
         nonnegative=True,
     )
+    if decay_protocol:
+        _expect(
+            initial.get("audit_dtype"),
+            "float64",
+            name=f"{name}.initial_zero_head_measurement.audit_dtype",
+        )
     if not math.isclose(
         initial_objective,
         expected_initial_objective,
@@ -816,6 +1366,26 @@ def _validate_first_order_convergence(
         final_gate.get("measurement"),
         name=f"{name}.final_gate.measurement",
     )
+    if decay_protocol:
+        _expect(
+            final_measurement.get("audit_dtype"),
+            "float64",
+            name=f"{name}.final_gate.measurement.audit_dtype",
+        )
+        expected_selected_lr = _decay_learning_rate_for_update(
+            expected_optimizer_protocol,
+            selected_step,
+            name="overlay.reward_model.optimizer_protocol",
+        )
+        if not _close(
+            _finite(
+                final_gate.get("learning_rate_at_selected_iterate"),
+                name=f"{name}.final_gate.learning_rate_at_selected_iterate",
+            ),
+            expected_selected_lr,
+            tolerance=1.0e-15,
+        ):
+            raise ValueError(f"{name}.final_gate selected learning rate is invalid")
     final_objective = _finite(
         final_measurement.get("objective"),
         name=f"{name}.final_gate.measurement.objective",
@@ -864,6 +1434,82 @@ def _validate_first_order_convergence(
         for check in selected_checks
     ):
         raise ValueError(f"{name} does not contain the required consecutive full-data checks")
+    if decay_protocol:
+        schedule_sha256 = _mapping(
+            expected_optimizer_protocol["learning_rate_schedule"],
+            name="overlay.reward_model.optimizer_protocol.learning_rate_schedule",
+        )["schedule_sha256"]
+        previous_step = 0
+        for index, raw_check in enumerate(checks):
+            check = _mapping(raw_check, name=f"{name}.checks[{index}]")
+            required_check_fields = {
+                "step",
+                "post_update",
+                "full_data",
+                "gradient_clipping_applied",
+                "measurement",
+                "gradient_ratio_to_zero_initialization",
+                "eligible_after_min_steps",
+                "threshold_passed",
+                "consecutive_threshold_passes",
+                "learning_rate_used_for_update",
+                "learning_rate_schedule_sha256",
+            }
+            if set(check) != required_check_fields:
+                raise ValueError(f"{name}.checks[{index}] has an invalid v2 field set")
+            step = _integer(
+                check["step"],
+                name=f"{name}.checks[{index}].step",
+                minimum=check_interval,
+            )
+            if step <= previous_step or step % check_interval != 0:
+                raise ValueError(f"{name}.checks are not ordered scheduled checks")
+            previous_step = step
+            measurement = _mapping(
+                check["measurement"],
+                name=f"{name}.checks[{index}].measurement",
+            )
+            _expect(
+                measurement.get("audit_dtype"),
+                "float64",
+                name=f"{name}.checks[{index}].measurement.audit_dtype",
+            )
+            check_gradient = _finite(
+                measurement.get("gradient_l2_norm"),
+                name=f"{name}.checks[{index}].measurement.gradient_l2_norm",
+                nonnegative=True,
+            )
+            check_ratio = _finite(
+                check["gradient_ratio_to_zero_initialization"],
+                name=f"{name}.checks[{index}].gradient_ratio",
+                nonnegative=True,
+            )
+            if not math.isclose(
+                check_ratio,
+                check_gradient / denominator,
+                rel_tol=1.0e-10,
+                abs_tol=1.0e-14,
+            ):
+                raise ValueError(f"{name}.checks[{index}] gradient-ratio arithmetic failed")
+            _expect(
+                check["learning_rate_schedule_sha256"],
+                schedule_sha256,
+                name=f"{name}.checks[{index}].learning_rate_schedule_sha256",
+            )
+            expected_lr = _decay_learning_rate_for_update(
+                expected_optimizer_protocol,
+                step,
+                name="overlay.reward_model.optimizer_protocol",
+            )
+            if not _close(
+                _finite(
+                    check["learning_rate_used_for_update"],
+                    name=f"{name}.checks[{index}].learning_rate_used_for_update",
+                ),
+                expected_lr,
+                tolerance=1.0e-15,
+            ):
+                raise ValueError(f"{name}.checks[{index}] learning rate is not schedule-bound")
 
     fixed = _mapping(
         convergence["fixed_step_compute_matched_snapshot"],
@@ -877,6 +1523,16 @@ def _validate_first_order_convergence(
     }
     for field, expected in expected_fixed.items():
         _expect(fixed.get(field), expected, name=f"{name}.fixed_step.{field}")
+    if decay_protocol:
+        fixed_measurement = _mapping(
+            fixed.get("measurement"),
+            name=f"{name}.fixed_step.measurement",
+        )
+        _expect(
+            fixed_measurement.get("audit_dtype"),
+            "float64",
+            name=f"{name}.fixed_step.measurement.audit_dtype",
+        )
     fixed_history = _mapping(
         fixed.get("history_summary"),
         name=f"{name}.fixed_step.history_summary",
@@ -892,7 +1548,11 @@ def _validate_first_order_convergence(
     )
     expected_identification = {
         "initialization": "exact_zero_head",
-        "tie_break": "zero_initialized_adamw_implicit_bias",
+        "tie_break": (
+            expected_optimizer_protocol["tie_break"]
+            if decay_protocol
+            else "zero_initialized_adamw_implicit_bias"
+        ),
         "validation_or_test_checkpoint_selection": False,
         "objective_value_checkpoint_selection": False,
         "minimum_norm_projection_applied": False,
@@ -918,7 +1578,7 @@ def _validate_first_order_convergence(
         rank_diagnostic.get("evidence"),
         name=f"{name}.solution_identification.optional_objective_rank_diagnostic.evidence",
     )
-    return {
+    result = {
         "passed": True,
         "selected_primary_step": selected_step,
         "initial_gradient_l2_norm": initial_gradient,
@@ -930,6 +1590,74 @@ def _validate_first_order_convergence(
         "numeric_tolerance_design_bound": True,
         "rank_diagnostic_sha256": _canonical_sha256(rank_evidence),
     }
+    if decay_protocol:
+        legacy = _mapping(
+            convergence["legacy_constant_lr_boundary_snapshot"],
+            name=f"{name}.legacy_constant_lr_boundary_snapshot",
+        )
+        legacy_step = _integer(
+            expected_optimizer_protocol["legacy_constant_lr_boundary_snapshot_steps"],
+            name=(
+                "overlay.reward_model.optimizer_protocol.legacy_constant_lr_boundary_snapshot_steps"
+            ),
+            minimum=1,
+        )
+        expected_legacy = {
+            "schema_version": "legacy-constant-lr-boundary-snapshot/v1",
+            "step": legacy_step,
+            "learning_rate_schedule_sha256": schedule_sha256,
+            "role": "immutable_legacy_constant_lr_failure_boundary_diagnostic",
+            "used_as_primary_selection_rule": False,
+            "coincides_with_selected_primary_iterate": selected_step == legacy_step,
+            "test_or_validation_data_accessed": False,
+        }
+        for field, expected in expected_legacy.items():
+            _expect(legacy.get(field), expected, name=f"{name}.legacy_snapshot.{field}")
+        _digest(legacy.get("head_sha256"), name=f"{name}.legacy_snapshot.head_sha256")
+        legacy_measurement = _mapping(
+            legacy.get("measurement"),
+            name=f"{name}.legacy_snapshot.measurement",
+        )
+        _expect(
+            legacy_measurement.get("audit_dtype"),
+            "float64",
+            name=f"{name}.legacy_snapshot.measurement.audit_dtype",
+        )
+        legacy_history = _mapping(
+            legacy.get("history_summary"),
+            name=f"{name}.legacy_snapshot.history_summary",
+        )
+        _expect(
+            legacy_history.get("num_steps"),
+            legacy_step,
+            name=f"{name}.legacy_snapshot.history_summary.num_steps",
+        )
+        expected_legacy_lr = _decay_learning_rate_for_update(
+            expected_optimizer_protocol,
+            legacy_step,
+            name="overlay.reward_model.optimizer_protocol",
+        )
+        if not _close(
+            _finite(
+                legacy.get("learning_rate_used_for_update"),
+                name=f"{name}.legacy_snapshot.learning_rate_used_for_update",
+            ),
+            expected_legacy_lr,
+            tolerance=1.0e-15,
+        ):
+            raise ValueError(f"{name}.legacy_snapshot learning rate is invalid")
+        execution_gate = _validate_decay_optimizer_execution(
+            convergence["optimizer_protocol_execution"],
+            expected_protocol=expected_optimizer_protocol,
+            expected_selected_step=selected_step,
+            expected_selected_head_sha256=expected_head_sha256,
+            expected_fixed_snapshot_steps=expected_fixed_snapshot_steps,
+            name=f"{name}.optimizer_protocol_execution",
+        )
+        result["optimizer_protocol_execution"] = execution_gate
+        result["legacy_constant_lr_boundary_snapshot_verified"] = True
+        result["adopted_schedule_sha256"] = schedule_sha256
+    return result
 
 
 def _objective_decrease_gate(
@@ -996,14 +1724,43 @@ def _pcg_gate(
     value: object,
     *,
     expected_relative_tolerance: float,
+    producer_schema: str,
     name: str,
 ) -> dict[str, object]:
-    pcg = _required(
-        value,
-        name=name,
-        keys={"iterations", "relative_residual", "converged", "reason"},
-    )
+    common_keys = {
+        "iterations",
+        "relative_residual",
+        "converged",
+    }
+    schema_keys = {
+        "training_final": common_keys | {"residual_norm", "cold_start"},
+        "fresh_inner": common_keys
+        | {
+            "residual_norm",
+            "method",
+            "dtype",
+            "cold_start",
+            "warm_start_used",
+        },
+        "trained_direction": common_keys | {"reason"},
+        "natural_direction": common_keys | {"residual_norm", "reason"},
+    }
+    if producer_schema not in schema_keys:
+        raise ValueError(f"{name} uses an unknown PCG producer schema")
+    expected_keys = schema_keys[producer_schema]
+    pcg = _mapping(value, name=name)
+    if set(pcg) != expected_keys:
+        raise ValueError(f"{name} must contain the exact keys {sorted(expected_keys)!r}")
     iterations = _integer(pcg["iterations"], name=f"{name}.iterations")
+    residual_norm = (
+        _finite(
+            pcg["residual_norm"],
+            name=f"{name}.residual_norm",
+            nonnegative=True,
+        )
+        if "residual_norm" in expected_keys
+        else None
+    )
     relative_residual = _finite(
         pcg["relative_residual"],
         name=f"{name}.relative_residual",
@@ -1013,16 +1770,32 @@ def _pcg_gate(
         raise ValueError(f"{name} did not converge")
     if relative_residual > expected_relative_tolerance:
         raise ValueError(f"{name} relative residual exceeds the design-bound PCG tolerance")
-    reason = pcg["reason"]
-    if not isinstance(reason, str) or not reason:
-        raise ValueError(f"{name}.reason must be non-empty")
-    return {
+    if "cold_start" in expected_keys and pcg["cold_start"] is not True:
+        raise ValueError(f"{name} must document the required cold-start solve")
+    if producer_schema == "fresh_inner" and (
+        pcg["method"] != "pcg" or pcg["dtype"] != "float64" or pcg["warm_start_used"] is not False
+    ):
+        raise ValueError(f"{name} fresh-inner solver metadata is invalid")
+    reason: str | None = None
+    if "reason" in expected_keys:
+        reason_value = pcg["reason"]
+        if not isinstance(reason_value, str) or not reason_value:
+            raise ValueError(f"{name}.reason must be non-empty")
+        reason = reason_value
+    result: dict[str, object] = {
         "passed": True,
         "iterations": iterations,
         "relative_residual": relative_residual,
         "design_bound_relative_tolerance": expected_relative_tolerance,
-        "reason": reason,
+        "producer_schema": producer_schema,
     }
+    if residual_norm is not None:
+        result["residual_norm"] = residual_norm
+    if "cold_start" in expected_keys:
+        result["cold_start"] = True
+    if reason is not None:
+        result["reason"] = reason
+    return result
 
 
 def _validate_environment(value: object, *, name: str) -> dict[str, object]:
@@ -1073,35 +1846,44 @@ def _validate_serialized_head(
     pcg_required: bool,
     numeric_tolerances: Mapping[str, object],
     adaptive_convergence: Mapping[str, object],
+    expected_optimizer_protocol: Mapping[str, object] | None,
+    vectors_redacted: bool = False,
     name: str,
 ) -> dict[str, object]:
+    expected_keys = {
+        "arm",
+        "method",
+        "head_dtype",
+        "initial_head_sha256",
+        "head_sha256",
+        "initial_objective",
+        "final_objective",
+        "history_summary",
+        "final_pcg",
+        "first_order_convergence",
+    }
+    if not vectors_redacted:
+        expected_keys.add("head_weight")
     evidence = _required(
         value,
         name=name,
-        keys={
-            "arm",
-            "method",
-            "head_weight",
-            "head_dtype",
-            "initial_head_sha256",
-            "head_sha256",
-            "initial_objective",
-            "final_objective",
-            "history_summary",
-            "final_pcg",
-            "first_order_convergence",
-        },
+        keys=expected_keys,
     )
     _expect(evidence["arm"], expected_arm, name=f"{name}.arm")
     _expect(evidence["method"], expected_method, name=f"{name}.method")
-    raw_weight = evidence["head_weight"]
-    if not isinstance(raw_weight, list) or not raw_weight:
-        raise ValueError(f"{name}.head_weight must be a non-empty list")
-    weight = [
-        _finite(item, name=f"{name}.head_weight[{index}]") for index, item in enumerate(raw_weight)
-    ]
-    if expected_weight is not None and weight != list(expected_weight):
-        raise ValueError(f"{name}.head_weight does not match the deployed fresh head")
+    weight: list[float] | None = None
+    if not vectors_redacted:
+        raw_weight = evidence["head_weight"]
+        if not isinstance(raw_weight, list) or not raw_weight:
+            raise ValueError(f"{name}.head_weight must be a non-empty list")
+        weight = [
+            _finite(item, name=f"{name}.head_weight[{index}]")
+            for index, item in enumerate(raw_weight)
+        ]
+        if expected_weight is not None and weight != list(expected_weight):
+            raise ValueError(f"{name}.head_weight does not match the deployed fresh head")
+    elif expected_weight is not None:
+        raise ValueError(f"{name} cannot compare a redacted head with a serialized weight")
     dtype = evidence["head_dtype"]
     if not isinstance(dtype, str) or not dtype:
         raise ValueError(f"{name}.head_dtype must be non-empty")
@@ -1132,6 +1914,7 @@ def _validate_serialized_head(
         final_pcg = _pcg_gate(
             evidence["final_pcg"],
             expected_relative_tolerance=expected_pcg_tolerance,
+            producer_schema="training_final",
             name=f"{name}.final_pcg",
         )
     convergence_gate = _validate_first_order_convergence(
@@ -1143,6 +1926,7 @@ def _validate_serialized_head(
         expected_fixed_snapshot_steps=expected_outer_steps,
         numeric_tolerances=numeric_tolerances,
         adaptive_convergence=adaptive_convergence,
+        expected_optimizer_protocol=expected_optimizer_protocol,
         name=f"{name}.first_order_convergence",
     )
     if history.get("num_steps") != convergence_gate["selected_primary_step"]:
@@ -1176,25 +1960,31 @@ def _validate_head_training(
     adaptive_convergence: Mapping[str, object],
     identifiability_config: Mapping[str, object],
     reward_model_config: Mapping[str, object],
+    expected_optimizer_protocol: Mapping[str, object] | None,
     exact_soft_label_bt_config: Mapping[str, object],
     design_stage: str,
+    vectors_redacted: bool = False,
     name: str,
 ) -> dict[str, object]:
     """Validate every fresh-head/control field and return auditable gate evidence."""
 
+    head_keys = {
+        "training_arm",
+        "training_design_sha256",
+        "heads_sha256",
+        "audit",
+        "source",
+        "old_phase1_comparison_heads_reused",
+        "test_data_accessed",
+    }
+    if vectors_redacted:
+        head_keys.update({"head_weights_serialized", "audit_vector_fields_redacted"})
+    else:
+        head_keys.add("head_weights")
     head = _required(
         value,
         name=name,
-        keys={
-            "training_arm",
-            "training_design_sha256",
-            "heads_sha256",
-            "head_weights",
-            "audit",
-            "source",
-            "old_phase1_comparison_heads_reused",
-            "test_data_accessed",
-        },
+        keys=head_keys,
     )
     _expect(
         head["training_arm"],
@@ -1216,27 +2006,53 @@ def _validate_head_training(
     if head["test_data_accessed"] is not False:
         raise ValueError(f"{name} accessed test data")
 
-    weights = _mapping(head["head_weights"], name=f"{name}.head_weights")
-    if set(weights) != set(CANONICAL_LEARNERS):
-        raise ValueError(f"{name}.head_weights must contain exactly {CANONICAL_LEARNERS!r}")
     normalized: dict[str, list[float]] = {}
-    dimensions: set[int] = set()
-    for learner in CANONICAL_LEARNERS:
-        raw_weight = weights[learner]
-        if not isinstance(raw_weight, list) or not raw_weight:
-            raise ValueError(f"{name}.head_weights.{learner} must be a non-empty list")
-        weight = [
-            _finite(item, name=f"{name}.head_weights.{learner}[{index}]")
-            for index, item in enumerate(raw_weight)
-        ]
-        normalized[learner] = weight
-        dimensions.add(len(weight))
-    if len(dimensions) != 1:
-        raise ValueError(f"{name} learner heads must have the same dimension")
-    expected_heads_sha = _canonical_sha256(normalized)
     recorded_heads_sha = _digest(head["heads_sha256"], name=f"{name}.heads_sha256")
-    if recorded_heads_sha != expected_heads_sha:
-        raise ValueError(f"{name}.heads_sha256 does not match the fresh head weights")
+    if vectors_redacted:
+        _expect(
+            head["head_weights_serialized"],
+            False,
+            name=f"{name}.head_weights_serialized",
+        )
+        expected_redactions = sorted(
+            {
+                "head_weight",
+                "head_weights",
+                "direction",
+                "natural_direction",
+                "displacement",
+                "oracle_displacement",
+                "moment",
+                "operator_direction",
+                "projection_matrix",
+                "true_rewards",
+            }
+        )
+        _expect(
+            head["audit_vector_fields_redacted"],
+            expected_redactions,
+            name=f"{name}.audit_vector_fields_redacted",
+        )
+    else:
+        weights = _mapping(head["head_weights"], name=f"{name}.head_weights")
+        if set(weights) != set(CANONICAL_LEARNERS):
+            raise ValueError(f"{name}.head_weights must contain exactly {CANONICAL_LEARNERS!r}")
+        dimensions: set[int] = set()
+        for learner in CANONICAL_LEARNERS:
+            raw_weight = weights[learner]
+            if not isinstance(raw_weight, list) or not raw_weight:
+                raise ValueError(f"{name}.head_weights.{learner} must be a non-empty list")
+            weight = [
+                _finite(item, name=f"{name}.head_weights.{learner}[{index}]")
+                for index, item in enumerate(raw_weight)
+            ]
+            normalized[learner] = weight
+            dimensions.add(len(weight))
+        if len(dimensions) != 1:
+            raise ValueError(f"{name} learner heads must have the same dimension")
+        expected_heads_sha = _canonical_sha256(normalized)
+        if recorded_heads_sha != expected_heads_sha:
+            raise ValueError(f"{name}.heads_sha256 does not match the fresh head weights")
 
     audit = _required(
         head["audit"],
@@ -1259,9 +2075,10 @@ def _validate_head_training(
             "isolation",
         },
     )
+    decay_protocol = expected_optimizer_protocol is not None
     _expect(
         audit["schema_version"],
-        "phase2-fresh-head-training/v2",
+        ("phase2-fresh-head-training/v3" if decay_protocol else "phase2-fresh-head-training/v2"),
         name=f"{name}.audit.schema_version",
     )
     _expect(
@@ -1304,35 +2121,43 @@ def _validate_head_training(
     for key, expected in expected_isolation.items():
         _expect(isolation.get(key), expected, name=f"{name}.audit.isolation.{key}")
 
+    require_tail_diagnostics = (
+        decay_protocol
+        and expected_optimizer_protocol is not None
+        and expected_optimizer_protocol.get("schema_version") == "deterministic-adamw-lr-decay/v1"
+    )
+    label_keys = {
+        "namespace",
+        "base_seed",
+        "derived_seed",
+        "derivation_sha256",
+        "generator_device",
+        "initial_state_sha256",
+        "final_state_sha256",
+        "oracle_reward_sha256",
+        "canonical_probability_sha256",
+        "replicate_count_sha256",
+        "replicate_win_sha256",
+        "replicate_h_sha256",
+        "mean_h_sha256",
+        "label_stream_sha256",
+        "realized_total_annotations",
+        "realized_annotations_per_edge",
+        "expected_annotations_per_edge",
+        "num_edges",
+        "num_replicates",
+        "gamma",
+        "bt_target",
+        "prorm_target",
+        "raw_labels_retained",
+        "raw_node_rewards_retained",
+    }
+    if require_tail_diagnostics:
+        label_keys.add("repeated_label_tail_diagnostics")
     label = _required(
         audit["label_stream"],
         name=f"{name}.audit.label_stream",
-        keys={
-            "namespace",
-            "base_seed",
-            "derived_seed",
-            "derivation_sha256",
-            "generator_device",
-            "initial_state_sha256",
-            "final_state_sha256",
-            "oracle_reward_sha256",
-            "canonical_probability_sha256",
-            "replicate_count_sha256",
-            "replicate_win_sha256",
-            "replicate_h_sha256",
-            "mean_h_sha256",
-            "label_stream_sha256",
-            "realized_total_annotations",
-            "realized_annotations_per_edge",
-            "expected_annotations_per_edge",
-            "num_edges",
-            "num_replicates",
-            "gamma",
-            "bt_target",
-            "prorm_target",
-            "raw_labels_retained",
-            "raw_node_rewards_retained",
-        },
+        keys=label_keys,
     )
     _expect(
         label["namespace"],
@@ -1428,6 +2253,21 @@ def _validate_head_training(
         tolerance=1.0e-12,
     ):
         raise ValueError(f"{name}.audit.label_stream expected R=4 cost must equal 40")
+    tail_diagnostics: dict[str, object] | None = None
+    if "repeated_label_tail_diagnostics" in label:
+        tail_diagnostics = validate_repeated_label_tail_diagnostics(
+            label["repeated_label_tail_diagnostics"],
+            expected_num_edges=num_edges,
+            replicate_count_sha256=label_digests["replicate_count_sha256"],
+            replicate_h_sha256=label_digests["replicate_h_sha256"],
+            mean_h_sha256=label_digests["mean_h_sha256"],
+            name=f"{name}.audit.label_stream.repeated_label_tail_diagnostics",
+        )
+    elif require_tail_diagnostics:
+        raise ValueError(
+            f"{name}.audit.label_stream is missing required post-recovery "
+            "repeated_label_tail_diagnostics"
+        )
     label_payload = {
         "namespace": label["namespace"],
         "base_seed": label["base_seed"],
@@ -1442,6 +2282,10 @@ def _validate_head_training(
         "mean_h_sha256": label["mean_h_sha256"],
         "realized_total_annotations": total_annotations,
     }
+    if tail_diagnostics is not None:
+        label_payload["repeated_label_tail_diagnostics_sha256"] = tail_diagnostics[
+            "diagnostics_sha256"
+        ]
     if _canonical_sha256(label_payload) != label_digests["label_stream_sha256"]:
         raise ValueError(f"{name}.audit.label_stream_sha256 does not bind its payload")
 
@@ -1458,12 +2302,14 @@ def _validate_head_training(
             expected_arm="r4_independent_gamma_0.9",
             expected_method=learner,
             expected_objective_name=learner,
-            expected_weight=normalized[learner],
+            expected_weight=(None if vectors_redacted else normalized[learner]),
             expected_outer_steps=expected_outer_steps,
             expected_pcg_tolerance=expected_pcg_tolerance,
             pcg_required=(learner == PRORM_PLUS),
             numeric_tolerances=numeric_tolerances,
             adaptive_convergence=adaptive_convergence,
+            expected_optimizer_protocol=expected_optimizer_protocol,
+            vectors_redacted=vectors_redacted,
             name=f"{name}.audit.primary_heads.{learner}",
         )
     if primary[BT_MLE]["initial_head_sha256"] != primary[PRORM_PLUS]["initial_head_sha256"]:
@@ -1520,6 +2366,7 @@ def _validate_head_training(
     identifiability, identifiability_sha = _validate_reward_head_identifiability(
         primary_audit["reward_head_identifiability"],
         config=identifiability_config,
+        decay_protocol=decay_protocol,
         expected_train_prompts=expected_train_prompts,
         expected_reward_dimension=reward_dimension,
         name=f"{name}.audit.primary_optimization_audit.reward_head_identifiability",
@@ -1527,6 +2374,7 @@ def _validate_head_training(
     moment_map, moment_map_sha = _validate_prorm_moment_map_identifiability(
         primary_audit["prorm_moment_map_identifiability"],
         config=identifiability_config,
+        decay_protocol=decay_protocol,
         expected_train_prompts=expected_train_prompts,
         expected_policy_dimension=policy_dimension,
         expected_reward_dimension=reward_dimension,
@@ -1597,6 +2445,7 @@ def _validate_head_training(
             _pcg_gate(
                 inner_pcg,
                 expected_relative_tolerance=expected_pcg_tolerance,
+                producer_schema="fresh_inner",
                 name=f"{name}.audit.primary_optimization_audit.learners.{learner}.fresh_inner_pcg",
             )
         primary_outer_gates[learner] = _objective_decrease_gate(
@@ -1670,6 +2519,8 @@ def _validate_head_training(
         pcg_required=True,
         numeric_tolerances=numeric_tolerances,
         adaptive_convergence=adaptive_convergence,
+        expected_optimizer_protocol=expected_optimizer_protocol,
+        vectors_redacted=vectors_redacted,
         name=f"{name}.audit.exact_margin_control.head",
     )
     _expect(
@@ -1719,6 +2570,7 @@ def _validate_head_training(
     _pcg_gate(
         exact_inner_pcg,
         expected_relative_tolerance=expected_pcg_tolerance,
+        producer_schema="fresh_inner",
         name=f"{name}.audit.exact_margin_control.optimization_audit.learner.fresh_inner_pcg",
     )
     exact_outer_gate = _objective_decrease_gate(
@@ -1764,6 +2616,7 @@ def _validate_head_training(
     exact_direction_pcg = _pcg_gate(
         exact_gap.get("trained_direction_pcg"),
         expected_relative_tolerance=expected_pcg_tolerance,
+        producer_schema="trained_direction",
         name=f"{name}.audit.exact_margin_control.reward_class_and_optimizer_gap"
         ".trained_direction_pcg",
     )
@@ -1855,6 +2708,7 @@ def _validate_head_training(
     direct_pcg = _pcg_gate(
         native_direction.get("pcg"),
         expected_relative_tolerance=expected_pcg_tolerance,
+        producer_schema="natural_direction",
         name=f"{name}.audit.direct_oracle_identity.native_oracle_direction.pcg",
     )
 
@@ -1994,6 +2848,7 @@ def _validate_head_training(
     projected_moment_map, projected_moment_map_sha = _validate_prorm_moment_map_identifiability(
         low.get("projected_prorm_moment_map_identifiability"),
         config=identifiability_config,
+        decay_protocol=decay_protocol,
         expected_train_prompts=expected_train_prompts,
         expected_policy_dimension=expected_low_dimension,
         expected_reward_dimension=reward_dimension,
@@ -2016,6 +2871,8 @@ def _validate_head_training(
         pcg_required=False,
         numeric_tolerances=numeric_tolerances,
         adaptive_convergence=adaptive_convergence,
+        expected_optimizer_protocol=expected_optimizer_protocol,
+        vectors_redacted=vectors_redacted,
         name=f"{name}.audit.low_dimensional_control.head",
     )
     _expect(
@@ -2148,6 +3005,8 @@ def _validate_head_training(
         pcg_required=False,
         numeric_tolerances=numeric_tolerances,
         adaptive_convergence=adaptive_convergence,
+        expected_optimizer_protocol=expected_optimizer_protocol,
+        vectors_redacted=vectors_redacted,
         name=f"{name}.audit.exact_soft_label_bt_control.head",
     )
     _expect(
@@ -2495,6 +3354,16 @@ def _validate_head_training(
             "minimum_norm_solution_claimed": False,
         },
     }
+    if tail_diagnostics is not None:
+        gate_evidence["r4_repeated_labels"]["repeated_label_tail_diagnostics"] = {
+            "schema_version": tail_diagnostics["schema_version"],
+            "diagnostics_sha256": tail_diagnostics["diagnostics_sha256"],
+            "scalar_only": True,
+            "descriptive_only": True,
+            "used_for_clipping": False,
+            "used_for_selection": False,
+            "used_for_gating": False,
+        }
     return {
         "training_design_sha256": design_sha256,
         "heads_sha256": recorded_heads_sha,
@@ -2502,9 +3371,216 @@ def _validate_head_training(
             learner: primary[learner]["head_sha256"] for learner in CANONICAL_LEARNERS
         },
         "heldout_head_sha256": {
-            learner: _canonical_sha256(normalized[learner]) for learner in CANONICAL_LEARNERS
+            learner: (
+                primary[learner]["head_sha256"]
+                if vectors_redacted
+                else _canonical_sha256(normalized[learner])
+            )
+            for learner in CANONICAL_LEARNERS
         },
         "gate_evidence": gate_evidence,
+    }
+
+
+def validate_post_recovery_pilot_head_training(
+    value: object,
+    *,
+    config: Mapping[str, object],
+    design_sha256: str,
+    seed: int,
+    train_oracle_reward_sha256: str,
+    name: str = "head_training",
+) -> dict[str, object]:
+    """Deep-validate a vector-redacted post-recovery pilot training audit.
+
+    Pilot results intentionally omit train-time vectors.  This entry point
+    applies the same five-head objective, identifiability, convergence, and
+    adopted AdamW schedule validators used by the full Phase-2 aggregate while
+    requiring the exact redaction envelope emitted by ``phase2_rollout``.
+    """
+
+    validated = validate_phase2_config(config)
+    if validated["schema_version"] != PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION:
+        raise ValueError("deep redacted pilot-head validation requires the post-recovery schema")
+    design = _mapping(validated["design"], name="overlay.design")
+    if design.get("stage") != "pilot" or design.get("pilot_phase") not in {
+        "calibration",
+        "freeze",
+    }:
+        raise ValueError(
+            "deep redacted pilot-head validation requires a calibration or freeze pilot"
+        )
+    _digest(design_sha256, name="design_sha256")
+    _digest(train_oracle_reward_sha256, name="train_oracle_reward_sha256")
+    run = _mapping(validated["run"], name="overlay.run")
+    split_sizes = _mapping(run["split_sizes"], name="overlay.run.split_sizes")
+    data = _mapping(validated["data"], name="overlay.data")
+    reward_model = _mapping(validated["reward_model"], name="overlay.reward_model")
+    optimizer_protocol = _mapping(
+        reward_model["optimizer_protocol"],
+        name="overlay.reward_model.optimizer_protocol",
+    )
+    controls = _mapping(
+        validated["positive_controls"],
+        name="overlay.positive_controls",
+    )
+    low = _mapping(
+        controls["low_dimensional_tangent"],
+        name="overlay.positive_controls.low_dimensional_tangent",
+    )
+    objective = _mapping(validated["objective"], name="overlay.objective")
+    ridge = _mapping(
+        _mapping(
+            objective["full_tangent"],
+            name="overlay.objective.full_tangent",
+        )["ridge"],
+        name="overlay.objective.full_tangent.ridge",
+    )
+    annotations = _mapping(validated["annotations"], name="overlay.annotations")
+    forbidden = {
+        "head_weight",
+        "head_weights",
+        "direction",
+        "natural_direction",
+        "displacement",
+        "oracle_displacement",
+        "moment",
+        "operator_direction",
+        "projection_matrix",
+        "true_rewards",
+    }
+
+    def nested_keys(item: object) -> set[str]:
+        if isinstance(item, Mapping):
+            keys = {str(key) for key in item}
+            for child in item.values():
+                keys.update(nested_keys(child))
+            return keys
+        if isinstance(item, list):
+            keys: set[str] = set()
+            for child in item:
+                keys.update(nested_keys(child))
+            return keys
+        return set()
+
+    leaked = forbidden.intersection(nested_keys(value))
+    if leaked:
+        raise ValueError(f"{name} contains forbidden serialized vectors: {sorted(leaked)!r}")
+
+    head = _mapping(value, name=name)
+    audit = _mapping(head.get("audit"), name=f"{name}.audit")
+    compiled_settings = compile_phase2_training_settings(validated)
+    _expect(
+        audit.get("training_settings_sha256"),
+        compiled_settings.sha256,
+        name=f"{name}.audit.training_settings_sha256",
+    )
+    gate = _validate_head_training(
+        value,
+        design_sha256=design_sha256,
+        seed=seed,
+        train_oracle_reward_sha256=train_oracle_reward_sha256,
+        expected_train_prompts=_integer(
+            split_sizes["train"],
+            name="overlay.run.split_sizes.train",
+            minimum=2,
+        ),
+        expected_candidates=_integer(
+            data["num_candidates"],
+            name="overlay.data.num_candidates",
+            minimum=1,
+        ),
+        expected_outer_steps=_integer(
+            reward_model["outer_steps"],
+            name="overlay.reward_model.outer_steps",
+            minimum=1,
+        ),
+        expected_low_dimension=_integer(
+            low["dimension"],
+            name="overlay.positive_controls.low_dimensional_tangent.dimension",
+            minimum=1,
+        ),
+        expected_projection_namespace=str(low["seed_namespace"]),
+        expected_eigenvalue_tolerance=_finite(
+            low["relative_eigenvalue_tolerance"],
+            name=(
+                "overlay.positive_controls.low_dimensional_tangent.relative_eigenvalue_tolerance"
+            ),
+        ),
+        expected_pcg_tolerance=_finite(
+            ridge["pcg_tolerance"],
+            name="overlay.objective.full_tangent.ridge.pcg_tolerance",
+        ),
+        prohibit_label_clipping=annotations.get("prohibit_clipping") is True,
+        numeric_tolerances=_mapping(
+            controls["numeric_gate_tolerances"],
+            name="overlay.positive_controls.numeric_gate_tolerances",
+        ),
+        adaptive_convergence=_mapping(
+            reward_model["adaptive_convergence"],
+            name="overlay.reward_model.adaptive_convergence",
+        ),
+        identifiability_config=_mapping(
+            reward_model["identifiability"],
+            name="overlay.reward_model.identifiability",
+        ),
+        reward_model_config=reward_model,
+        expected_optimizer_protocol=optimizer_protocol,
+        exact_soft_label_bt_config=_mapping(
+            controls["exact_soft_label_bt"],
+            name="overlay.positive_controls.exact_soft_label_bt",
+        ),
+        design_stage="pilot",
+        vectors_redacted=True,
+        name=name,
+    )
+    primary_heads = _mapping(audit["primary_heads"], name=f"{name}.audit.primary_heads")
+    serialized_heads = {
+        "primary_bt_mle": primary_heads[BT_MLE],
+        "primary_prorm_plus": primary_heads[PRORM_PLUS],
+        "low_dimensional_prorm_plus": _mapping(
+            audit["low_dimensional_control"],
+            name=f"{name}.audit.low_dimensional_control",
+        )["head"],
+        "exact_margin_prorm_plus": _mapping(
+            audit["exact_margin_control"],
+            name=f"{name}.audit.exact_margin_control",
+        )["head"],
+        "exact_soft_label_bt": _mapping(
+            audit["exact_soft_label_bt_control"],
+            name=f"{name}.audit.exact_soft_label_bt_control",
+        )["head"],
+    }
+    compact_heads: dict[str, dict[str, object]] = {}
+    for head_name, raw_head in serialized_heads.items():
+        convergence = _mapping(
+            _mapping(raw_head, name=f"{name}.{head_name}")["first_order_convergence"],
+            name=f"{name}.{head_name}.first_order_convergence",
+        )
+        execution = _mapping(
+            convergence["optimizer_protocol_execution"],
+            name=f"{name}.{head_name}.optimizer_protocol_execution",
+        )
+        compact_heads[head_name] = {
+            "schedule_sha256": optimizer_protocol["learning_rate_schedule"]["schedule_sha256"],
+            "fresh_zero_head": True,
+            "fresh_optimizer_state": True,
+            "completed_updates_observed": execution["completed_updates_observed"],
+            "per_update_state_checks_passed": True,
+        }
+    return {
+        "schema_version": "post-recovery-pilot-five-head-gate/v1",
+        "passed": True,
+        "training_settings_sha256": compiled_settings.sha256,
+        "heads_sha256": gate["heads_sha256"],
+        "individual_head_sha256": gate["individual_head_sha256"],
+        "gate_evidence": gate["gate_evidence"],
+        "adopted_optimizer_schedule_sha256": optimizer_protocol["learning_rate_schedule"][
+            "schedule_sha256"
+        ],
+        "five_head_adopted_schedule_verified": True,
+        "five_head_training": compact_heads,
+        "vectors_redacted": True,
     }
 
 
@@ -3472,6 +4548,7 @@ def _load_seed_result(
     adaptive_convergence: Mapping[str, object],
     identifiability_config: Mapping[str, object],
     reward_model_config: Mapping[str, object],
+    expected_optimizer_protocol: Mapping[str, object] | None,
     exact_soft_label_bt_config: Mapping[str, object],
     reference_base: Path,
 ) -> _LoadedSeed:
@@ -3602,6 +4679,7 @@ def _load_seed_result(
         adaptive_convergence=adaptive_convergence,
         identifiability_config=identifiability_config,
         reward_model_config=reward_model_config,
+        expected_optimizer_protocol=expected_optimizer_protocol,
         exact_soft_label_bt_config=exact_soft_label_bt_config,
         design_stage=expected_design_stage,
         name=f"{path}:head_training",
@@ -4357,6 +5435,12 @@ def build_common_beta_seed_aggregate(
     data = _mapping(validated["data"], name="overlay.data")
     candidates = _integer(data["num_candidates"], name="overlay.data.num_candidates", minimum=1)
     reward_model = _mapping(validated["reward_model"], name="overlay.reward_model")
+    expected_optimizer_protocol: Mapping[str, object] | None = None
+    if validated["schema_version"] == PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION:
+        expected_optimizer_protocol = _mapping(
+            reward_model["optimizer_protocol"],
+            name="overlay.reward_model.optimizer_protocol",
+        )
     adaptive_convergence = _mapping(
         reward_model["adaptive_convergence"],
         name="overlay.reward_model.adaptive_convergence",
@@ -4451,6 +5535,7 @@ def build_common_beta_seed_aggregate(
             adaptive_convergence=adaptive_convergence,
             identifiability_config=identifiability_config,
             reward_model_config=reward_model,
+            expected_optimizer_protocol=expected_optimizer_protocol,
             exact_soft_label_bt_config=exact_soft_label_bt,
             reference_base=base,
         )
@@ -4702,5 +5787,6 @@ __all__ = [
     "CommonBetaSeedAggregate",
     "Phase2AggregateSource",
     "build_common_beta_seed_aggregate",
+    "validate_post_recovery_pilot_head_training",
     "write_common_beta_seed_aggregate",
 ]

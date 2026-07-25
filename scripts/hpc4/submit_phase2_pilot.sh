@@ -85,6 +85,44 @@ esac
 [[ "${walltime}" =~ ^[0-9]+-[0-9]{2}:[0-9]{2}:[0-9]{2}$|^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] \
   || die "walltime must be HH:MM:SS or D-HH:MM:SS"
 
+# Historical v2 replay remains below unchanged.  A post-recovery v1 overlay
+# is routed into the authorization-bound v3 control plane before any legacy
+# identity parsing can reinterpret it as a v2 pilot.
+if [[ -f "${overlay_input}" ]] \
+  && grep -Eq \
+    '^schema_version:[[:space:]]*prorm-common-beta-post-recovery-experiment/v1[[:space:]]*$' \
+    "${overlay_input}"; then
+  [[ -z "${array_selection}" || "${array_selection}" = "0-2" ]] \
+    || die "post-recovery pilot must submit the exact complete array 0-2"
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+  submitted_base="$(realpath -e -- "${base_input}")" \
+    || die "post-recovery base config cannot be resolved"
+  declared_base="$(
+    PYTHONPATH="${repo_root}/src" python3 - "${overlay_input}" <<'PY'
+import sys
+from smart_reward.phase2_config import load_phase2_config_bundle
+print(load_phase2_config_bundle(sys.argv[1]).base_config_path)
+PY
+  )" || die "could not resolve post-recovery declared base"
+  declared_base="$(realpath -e -- "${declared_base}")" \
+    || die "post-recovery declared base is missing"
+  [[ "${submitted_base}" = "${declared_base}" ]] \
+    || die "submitted base differs from the post-recovery overlay binding"
+  : "${PRORM_PROJECT_ROOT:?PRORM_PROJECT_ROOT is required}"
+  authorization="${PRORM_PROJECT_ROOT}/runs/phase2-recovery-pilot/recovery-success-authorization.json"
+  command=(
+    bash "${repo_root}/scripts/hpc4/submit_phase2_post_recovery_pilot.sh"
+    "${overlay_input}" "${authorization}" "${walltime}"
+  )
+  if [[ -n "${beta_source_aggregate_input}" ]]; then
+    command+=(--beta-source-aggregate "${beta_source_aggregate_input}")
+  fi
+  if [[ -n "${horizon_parent_aggregate_input}" ]]; then
+    command+=(--horizon-parent-aggregate "${horizon_parent_aggregate_input}")
+  fi
+  exec "${command[@]}"
+fi
+
 for variable in $(compgen -e); do
   case "${variable}" in
     APPTAINER*|SINGULARITY*)

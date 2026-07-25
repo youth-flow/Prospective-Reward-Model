@@ -75,6 +75,10 @@ from .phase2_training import (
 from .phase2_training import (
     _canonical_sha256 as _training_canonical_sha256,
 )
+from .repeated_label_diagnostics import (
+    build_repeated_label_tail_diagnostics,
+    validate_repeated_label_tail_diagnostics,
+)
 from .repro import atomic_write_json
 from .rollout import (
     PolicyDirectionResult,
@@ -265,6 +269,7 @@ class PrimarySensitivityBinding:
     heads_sha256: str
     training_design_sha256: str
     label_stream_sha256: str
+    repeated_label_tail_diagnostics_sha256: str
     transformed_train_rewards_sha256: str
     beta0: float
     relative_ridge0: float
@@ -286,6 +291,7 @@ class PrimarySensitivityBinding:
             "heads_sha256",
             "training_design_sha256",
             "label_stream_sha256",
+            "repeated_label_tail_diagnostics_sha256",
             "transformed_train_rewards_sha256",
             "primary_rollouts_sha256",
         ):
@@ -384,6 +390,23 @@ def load_primary_sensitivity_binding(
         label_stream.get("label_stream_sha256"),
         name="primary.audit.label_stream.label_stream_sha256",
     )
+    tail_diagnostics = validate_repeated_label_tail_diagnostics(
+        label_stream.get("repeated_label_tail_diagnostics"),
+        expected_num_edges=validated["run"]["split_sizes"]["train"],
+        replicate_count_sha256=_digest(
+            label_stream.get("replicate_count_sha256"),
+            name="primary.audit.label_stream.replicate_count_sha256",
+        ),
+        replicate_h_sha256=_digest(
+            label_stream.get("replicate_h_sha256"),
+            name="primary.audit.label_stream.replicate_h_sha256",
+        ),
+        mean_h_sha256=_digest(
+            label_stream.get("mean_h_sha256"),
+            name="primary.audit.label_stream.mean_h_sha256",
+        ),
+        name="primary.audit.label_stream.repeated_label_tail_diagnostics",
+    )
     train_oracle = _mapping(value["train_oracle_rescore"], name="primary.train_oracle")
     train_rewards_sha = _digest(
         train_oracle.get("transformed_rewards_sha256"),
@@ -443,6 +466,7 @@ def load_primary_sensitivity_binding(
         heads_sha256=heads_sha,
         training_design_sha256=training_design_sha,
         label_stream_sha256=label_stream_sha,
+        repeated_label_tail_diagnostics_sha256=str(tail_diagnostics["diagnostics_sha256"]),
         transformed_train_rewards_sha256=train_rewards_sha,
         beta0=beta0,
         relative_ridge0=float(ridge["relative_coefficient"]),
@@ -482,6 +506,19 @@ def _verify_replayed_label_stream(
     )
     final_state_sha = _tensor_sha256(generator.get_state())
     labels = noisy.repeated_labels
+    replicate_count_sha = _tensor_sha256(labels.counts)
+    replicate_h_sha = _tensor_sha256(labels.replicate_h)
+    mean_h_sha = _tensor_sha256(noisy.training.h)
+    tail_diagnostics = build_repeated_label_tail_diagnostics(
+        replicate_counts=labels.counts,
+        replicate_h=labels.replicate_h,
+        mean_h=noisy.training.h,
+        replicate_count_sha256=replicate_count_sha,
+        replicate_h_sha256=replicate_h_sha,
+        mean_h_sha256=mean_h_sha,
+    )
+    if tail_diagnostics["diagnostics_sha256"] != binding.repeated_label_tail_diagnostics_sha256:
+        raise ValueError("sensitivity label replay differs from the frozen scalar tail diagnostics")
     payload = {
         "namespace": settings.label_rng_namespace,
         "base_seed": binding.seed,
@@ -490,10 +527,11 @@ def _verify_replayed_label_stream(
         "initial_state_sha256": initial_state_sha,
         "final_state_sha256": final_state_sha,
         "probability_sha256": noisy.audit.probability_sha256,
-        "replicate_count_sha256": _tensor_sha256(labels.counts),
+        "replicate_count_sha256": replicate_count_sha,
         "replicate_win_sha256": _tensor_sha256(labels.wins),
-        "replicate_h_sha256": _tensor_sha256(labels.replicate_h),
-        "mean_h_sha256": _tensor_sha256(noisy.training.h),
+        "replicate_h_sha256": replicate_h_sha,
+        "mean_h_sha256": mean_h_sha,
+        "repeated_label_tail_diagnostics_sha256": tail_diagnostics["diagnostics_sha256"],
         "realized_total_annotations": labels.total_annotations,
     }
     observed = _training_canonical_sha256(payload)

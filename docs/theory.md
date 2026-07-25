@@ -527,6 +527,35 @@ labels。replicate boundaries 必须被 schema 保存；把 labels 直接拼接�
 不得硬截断、clip 大 `N`、按 `N` 重采样或静默丢弃。memory guard 只能使 run fail closed，
 不能改变 estimator。
 
+有限二阶矩不意味着 sub-Gaussian 或有限四阶矩。在概率区间端点，这个 estimator 的
+all-wins/all-losses 尾项计算中，二阶矩的锁定比例为
+
+$$
+\frac{\max(p^*,1-p^*)}{\gamma}
+=\frac{0.75}{0.9}
+<1,
+$$
+
+而四阶矩的对应比例为
+
+$$
+\frac{\max(p^*,1-p^*)}{\gamma^3}
+=\frac{0.75}{0.9^3}
+>1,
+$$
+
+所以该锁定设计在端点具有无限四阶矩。`R=4` 独立平均把条件方差除以 4，但不改变尾指数，
+也不会凭空得到有限四阶矩。因此理论和论文只能声称严格无偏与有限二阶矩，不能声称
+sub-Gaussian concentration 或用经验四阶矩作为稳定性保证。
+
+在任何正式结果产生前，工程协议预先固定一份**纯描述性** tail record。它分别对
+`N`、`|h_j|` 与 `|\bar h_4|` 报告 empirical `p50/p90/p95/p99/max`。对样本量 `n`，
+nearest-rank 定义为先升序排列，再取一基序号 `ceil(q*n)`；maximum 为第 `n` 个次序统计量，
+不做插值。record 只含标量、样本量与源 tensor SHA256，不序列化 labels、`h` 向量或
+`mean_h` 向量，并明确 `descriptive_only=true`、clipping/selection/gating 全部为 false。
+这些统计量用于诚实呈现 realized heavy tail；它们不得改变样本、训练、beta、seed
+资格或正式判定。
+
 随机 `N` 只决定构造 `h` 的成本：
 
 - ProRM+ 中每个 edge 对 moment 恰好贡献一次；

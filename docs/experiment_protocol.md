@@ -654,9 +654,11 @@ candidate-index-aligned records。旧 v1 result 中的 `srm_plus` 仅是兼容�
 Manifest 只读取明确 allowlist，不得序列化完整 environment。HF/GitHub/W&B credential 不得
 进入 config、metadata、stdout、Slurm log 或 artifact evidence。
 
-## 12. Phase 2：CoVal 人类 robustness
+## 12. 历史外部鲁棒性提案：CoVal（非当前 Phase 2）
 
-只有 Phase 1 主链通过后才启动固定 revision 的 CoVal world-ranking 实验。CoVal 的四个
+早期协议曾把这个条件性 CoVal extension 称为“Phase 2”；该名称现已废止，避免与第 13
+节正在执行的 common-global-beta Phase 2 冲突。只有 Phase 1 主链通过后才启动固定 revision
+的 CoVal world-ranking 实验。CoVal 的四个
 candidate 是有限支持、非 on-policy 样本；固定有限 label 数只能识别 logit series 的截断，
 因此实验必须称为 **candidate-restricted truncated ProRM+ robustness**。
 
@@ -818,6 +820,20 @@ Bernoulli annotations，且 geometric tail 无上界；all-six-pairs arm 平均�
 `h=Delta r*` ProRM+、exact-soft BT、direct oracle identity 与 `d=256` ridge-free tangent
 用于区分 label noise、reward-class misspecification、数值误差和 full-tangent ridge 影响。
 
+这里不能把“有限方差”写成“轻尾”。对这个 estimator 在 `p*=0.25/0.75` 边界的 tail
+计算，二阶矩比例是 `max(p*,1-p*)/gamma=0.75/0.9<1`，而四阶矩比例是
+`max(p*,1-p*)/gamma^3=0.75/0.9^3>1`；因此单份 estimator 二阶矩有限但四阶矩发散。
+`R=4` 只把方差除以 4，不改变 tail exponent。项目不作 sub-Gaussian 或
+finite-fourth-moment 声称。
+
+post-recovery 与正式运行必须在 `label_stream` 中写入预注册的
+`repeated-label-tail-diagnostics/v1`。对 replicate counts、`abs(replicate_h)`、
+`abs(mean_h)` 分别记录 sample size 及 empirical `p50/p90/p95/p99/max`；quantile 固定为
+nearest-rank：升序后取一基 `ceil(q*n)`，不插值。record 只能含标量与源 tensor SHA256，
+其 canonical SHA 必须进入 `label_stream_sha256`。这些值严格为 descriptive-only：
+不得用于 clipping、head/beta/seed selection、acceptance gate、retry 或样本删除。正式统计
+单位仍是 paired seed，而不是这些 label-level order statistics。
+
 all-six-pairs arm 是 prompt-level U-statistic：复用四个 iid candidates，不增加 generation/oracle
 forward，但六条边共享 nodes，必须按 prompt 聚类，不能当作六倍独立样本。
 
@@ -886,12 +902,24 @@ standard deviations；合取检验的 power 由最弱 endpoint 决定。
 
 exact 30 中每个 seed 必须有一个 terminal slot：合法 result 或 immutable failure
 manifest。正式 ledger policy 是 `single_predeclared_attempt_no_retry`：每个 seed 只有
-`attempt-1`，`recoveries/` 必须为空，不允许 retry、requeue 或 replacement seed。held-array
-submitter 在 release 前将任务 `0..29`、seeds `20260901..20260930` 与单次 attempt 原子写入
-immutable registry；重复执行同一提交命令只能恢复“registry 已提交但仍 held”的原数组，
-不能产生第二次 `sbatch`。任一失败 slot 令 campaign
+`attempt-1`，`recoveries/` 必须为空，不允许 retry、requeue、replacement seed 或 optional
+stopping。submitter 在第一次 `sbatch` 前将任务 `0..29`、seeds
+`20260901..20260930`、单次 attempt 与完整固定波次原子写入 immutable
+`campaign-plan.json`。波次依次为 `0-3%2,4-7%2,...,24-27%2,28-29%2`，固定最多 4
+个 submitted tasks、2 个 running tasks，以满足实测 HPC4
+`l20_qos MaxSubmitJobsPU=4`。只有先前所有 wave tasks 都有合法 terminal bundle 才能提交
+下一 wave，且判定与 success/failure、效果值无关；因此失败 wave 不停止后续预注册
+attempt。重复执行同一提交命令只会恢复同一确定性 held wave 或提交唯一合格的下一 wave，
+不能产生 retry/replacement。任一失败 slot 令 campaign
 `not_passed_due_to_seed_failure` 且不计算 primary CI。若 30 个结果都合法但效果未通过，
 仍计算并保留区间，科学状态为 `not_passed`。
+
+每次 `sbatch` 前还必须原子发布并 fsync 当前 `admissions/wave-<index>.json`。wave 0
+绑定空前驱；后续 receipt 按序 hash-bind 前一 admission、前一 submission，以及前一
+wave 全部 terminal manifest 与 marker。submission v3 再绑定该 receipt、原始 held
+`scontrol` 记录及其规范化资源身份。caller walltime、`l20_qos`、`%2`、CPU、内存、节点与
+GPU 必须和 plan 精确一致。确定性 job name 在新提交前同时查询 `squeue` 与历史 `sacct`；
+若存在未注册历史 identity，则 fail closed，绝不补提或替换。
 
 正式 CPU finalizer 必须调用统一终态入口，而不是绕过 terminal-slot 检查直接运行
 `phase2-aggregate`：

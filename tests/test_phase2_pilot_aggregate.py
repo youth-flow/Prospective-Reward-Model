@@ -1143,6 +1143,20 @@ def test_failed_freeze_recommends_exact_double_in_a_new_identity(
     assert retry_payload["selection"]["beta_grid_index"] == 1
     assert retry_payload["selection"]["selection_accepted"] is True
 
+    substituted_predecessor = copy.deepcopy(payload)
+    substituted_predecessor["predecessors"]["horizon_parent_aggregate"]["sha256"] = "e" * 64
+    retry_design = Phase2Design.from_phase2_config(retry)
+    with pytest.raises(ValueError, match="cannot substitute a different calibration"):
+        pilot_aggregate_module._beta_source_binding_for_design(
+            retry_design,
+            expected_source_config_hash=retry["design"]["source_config_hash"],
+            predecessor=(
+                failed_path,
+                retry_design.beta_source_aggregate_sha256,
+                substituted_predecessor,
+            ),
+        )
+
     skipped_retry = _freeze_config(
         calibration,
         beta=4.0 * beta,

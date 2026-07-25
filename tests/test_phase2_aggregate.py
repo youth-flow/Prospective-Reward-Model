@@ -4,15 +4,19 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import smart_reward.phase2_aggregate as phase2_aggregate_module
 import smart_reward.phase2_campaign as phase2_campaign_module
+import smart_reward.phase2_training as phase2_training_module
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.phase2_aggregate import (
     PHASE2_AGGREGATE_SCHEMA,
     build_common_beta_seed_aggregate,
+    validate_post_recovery_pilot_head_training,
     write_common_beta_seed_aggregate,
 )
 from smart_reward.phase2_campaign import (
@@ -31,10 +35,14 @@ from smart_reward.phase2_campaign import (
 )
 from smart_reward.phase2_config import (
     PHASE2_MIN_CONFIRMATORY_SEEDS,
+    PHASE2_POST_RECOVERY_SCHEMA_VERSION,
+    PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+    PHASE2_RECOVERY_PILOT_CONFIG,
     load_phase2_config,
     phase2_design_identity,
 )
 from smart_reward.phase2_rollout import PHASE2_ARM_ORDER, Phase2Design
+from smart_reward.phase2_training import compile_phase2_training_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 _FIXTURE_REWARD_DIMENSION = 256
@@ -57,6 +65,71 @@ def _canonical_sha256(value: object) -> str:
         sort_keys=True,
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _tail_diagnostics(
+    *,
+    train_prompts: int,
+    replicate_count_sha256: str,
+    replicate_h_sha256: str,
+    mean_h_sha256: str,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "repeated-label-tail-diagnostics/v1",
+        "split": "train",
+        "gamma": 0.9,
+        "num_replicates": 4,
+        "quantile_estimator": {
+            "name": "nearest_rank",
+            "sorting": "ascending",
+            "rank_formula": "k=ceil(q*n)",
+            "indexing": "one_indexed",
+            "p50_probability": 0.50,
+            "p90_probability": 0.90,
+            "p95_probability": 0.95,
+            "p99_probability": 0.99,
+            "maximum_definition": "x_(n)",
+            "interpolation": False,
+        },
+        "source_tensor_sha256": {
+            "replicate_count_sha256": replicate_count_sha256,
+            "replicate_h_sha256": replicate_h_sha256,
+            "mean_h_sha256": mean_h_sha256,
+        },
+        "metrics": {
+            "replicate_count": {
+                "sample_size": 4 * train_prompts,
+                "p50": 1,
+                "p90": 1,
+                "p95": 1,
+                "p99": 1,
+                "max": 1,
+            },
+            "abs_replicate_h": {
+                "sample_size": 4 * train_prompts,
+                "p50": 0.0,
+                "p90": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "max": 0.0,
+            },
+            "abs_mean_h": {
+                "sample_size": train_prompts,
+                "p50": 0.0,
+                "p90": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "max": 0.0,
+            },
+        },
+        "scalar_only": True,
+        "descriptive_only": True,
+        "used_for_clipping": False,
+        "used_for_selection": False,
+        "used_for_gating": False,
+    }
+    payload["diagnostics_sha256"] = _canonical_sha256(payload)
+    return payload
 
 
 def _token_sha256(value: str) -> str:
@@ -99,6 +172,26 @@ def _direction(arm_name: str, beta: float) -> dict[str, object]:
 
 
 def _pcg(*, residual: float = 1.0e-8) -> dict[str, object]:
+    return phase2_training_module._pcg_evidence(
+        SimpleNamespace(
+            pcg_iterations=7,
+            pcg_residual_norm=residual,
+            pcg_relative_residual=residual,
+            pcg_converged=True,
+        )
+    )
+
+
+def _trained_direction_pcg(*, residual: float = 1.0e-8) -> dict[str, object]:
+    return {
+        "iterations": 7,
+        "relative_residual": residual,
+        "converged": True,
+        "reason": "tolerance",
+    }
+
+
+def _natural_direction_pcg(*, residual: float = 1.0e-8) -> dict[str, object]:
     return {
         "iterations": 7,
         "residual_norm": residual,
@@ -106,6 +199,42 @@ def _pcg(*, residual: float = 1.0e-8) -> dict[str, object]:
         "converged": True,
         "reason": "tolerance",
     }
+
+
+def test_pcg_gate_accepts_exact_training_producer_schema_and_rejects_drift() -> None:
+    producer_evidence = _pcg()
+    gate = phase2_aggregate_module._pcg_gate(
+        producer_evidence,
+        expected_relative_tolerance=1.0e-5,
+        producer_schema="training_final",
+        name="producer_pcg",
+    )
+
+    assert gate == {
+        "passed": True,
+        "iterations": 7,
+        "residual_norm": 1.0e-8,
+        "relative_residual": 1.0e-8,
+        "design_bound_relative_tolerance": 1.0e-5,
+        "producer_schema": "training_final",
+        "cold_start": True,
+    }
+    with pytest.raises(ValueError, match="exact keys"):
+        phase2_aggregate_module._pcg_gate(
+            {**producer_evidence, "reason": "validator-invented-field"},
+            expected_relative_tolerance=1.0e-5,
+            producer_schema="training_final",
+            name="producer_pcg",
+        )
+    missing_residual = dict(producer_evidence)
+    del missing_residual["residual_norm"]
+    with pytest.raises(ValueError, match="exact keys"):
+        phase2_aggregate_module._pcg_gate(
+            missing_residual,
+            expected_relative_tolerance=1.0e-5,
+            producer_schema="training_final",
+            name="producer_pcg",
+        )
 
 
 def _first_order_convergence(
@@ -116,19 +245,30 @@ def _first_order_convergence(
     initial_objective: float,
     final_objective: float,
     rank_evidence: dict[str, object],
+    optimizer_protocol: dict[str, object] | None = None,
     gradient: float = 1.0e-6,
 ) -> dict[str, object]:
-    selected_step = 140
-    return {
-        "schema_version": "objective-first-order-convergence/v1",
+    decay = optimizer_protocol is not None
+    selected_step = 6900 if decay else 140
+    check_steps = (6860, 6880, 6900) if decay else (100, 120, 140)
+    result = {
+        "schema_version": (
+            "objective-first-order-convergence/v2"
+            if decay
+            else "objective-first-order-convergence/v1"
+        ),
         "objective": objective_name,
         "converged": True,
         "fail_closed": True,
         "spec": {
-            "schema_version": "objective-first-order-convergence-spec/v1",
+            "schema_version": (
+                "objective-first-order-convergence-spec/v2"
+                if decay
+                else "objective-first-order-convergence-spec/v1"
+            ),
             "gradient_ratio_tolerance": 1.0e-3,
             "min_steps": 100,
-            "max_steps": 5760,
+            "max_steps": 12760 if decay else 5760,
             "check_interval": 20,
             "consecutive_checks": 3,
             "gradient_norm_denominator_floor": 1.0e-30,
@@ -142,6 +282,7 @@ def _first_order_convergence(
             "objective": initial_objective,
             "gradient_l2_norm": 1.0,
             "inner_solver": None,
+            **({"audit_dtype": "float64"} if decay else {}),
         },
         "checks": [
             {
@@ -149,9 +290,28 @@ def _first_order_convergence(
                 "post_update": True,
                 "full_data": True,
                 "gradient_clipping_applied": False,
+                **(
+                    {
+                        "measurement": {
+                            "objective": final_objective,
+                            "gradient_l2_norm": gradient,
+                            "inner_solver": None,
+                            "audit_dtype": "float64",
+                        },
+                        "gradient_ratio_to_zero_initialization": gradient,
+                        "eligible_after_min_steps": True,
+                        "consecutive_threshold_passes": index + 1,
+                        "learning_rate_used_for_update": 1.0e-4,
+                        "learning_rate_schedule_sha256": (
+                            optimizer_protocol["learning_rate_schedule"]["schedule_sha256"]
+                        ),
+                    }
+                    if decay
+                    else {}
+                ),
                 "threshold_passed": True,
             }
-            for step in (100, 120, 140)
+            for index, step in enumerate(check_steps)
         ],
         "selected_primary_step": selected_step,
         "selected_primary_head_sha256": head_sha256,
@@ -162,10 +322,12 @@ def _first_order_convergence(
                 "objective": final_objective,
                 "gradient_l2_norm": gradient,
                 "inner_solver": None,
+                **({"audit_dtype": "float64"} if decay else {}),
             },
             "gradient_ratio_to_zero_initialization": gradient,
             "threshold_passed": True,
             "fresh_post_restore_audit": True,
+            **({"learning_rate_at_selected_iterate": 1.0e-4} if decay else {}),
         },
         "fixed_step_compute_matched_snapshot": {
             "schema_version": "fixed-step-compute-matched-snapshot/v1",
@@ -175,6 +337,7 @@ def _first_order_convergence(
                 "objective": final_objective,
                 "gradient_l2_norm": gradient,
                 "inner_solver": None,
+                **({"audit_dtype": "float64"} if decay else {}),
             },
             "gradient_ratio_to_zero_initialization": gradient,
             "history_summary": {"num_steps": 720},
@@ -186,7 +349,9 @@ def _first_order_convergence(
         "fixed_step_snapshot_is_not_primary_selection": True,
         "solution_identification": {
             "initialization": "exact_zero_head",
-            "tie_break": "zero_initialized_adamw_implicit_bias",
+            "tie_break": (
+                optimizer_protocol["tie_break"] if decay else "zero_initialized_adamw_implicit_bias"
+            ),
             "primary_iterate_selection": (
                 "first_scheduled_iterate_completing_the_sustained_first_order_gate"
             ),
@@ -202,6 +367,92 @@ def _first_order_convergence(
         },
         "test_or_validation_data_accessed": False,
     }
+    if not decay:
+        return result
+
+    result["spec"]["optimizer_protocol"] = copy.deepcopy(optimizer_protocol)
+    schedule_sha = optimizer_protocol["learning_rate_schedule"]["schedule_sha256"]
+    result["legacy_constant_lr_boundary_snapshot"] = {
+        "schema_version": "legacy-constant-lr-boundary-snapshot/v1",
+        "step": 5760,
+        "head_sha256": _token_sha256(f"{seed}:{objective_name}:legacy-5760"),
+        "measurement": {
+            "objective": final_objective,
+            "gradient_l2_norm": 0.1,
+            "inner_solver": None,
+            "audit_dtype": "float64",
+        },
+        "gradient_ratio_to_zero_initialization": 0.1,
+        "history_summary": {"num_steps": 5760},
+        "learning_rate_used_for_update": 1.0e-3,
+        "learning_rate_schedule_sha256": schedule_sha,
+        "role": "immutable_legacy_constant_lr_failure_boundary_diagnostic",
+        "used_as_primary_selection_rule": False,
+        "coincides_with_selected_primary_iterate": False,
+        "test_or_validation_data_accessed": False,
+    }
+    state_digest = _token_sha256(f"{seed}:{objective_name}:optimizer-state")
+    state_dict_digest = _token_sha256(f"{seed}:{objective_name}:optimizer-state-dict")
+    result["optimizer_protocol_execution"] = {
+        "schema_version": "deterministic-adamw-lr-decay-execution/v2",
+        "protocol": copy.deepcopy(optimizer_protocol),
+        "optimizer_class": "torch.optim.AdamW",
+        "parameter_count": 1,
+        "fresh_optimizer_state_before_first_update": True,
+        "reward_head_dtype_observed": "torch.float32",
+        "first_order_audit_dtype_required": "float64",
+        "microbatch_order": "canonical_edge_order_contiguous_ascending_no_shuffle",
+        "one_optimizer_update_per_step": True,
+        "learning_rate_set_immediately_before_every_update": True,
+        "single_optimizer_instance_for_all_updates": True,
+        "optimizer_state_reset_at_lr_milestone": False,
+        "adamw_moments_preserved_at_learning_rate_boundaries": True,
+        "boundary_transitions": [
+            {
+                "next_update": next_update,
+                "previous_learning_rate": previous_lr,
+                "new_learning_rate": next_lr,
+                "moment_state_sha256_before_lr_assignment": _token_sha256(
+                    f"{seed}:{objective_name}:transition:{next_update}"
+                ),
+                "moment_state_sha256_after_lr_assignment": _token_sha256(
+                    f"{seed}:{objective_name}:transition:{next_update}"
+                ),
+                "same_optimizer_instance": True,
+                "moments_preserved": True,
+            }
+            for next_update, previous_lr, next_lr in (
+                (5761, 1.0e-3, 3.0e-4),
+                (6761, 3.0e-4, 1.0e-4),
+            )
+        ],
+        "completed_updates_observed": selected_step,
+        "per_update_state_checks": {
+            "schema_version": "recovery-adamw-per-update-state-checks/v1",
+            "before_update_checks": selected_step,
+            "after_update_checks": selected_step,
+            "first_pre_update_state_empty": True,
+            "completed_updates_covered": selected_step,
+            "check_sequence_sha256": _token_sha256(f"{seed}:{objective_name}:state-checks"),
+            "all_updates_checked_before_and_after": True,
+            "all_subsequent_pre_update_scalar_steps_exact": True,
+            "all_post_update_scalar_steps_exact": True,
+            "exp_avg_and_exp_avg_sq_shape_dtype_device_valid": True,
+        },
+        "selected_primary_optimizer_state_restored_without_reconstruction": True,
+        "selected_primary_optimizer_state_restored_and_verified": True,
+        "selected_optimizer_object_identity_preserved": True,
+        "selected_optimizer_moments_restored_and_verified": True,
+        "selected_head_sha256": head_sha256,
+        "restored_head_sha256": head_sha256,
+        "selected_optimizer_state_sha256": state_digest,
+        "restored_optimizer_state_sha256": state_digest,
+        "selected_checkpoint_optimizer_state_dict_sha256": state_dict_digest,
+        "restored_optimizer_state_dict_sha256": state_dict_digest,
+        "selected_checkpoint_sha256": _token_sha256(f"{seed}:{objective_name}:checkpoint"),
+        "test_or_validation_data_accessed": False,
+    }
+    return result
 
 
 def _serialized_head(
@@ -215,6 +466,7 @@ def _serialized_head(
     initial_head_sha256: str,
     pcg: bool,
     rank_evidence: dict[str, object],
+    optimizer_protocol: dict[str, object] | None = None,
     objective_name: str | None = None,
 ) -> dict[str, object]:
     head_sha = _token_sha256(f"{seed}:{arm}:{method}:head")
@@ -228,7 +480,7 @@ def _serialized_head(
         "initial_objective": initial_objective,
         "final_objective": final_objective,
         "history_summary": {
-            "num_steps": 140,
+            "num_steps": 6900 if optimizer_protocol is not None else 140,
             "history_objective_timing": "pre_update",
         },
         "final_pcg": ({**_pcg(), "cold_start": True} if pcg else None),
@@ -239,6 +491,7 @@ def _serialized_head(
             initial_objective=initial_objective,
             final_objective=final_objective,
             rank_evidence=rank_evidence,
+            optimizer_protocol=optimizer_protocol,
         ),
     }
 
@@ -256,6 +509,7 @@ def _fresh_inner_audit(
         "gradient_definition": "fresh_dual_envelope_gradient",
         "fresh_inner_pcg": {
             **_pcg(),
+            "method": "pcg",
             "dtype": "float64",
             "warm_start_used": False,
         },
@@ -272,8 +526,11 @@ def _identifiability_evidence(
     largest = 2.0
     smallest = 0.5
     tolerance = float(config["reward_model"]["identifiability"]["relative_rank_tolerance"])
-    return {
-        "schema_version": "reward-head-identifiability/v1",
+    decay = config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+    result = {
+        "schema_version": (
+            "reward-head-identifiability/v2" if decay else "reward-head-identifiability/v1"
+        ),
         "design_matrix": "canonical_edge_reward_feature_differences",
         "split": "train",
         "shape": [train_prompts, reward_dimension],
@@ -294,12 +551,70 @@ def _identifiability_evidence(
             "require_full_column_rank"
         ],
         "acceptance_gate_passed": True,
-        "bt_unique_finite_optimum_sufficient_condition_only": True,
         "prorm_moment_map_full_rank_proved": False,
-        "algorithmic_tie_break": "zero_initialized_adamw_implicit_bias",
+        "algorithmic_tie_break": config["reward_model"]["identifiability"]["algorithmic_tie_break"],
         "minimum_norm_solution_claimed": False,
         "test_or_validation_data_accessed": False,
     }
+    if not decay:
+        result["bt_unique_finite_optimum_sufficient_condition_only"] = True
+        return result
+    spectrum = [2.0 - index / (2.0 * (reward_dimension - 1)) for index in range(reward_dimension)]
+    spectrum_payload = {
+        "dtype": "torch.float64",
+        "shape": [len(spectrum)],
+        "values_descending": spectrum,
+    }
+    result.update(
+        {
+            "full_design_rank_implication": (
+                "strict_convexity_at_finite_parameters_and_at_most_one_finite_minimizer;"
+                "does_not_exclude_complete_or_quasi_separation"
+            ),
+            "full_design_rank_proves_finite_bt_minimizer_exists": False,
+            "mixed_outcome_edge_coercivity_diagnostic": {
+                "schema_version": "bt-mixed-outcome-coercivity-diagnostic/v1",
+                "definition": "0 < left_wins < num_annotations",
+                "split": "train",
+                "orientation": "candidate_0_minus_candidate_1",
+                "num_total_edges": train_prompts,
+                "num_mixed_outcome_edges": train_prompts,
+                "mixed_outcome_mask_sha256": _token_sha256(f"{seed}:mixed-mask"),
+                "left_wins_sha256": _token_sha256(f"{seed}:left-wins"),
+                "num_annotations_sha256": _token_sha256(f"{seed}:num-annotations"),
+                "design_matrix": ("reward_feature_differences_restricted_to_mixed_outcome_edges"),
+                "shape": [train_prompts, reward_dimension],
+                "source_dtype": "torch.float32",
+                "audit_dtype": "torch.float64",
+                "design_matrix_sha256": _token_sha256(f"{seed}:mixed-design"),
+                "relative_rank_tolerance": tolerance,
+                "absolute_singular_value_threshold": tolerance * spectrum[0],
+                "singular_values_descending": spectrum,
+                "singular_values_sha256": _canonical_sha256(spectrum_payload),
+                "largest_singular_value": spectrum[0],
+                "smallest_singular_value": spectrum[-1],
+                "smallest_retained_singular_value": spectrum[-1],
+                "numerical_rank": reward_dimension,
+                "column_dimension": reward_dimension,
+                "full_column_rank": True,
+                "retained_condition_number": spectrum[0] / spectrum[-1],
+                "sufficient_condition": (
+                    "full_column_rank_implies_coercive_strictly_convex_binomial_bt;"
+                    "therefore_a_unique_finite_minimizer_exists"
+                ),
+                "sufficient_condition_observed": True,
+                "acceptance_gate_applied": False,
+                "role": "train_only_measure_and_interpret",
+                "raw_outcomes_serialized": False,
+                "test_or_validation_data_accessed": False,
+            },
+            "bt_unique_finite_minimizer_sufficient_condition": (
+                "mixed_outcome_edge_difference_matrix_full_column_rank"
+            ),
+            "bt_unique_finite_minimizer_sufficient_condition_observed": True,
+        }
+    )
+    return result
 
 
 def _moment_map_identifiability_evidence(
@@ -318,8 +633,13 @@ def _moment_map_identifiability_evidence(
         "values_descending": spectrum,
     }
     block_rows = policy_dimension
+    decay = config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
     return {
-        "schema_version": "prorm-moment-map-identifiability/v1",
+        "schema_version": (
+            "prorm-moment-map-identifiability/v2"
+            if decay
+            else "prorm-moment-map-identifiability/v1"
+        ),
         "design_matrix": "canonical_train_edge_moment_jacobian",
         "formula": "J_m = Z^T D / (2 n_edges)",
         "split": "train",
@@ -369,7 +689,7 @@ def _moment_map_identifiability_evidence(
             "require_full_column_rank"
         ],
         "acceptance_gate_passed": True,
-        "algorithmic_tie_break": "zero_initialized_adamw_implicit_bias",
+        "algorithmic_tie_break": config["reward_model"]["identifiability"]["algorithmic_tie_break"],
         "minimum_norm_solution_claimed": False,
         "test_or_validation_data_accessed": False,
     }
@@ -385,7 +705,11 @@ def _projected_moment_map_identifiability_evidence(
     pseudoinverse_sha256: str,
 ) -> dict[str, object]:
     evidence = _moment_map_identifiability_evidence(seed=seed, config=config)
-    evidence["schema_version"] = "projected-prorm-moment-map-identifiability/v1"
+    evidence["schema_version"] = (
+        "projected-prorm-moment-map-identifiability/v2"
+        if config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+        else "projected-prorm-moment-map-identifiability/v1"
+    )
     evidence["design_matrix"] = "canonical_train_edge_projected_moment_jacobian"
     evidence["shape"] = [policy_dimension, _FIXTURE_REWARD_DIMENSION]
     evidence["policy_dimension"] = policy_dimension
@@ -429,12 +753,18 @@ def _head_training_audit(
     design_sha: str,
     train_oracle_reward_sha: str,
     head_weights: dict[str, list[float]],
+    include_tail_diagnostics: bool | None = None,
 ) -> dict[str, object]:
     train_prompts = int(config["run"]["split_sizes"]["train"])
     candidates = int(config["data"]["num_candidates"])
     low_dimension = int(config["positive_controls"]["low_dimensional_tangent"]["dimension"])
     identifiability = _identifiability_evidence(seed=seed, config=config)
     moment_map = _moment_map_identifiability_evidence(seed=seed, config=config)
+    optimizer_protocol = (
+        config["reward_model"]["optimizer_protocol"]
+        if config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+        else None
+    )
     projection_sha = _token_sha256(f"{seed}:projection")
     low_fisher_sha = _token_sha256(f"{seed}:low-fisher")
     low_pseudoinverse_sha = _token_sha256(f"{seed}:low-pinv")
@@ -457,6 +787,7 @@ def _head_training_audit(
         initial_head_sha256=initial_head_sha,
         pcg=False,
         rank_evidence=identifiability,
+        optimizer_protocol=optimizer_protocol,
     )
     prorm = _serialized_head(
         seed=seed,
@@ -468,6 +799,7 @@ def _head_training_audit(
         initial_head_sha256=initial_head_sha,
         pcg=True,
         rank_evidence=moment_map,
+        optimizer_protocol=optimizer_protocol,
     )
     exact = _serialized_head(
         seed=seed,
@@ -479,6 +811,7 @@ def _head_training_audit(
         initial_head_sha256=initial_head_sha,
         pcg=True,
         rank_evidence=moment_map,
+        optimizer_protocol=optimizer_protocol,
         objective_name="exact_margin_prorm_plus",
     )
     exact_soft_bt = _serialized_head(
@@ -491,6 +824,7 @@ def _head_training_audit(
         initial_head_sha256=initial_head_sha,
         pcg=False,
         rank_evidence=identifiability,
+        optimizer_protocol=optimizer_protocol,
         objective_name="exact_soft_label_bt_cross_entropy",
     )
     low = _serialized_head(
@@ -503,6 +837,7 @@ def _head_training_audit(
         initial_head_sha256=initial_head_sha,
         pcg=False,
         rank_evidence=projected_moment_map,
+        optimizer_protocol=optimizer_protocol,
         objective_name="low_dimensional_prorm_plus",
     )
     label_payload: dict[str, object] = {
@@ -519,6 +854,22 @@ def _head_training_audit(
         "mean_h_sha256": _token_sha256(f"{seed}:mean-h"),
         "realized_total_annotations": train_prompts * 4,
     }
+    tail_diagnostics: dict[str, object] | None = None
+    emit_tail_diagnostics = (
+        config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+        if include_tail_diagnostics is None
+        else include_tail_diagnostics
+    )
+    if emit_tail_diagnostics:
+        tail_diagnostics = _tail_diagnostics(
+            train_prompts=train_prompts,
+            replicate_count_sha256=str(label_payload["replicate_count_sha256"]),
+            replicate_h_sha256=str(label_payload["replicate_h_sha256"]),
+            mean_h_sha256=str(label_payload["mean_h_sha256"]),
+        )
+        label_payload["repeated_label_tail_diagnostics_sha256"] = tail_diagnostics[
+            "diagnostics_sha256"
+        ]
     label_stream_sha = _canonical_sha256(label_payload)
     label_stream = {
         "namespace": label_payload["namespace"],
@@ -546,8 +897,14 @@ def _head_training_audit(
         "raw_labels_retained": False,
         "raw_node_rewards_retained": False,
     }
+    if tail_diagnostics is not None:
+        label_stream["repeated_label_tail_diagnostics"] = tail_diagnostics
     direct_direction_sha = _token_sha256(f"{seed}:direct-direction")
-    settings_sha = _token_sha256(f"{seed}:settings")
+    settings_sha = (
+        compile_phase2_training_settings(config).sha256
+        if config["schema_version"] == PHASE2_POST_RECOVERY_SCHEMA_VERSION
+        else _token_sha256(f"{seed}:settings")
+    )
     input_training_sha = _token_sha256(f"{seed}:input-training")
     training_instance = {
         "schema_version": "phase2-training-instance/v1",
@@ -571,7 +928,11 @@ def _head_training_audit(
         "direct_oracle_direction_sha256": direct_direction_sha,
     }
     return {
-        "schema_version": "phase2-fresh-head-training/v2",
+        "schema_version": (
+            "phase2-fresh-head-training/v3"
+            if optimizer_protocol is not None
+            else "phase2-fresh-head-training/v2"
+        ),
         "training_design_sha256": design_sha,
         "training_settings_sha256": settings_sha,
         "training_instance_sha256": _canonical_sha256(training_instance),
@@ -701,7 +1062,7 @@ def _head_training_audit(
             },
             "reward_class_and_optimizer_gap": {
                 "interpretation": "restricted_reward_class_and_finite_optimizer_gap",
-                "trained_direction_pcg": _pcg(),
+                "trained_direction_pcg": _trained_direction_pcg(),
                 "algebraic_identity_claimed": False,
                 "raw_node_rewards_retained": False,
             },
@@ -786,7 +1147,7 @@ def _head_training_audit(
                 "direction_sha256": direct_direction_sha,
                 "absolute_damping": 0.001,
                 "moment_norm": 1.0,
-                "pcg": _pcg(),
+                "pcg": _natural_direction_pcg(),
             },
         },
         "isolation": {
@@ -1103,6 +1464,7 @@ def _seed_result(
     prorm_advantage: float = 0.2,
     oracle_improvement: float = 0.6,
     heldout_bt_minus_prorm_regret: float = 0.2,
+    include_tail_diagnostics: bool | None = None,
 ) -> Path:
     seed_dir = root / f"seed-{seed}"
     seed_dir.mkdir(parents=True)
@@ -1179,6 +1541,7 @@ def _seed_result(
         design_sha=design_sha,
         train_oracle_reward_sha=train_oracle_reward_sha,
         head_weights=head_weights,
+        include_tail_diagnostics=include_tail_diagnostics,
     )
     heldout, heldout_sha = _heldout_fixed_beta(
         seed=seed,
@@ -1311,6 +1674,7 @@ def _campaign(
     prorm_advantage: float = 0.2,
     oracle_improvement: float = 0.6,
     heldout_bt_minus_prorm_regret: float = 0.2,
+    include_tail_diagnostics: bool | None = None,
 ) -> tuple[dict[str, Any], list[Path]]:
     config = load_phase2_config(ROOT / "configs" / "common_beta_pilot.yaml")
     paths = [
@@ -1322,10 +1686,107 @@ def _campaign(
             prorm_advantage=prorm_advantage,
             oracle_improvement=oracle_improvement,
             heldout_bt_minus_prorm_regret=heldout_bt_minus_prorm_regret,
+            include_tail_diagnostics=include_tail_diagnostics,
         )
         for seed in config["run"]["seeds"]
     ]
     return config, paths
+
+
+def _post_recovery_config() -> dict[str, Any]:
+    config = copy.deepcopy(load_phase2_config(ROOT / PHASE2_RECOVERY_PILOT_CONFIG))
+    config["schema_version"] = PHASE2_POST_RECOVERY_SCHEMA_VERSION
+    config["design"]["name"] = "common-beta-post-recovery-calibration-v1"
+    del config["recovery_control"]
+    protocol = config["reward_model"]["optimizer_protocol"]
+    protocol["schema_version"] = "deterministic-adamw-lr-decay/v1"
+    del protocol["one_time_recovery"]
+    protocol["role"] = "frozen_post_recovery_phase2_optimizer"
+    protocol["source_recovery_authorization_sha256"] = "a" * 64
+    config["recovery_success_reference"] = {
+        "schema_version": "prorm-phase2-recovery-success-reference/v1",
+        "artifact_sha256": "a" * 64,
+        "authorization_projection": {
+            "schema_version": "prorm-phase2-recovery-success-projection/v1",
+            "source_schema_version": ("prorm-phase2-recovery-success-authorization/v1"),
+            "recovery_design_sha256": (
+                "9602b0f00a73880545fd57ce1886ec65d7901385cce2b919fd72f3efec4592d4"
+            ),
+            "optimizer_schedule_sha256": PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+            "source_array_job_id": "1648125",
+            "execution_revision": 2,
+            "ordered_seeds": [20260801, 20260802, 20260803],
+            "recovery_status": "all_three_seeds_success",
+            "full_calibration_authorized": True,
+            "authorized_information": "optimizer_schedule_only",
+            "recovery_outputs_reusable": False,
+            "validation_or_heldout_access_authorized": False,
+            "policy_or_final_utility_access_authorized": False,
+        },
+    }
+    return config
+
+
+def _post_recovery_campaign(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], list[Path]]:
+    config = _post_recovery_config()
+    return config, [_seed_result(tmp_path, config, int(seed)) for seed in config["run"]["seeds"]]
+
+
+def _redacted_post_recovery_head_training(
+    config: dict[str, Any],
+    *,
+    seed: int,
+) -> tuple[dict[str, object], str, str]:
+    design_sha = phase2_design_identity(config)
+    oracle_sha = _token_sha256(f"{seed}:train-oracle")
+    weights = {
+        BT_MLE: _fixture_head(0.1, 0.2),
+        PRORM_PLUS: _fixture_head(0.3, 0.4),
+    }
+    audit = _head_training_audit(
+        seed=seed,
+        config=config,
+        design_sha=design_sha,
+        train_oracle_reward_sha=oracle_sha,
+        head_weights=weights,
+    )
+    vector_keys = {
+        "head_weight",
+        "head_weights",
+        "direction",
+        "natural_direction",
+        "displacement",
+        "oracle_displacement",
+        "moment",
+        "operator_direction",
+        "projection_matrix",
+        "true_rewards",
+    }
+
+    def redact(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items() if key not in vector_keys}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    return (
+        {
+            "training_arm": "r4_independent_gamma_0.9",
+            "training_design_sha256": design_sha,
+            "heads_sha256": _canonical_sha256(weights),
+            "head_weights_serialized": False,
+            "audit": redact(audit),
+            "audit_vector_fields_redacted": sorted(vector_keys),
+            "source": "trained_after_train_oracle_rescore",
+            "old_phase1_comparison_heads_reused": False,
+            "test_data_accessed": False,
+        },
+        design_sha,
+        oracle_sha,
+    )
 
 
 def _confirmatory_campaign(
@@ -1541,6 +2002,256 @@ def test_complete_pilot_seed_arithmetic_evidence_sources_and_new_file_only(
 
     with pytest.raises(FileExistsError, match="overwrite"):
         write_common_beta_seed_aggregate(config, paths, output)
+
+
+def test_post_recovery_aggregate_accepts_only_bound_v3_decay_evidence(
+    tmp_path: Path,
+) -> None:
+    config, paths = _post_recovery_campaign(tmp_path / "post-recovery")
+    aggregate = build_common_beta_seed_aggregate(
+        config,
+        paths,
+        reference_base=tmp_path,
+    )
+    payload = aggregate.to_dict()
+
+    assert payload["seeds"] == [20260801, 20260802, 20260803]
+    for item in payload["control_gate_evidence"]["per_seed"]:
+        for learner in (BT_MLE, PRORM_PLUS):
+            convergence = item["gates"]["primary_outer_convergence"]["learners"][learner][
+                "first_order_convergence"
+            ]
+            assert convergence["legacy_constant_lr_boundary_snapshot_verified"] is True
+            assert convergence["adopted_schedule_sha256"] == (PHASE2_RECOVERY_LR_SCHEDULE_SHA256)
+            assert (
+                convergence["optimizer_protocol_execution"]["per_update_state_checks_passed"]
+                is True
+            )
+
+
+def test_legacy_aggregate_accepts_historical_label_stream_without_tail_diagnostics(
+    tmp_path: Path,
+) -> None:
+    config, paths = _campaign(tmp_path / "historical")
+    first = json.loads(paths[0].read_text(encoding="utf-8"))
+    assert "repeated_label_tail_diagnostics" not in first["head_training"]["audit"]["label_stream"]
+
+    aggregate = build_common_beta_seed_aggregate(config, paths, reference_base=tmp_path)
+    assert aggregate.to_dict()["seeds"] == [20260801, 20260802, 20260803]
+
+
+def test_legacy_aggregate_accepts_and_validates_current_producer_tail_diagnostics(
+    tmp_path: Path,
+) -> None:
+    config, paths = _campaign(
+        tmp_path / "current-producer",
+        include_tail_diagnostics=True,
+    )
+    aggregate = build_common_beta_seed_aggregate(config, paths, reference_base=tmp_path)
+    per_seed = aggregate.to_dict()["control_gate_evidence"]["per_seed"]
+
+    for item in per_seed:
+        receipt = item["gates"]["r4_repeated_labels"]["repeated_label_tail_diagnostics"]
+        assert receipt["schema_version"] == "repeated-label-tail-diagnostics/v1"
+        assert receipt["descriptive_only"] is True
+        assert receipt["used_for_gating"] is False
+
+
+def test_post_recovery_redacted_pilot_head_validator_checks_all_five_trainers() -> None:
+    config = _post_recovery_config()
+    seed = int(config["run"]["seeds"][0])
+    head, design_sha, oracle_sha = _redacted_post_recovery_head_training(
+        config,
+        seed=seed,
+    )
+
+    gate = validate_post_recovery_pilot_head_training(
+        head,
+        config=config,
+        design_sha256=design_sha,
+        seed=seed,
+        train_oracle_reward_sha256=oracle_sha,
+    )
+
+    assert gate["passed"] is True
+    assert gate["five_head_adopted_schedule_verified"] is True
+    assert gate["adopted_optimizer_schedule_sha256"] == PHASE2_RECOVERY_LR_SCHEDULE_SHA256
+    tail_receipt = gate["gate_evidence"]["r4_repeated_labels"]["repeated_label_tail_diagnostics"]
+    assert tail_receipt["schema_version"] == "repeated-label-tail-diagnostics/v1"
+    assert len(tail_receipt["diagnostics_sha256"]) == 64
+    assert tail_receipt["scalar_only"] is True
+    assert tail_receipt["descriptive_only"] is True
+    assert tail_receipt["used_for_clipping"] is False
+    assert tail_receipt["used_for_selection"] is False
+    assert tail_receipt["used_for_gating"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda label: label.pop("repeated_label_tail_diagnostics"),
+            "missing required fields",
+        ),
+        (
+            lambda label: label["repeated_label_tail_diagnostics"].update(
+                {"used_for_gating": True}
+            ),
+            "used_for_gating",
+        ),
+        (
+            lambda label: label["repeated_label_tail_diagnostics"]["source_tensor_sha256"].update(
+                {"replicate_h_sha256": "0" * 64}
+            ),
+            "does not bind",
+        ),
+        (
+            lambda label: label["repeated_label_tail_diagnostics"]["metrics"]["abs_mean_h"].update(
+                {"sample_size": 1}
+            ),
+            "sample_size is inconsistent",
+        ),
+    ],
+)
+def test_post_recovery_head_validator_requires_bound_descriptive_tail_diagnostics(
+    mutation: object,
+    message: str,
+) -> None:
+    config = _post_recovery_config()
+    seed = int(config["run"]["seeds"][0])
+    head, design_sha, oracle_sha = _redacted_post_recovery_head_training(
+        config,
+        seed=seed,
+    )
+    label = head["audit"]["label_stream"]
+    mutation(label)
+
+    with pytest.raises(ValueError, match=message):
+        validate_post_recovery_pilot_head_training(
+            head,
+            config=config,
+            design_sha256=design_sha,
+            seed=seed,
+            train_oracle_reward_sha256=oracle_sha,
+        )
+
+
+@pytest.mark.parametrize(
+    "head_path",
+    [
+        ("primary_heads", BT_MLE),
+        ("primary_heads", PRORM_PLUS),
+        ("exact_margin_control", "head"),
+        ("exact_soft_label_bt_control", "head"),
+        ("low_dimensional_control", "head"),
+    ],
+)
+def test_post_recovery_redacted_pilot_head_validator_rejects_each_schedule_tamper(
+    head_path: tuple[str, str],
+) -> None:
+    config = _post_recovery_config()
+    seed = int(config["run"]["seeds"][0])
+    head, design_sha, oracle_sha = _redacted_post_recovery_head_training(
+        config,
+        seed=seed,
+    )
+    audit = head["audit"]
+    assert isinstance(audit, dict)
+    group = audit[head_path[0]]
+    assert isinstance(group, dict)
+    serialized = group[head_path[1]]
+    assert isinstance(serialized, dict)
+    convergence = serialized["first_order_convergence"]
+    assert isinstance(convergence, dict)
+    execution = convergence["optimizer_protocol_execution"]
+    assert isinstance(execution, dict)
+    execution["selected_optimizer_state_restored_and_verified"] = False
+
+    with pytest.raises(ValueError, match="selected_optimizer_state_restored"):
+        validate_post_recovery_pilot_head_training(
+            head,
+            config=config,
+            design_sha256=design_sha,
+            seed=seed,
+            train_oracle_reward_sha256=oracle_sha,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["head_training"]["audit"]["primary_heads"][BT_MLE][
+                "first_order_convergence"
+            ]["optimizer_protocol_execution"]["protocol"].update(
+                {"schema_version": "deterministic-adamw-lr-decay-recovery/v1"}
+            ),
+            "does not match the adopted overlay protocol",
+        ),
+        (
+            lambda value: value["head_training"]["audit"]["primary_heads"][PRORM_PLUS][
+                "first_order_convergence"
+            ]["checks"][-1].update({"learning_rate_schedule_sha256": "0" * 64}),
+            "learning_rate_schedule_sha256",
+        ),
+        (
+            lambda value: value["head_training"]["audit"]["exact_margin_control"]["head"][
+                "first_order_convergence"
+            ]["optimizer_protocol_execution"]["per_update_state_checks"].update(
+                {"after_update_checks": 6899}
+            ),
+            "after_update_checks",
+        ),
+        (
+            lambda value: value["head_training"]["audit"]["primary_optimization_audit"][
+                "reward_head_identifiability"
+            ]["mixed_outcome_edge_coercivity_diagnostic"].update({"raw_outcomes_serialized": True}),
+            "raw_outcomes_serialized",
+        ),
+    ],
+)
+def test_post_recovery_v3_schedule_evidence_tampering_fails_closed(
+    tmp_path: Path,
+    mutation: Any,
+    message: str,
+) -> None:
+    config, paths = _post_recovery_campaign(tmp_path / "post-recovery")
+    _mutate(paths[0], mutation)
+
+    with pytest.raises(ValueError, match=message):
+        build_common_beta_seed_aggregate(config, paths, reference_base=tmp_path)
+
+
+def test_training_evidence_schema_cannot_cross_legacy_and_post_recovery_configs(
+    tmp_path: Path,
+) -> None:
+    legacy_config, legacy_paths = _campaign(tmp_path / "legacy")
+    _mutate(
+        legacy_paths[0],
+        lambda value: value["head_training"]["audit"].update(
+            {"schema_version": "phase2-fresh-head-training/v3"}
+        ),
+    )
+    with pytest.raises(ValueError, match="phase2-fresh-head-training/v2"):
+        build_common_beta_seed_aggregate(
+            legacy_config,
+            legacy_paths,
+            reference_base=tmp_path,
+        )
+
+    post_config, post_paths = _post_recovery_campaign(tmp_path / "post")
+    _mutate(
+        post_paths[0],
+        lambda value: value["head_training"]["audit"].update(
+            {"schema_version": "phase2-fresh-head-training/v2"}
+        ),
+    )
+    with pytest.raises(ValueError, match="phase2-fresh-head-training/v3"):
+        build_common_beta_seed_aggregate(
+            post_config,
+            post_paths,
+            reference_base=tmp_path,
+        )
 
 
 def test_confirmatory_aggregate_proves_one_frozen_beta_across_all_seeds(

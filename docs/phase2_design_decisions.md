@@ -339,6 +339,25 @@ silent retry is permitted. This is the main practical annotation-cost
 limitation of the exact unbiased construction and must be exposed in both
 runtime accounting and the paper.
 
+Finite variance is the strongest tail-moment guarantee used here. For this
+estimator's endpoint tail calculation, the locked second-moment ratio is
+`max(p*, 1-p*) / gamma = 0.75 / 0.9 < 1`, while the fourth-moment ratio is
+`max(p*, 1-p*) / gamma^3 = 0.75 / 0.9^3 > 1`. Thus the single-replicate
+estimator has a finite second moment but an infinite fourth moment at the
+probability-range endpoints. Averaging `R=4` independent replicates divides
+conditional variance by four but does not change that tail exponent. We
+therefore make no sub-Gaussian or finite-fourth-moment claim.
+
+Before post-recovery calibration and confirmatory execution, the evidence
+schema is frozen to emit `repeated-label-tail-diagnostics/v1` under
+`label_stream`. It reports only nearest-rank empirical `p50/p90/p95/p99/max`
+for replicate counts, `abs(replicate_h)`, and `abs(mean_h)`, with their sample
+sizes and source-tensor SHA256s. Nearest rank means ascending order statistic
+`x_(ceil(q*n))` with one-based indexing and no interpolation. The canonical
+diagnostic SHA is itself bound into `label_stream_sha256`. The object is
+scalar-only and descriptive-only; it is explicitly forbidden from clipping,
+selection, gating, beta calibration, seed exclusion, or retry decisions.
+
 ## 6. Formal endpoints and decision rule
 
 After the pilot freezes the single global `beta_0`, the formal claim is
@@ -400,12 +419,30 @@ Every one of the 30 seed slots must end in either one admissible result or one
 immutable terminal failure manifest. The formal ledger policy is
 `single_predeclared_attempt_no_retry`: each seed has exactly `attempt-1`, the
 registry `recoveries/` directory must remain empty, and neither retry nor
-replacement seed is admissible. The implemented held-array submitter reserves
-the ordered task-to-seed map before release; the GPU publisher, compute and
-scheduler terminalizers, registry resolver, and CPU finalizer jointly enforce
-one terminal head per slot. A failed slot produces
+replacement seed is admissible; optional stopping is also forbidden. Before
+the first Slurm submission, the submitter immutably commits
+`campaign-plan.json`, binding the ordered task-to-seed map and the eight fixed
+waves `0-3%2`, `4-7%2`, `8-11%2`, `12-15%2`, `16-19%2`, `20-23%2`,
+`24-27%2`, and `28-29%2`. The plan permits at most four submitted tasks and
+two running tasks, matching the observed HPC4 `l20_qos MaxSubmitJobsPU=4`.
+A wave is submitted only after every task in all earlier waves has a strict
+terminal bundle, irrespective of its scientific or scheduler outcome. Thus
+the waves are a capacity-safe realization of the frozen exact-30 campaign,
+not an adaptive design and not a change to its estimand. The GPU publisher,
+compute and scheduler terminalizers, registry resolver, and CPU finalizer
+jointly enforce one terminal head per slot. A failed slot produces
 `not_passed_due_to_seed_failure` with no primary CI; valid negative effects
 retain their intervals and produce `not_passed`.
+
+Wave eligibility is itself immutable evidence. Before each `sbatch`, the
+submitter fsyncs `admissions/wave-<index>.json`; for later waves it hash-binds
+the preceding admission and submission plus all ordered predecessor terminal
+manifest and marker bytes. Submission v3 binds this receipt and a canonical
+record of the raw held `scontrol` response and normalized scheduler request.
+The resolver recomputes the complete chain. Walltime and all Slurm resources
+are plan-bound, while `squeue` plus historical deterministic-name `sacct`
+queries make an unregistered accepted job a fail-closed condition rather than
+a license to resubmit.
 
 The terminal ownership rule is structural. The GPU job builds its complete
 bundle in a hidden staging directory and atomically renames it to the canonical
@@ -416,6 +453,18 @@ directory exists with `FAILURE_PENDING`, only the compute terminalizer may
 complete it. A published success or failure is immutable and idempotently
 recognized. None of these recovery operations creates another scientific
 attempt.
+
+The post-recovery CPU aggregate uses a different directory-publication
+primitive because the HPC4 project filesystem rejects
+`renameat2(RENAME_NOREPLACE)`. GNU `mv --no-clobber` is not an equivalent
+fallback: without native support it has a check-then-rename race. The
+terminalizer instead claims the evidence directory with atomic `mkdir`,
+installs a claim binding the outer attempt owner and payload manifest, and
+hard-links each already-fsynced staged file with create-if-absent semantics.
+Only an exact claim-bound prefix may resume, and only the later `.PUBLISHED`
+receipt authorizes consumption. Thus a crash can expose an incomplete
+directory but cannot expose it as a valid aggregate or overwrite an occupied
+name.
 
 ## 7. Ridge, scale, and efficiency experiments
 
@@ -508,7 +557,7 @@ finish and verify the pilot-capable implementation
   -> if needed, rerun calibration at the next identity-bound horizon
   -> run target-free fixed-global-beta freeze pilot on the beta*=2 grid
   -> freeze accepted beta_0, horizon, numerical gates, and formal identity
-  -> run exactly seeds 20260901..20260930
+  -> precommit the exact-30 campaign plan and run its eight fixed waves
   -> run mandatory ridge and frozen-global-beta multiplier sensitivity
   -> run all-six and capacity/sample-size secondary experiments
   -> run separate human/external robustness evaluation

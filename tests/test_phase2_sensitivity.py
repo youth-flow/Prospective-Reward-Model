@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
 from smart_reward.config import load_config
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
@@ -26,6 +27,7 @@ from smart_reward.phase2_sensitivity import (
     build_phase2_sensitivity_aggregate,
     load_primary_sensitivity_binding,
 )
+from smart_reward.repeated_label_diagnostics import build_repeated_label_tail_diagnostics
 
 ROOT = Path(__file__).resolve().parents[1]
 PILOT = ROOT / "configs" / "common_beta_pilot.yaml"
@@ -338,6 +340,18 @@ def test_primary_binding_accepts_sorted_json_but_requires_exact_frozen_heads(
         PRORM_PLUS: [0.3, -0.4],
     }
     heads_sha = _canonical_sha256(heads)
+    train_prompts = int(config["run"]["split_sizes"]["train"])
+    replicate_count_sha = "1" * 64
+    replicate_h_sha = "2" * 64
+    mean_h_sha = "3" * 64
+    tail_diagnostics = build_repeated_label_tail_diagnostics(
+        replicate_counts=torch.ones((4, train_prompts), dtype=torch.int64),
+        replicate_h=torch.zeros((4, train_prompts), dtype=torch.float64),
+        mean_h=torch.zeros(train_prompts, dtype=torch.float64),
+        replicate_count_sha256=replicate_count_sha,
+        replicate_h_sha256=replicate_h_sha,
+        mean_h_sha256=mean_h_sha,
+    )
     result = {
         "schema_version": "common-beta-finite-policy/v2",
         "design_stage": "confirmatory",
@@ -355,7 +369,15 @@ def test_primary_binding_accepts_sorted_json_but_requires_exact_frozen_heads(
             "head_weights": heads,
             "heads_sha256": heads_sha,
             "training_design_sha256": phase2_design_identity(config),
-            "audit": {"label_stream": {"label_stream_sha256": "d" * 64}},
+            "audit": {
+                "label_stream": {
+                    "label_stream_sha256": "d" * 64,
+                    "replicate_count_sha256": replicate_count_sha,
+                    "replicate_h_sha256": replicate_h_sha,
+                    "mean_h_sha256": mean_h_sha,
+                    "repeated_label_tail_diagnostics": tail_diagnostics,
+                }
+            },
         },
         "common_beta_calibration": {"beta_common": 2.5},
         "pre_oracle_safety_gate": {
@@ -397,6 +419,7 @@ def test_primary_binding_accepts_sorted_json_but_requires_exact_frozen_heads(
         PRORM_PLUS: (0.3, -0.4),
     }
     assert binding.heads_sha256 == heads_sha
+    assert binding.repeated_label_tail_diagnostics_sha256 == tail_diagnostics["diagnostics_sha256"]
     assert binding.beta0 == 2.5
     assert tuple(binding.primary_arms) == PHASE2_ARM_ORDER
 

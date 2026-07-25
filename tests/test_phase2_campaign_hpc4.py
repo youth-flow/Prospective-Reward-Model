@@ -94,6 +94,8 @@ def test_campaign_submit_binds_clean_exact_confirmatory_source_and_inventory() -
 def test_campaign_submit_requires_ordered_exact_30_terminal_manifests_and_markers() -> None:
     submit = _text(SUBMIT)
 
+    assert "campaign-plan.json" in submit
+    assert "PRORM_PHASE2_CAMPAIGN_PLAN_SHA256" in submit
     assert "expected_terminal_count=30" in submit
     assert "expected_argument_count=6" in submit
     assert "<30 terminal manifests" not in submit
@@ -201,7 +203,9 @@ def test_campaign_job_uses_terminal_finalizer_and_atomic_no_overwrite_publicatio
     assert '"${staging_dir}" "${PRORM_PHASE2_CAMPAIGN_OUTPUT_DIR}"' in job
     assert "mv -T --no-clobber" in job
     assert "atomic no-overwrite campaign directory publication failed" in job
-    assert "phase2-campaign-publication-receipt/v1" in job
+    assert "phase2-campaign-publication-receipt/v2" in job
+    assert '"campaign_plan_sha256": campaign_plan_sha' in job
+    assert 'source_bindings=("${campaign_plan}:${PRORM_PHASE2_CAMPAIGN_PLAN_SHA256}")' in job
     assert '"publication_commit": "atomic_directory_rename"' in job
     assert "fsync_tree()" in job
     assert "campaign publication staging tree differs from its declaration" in job

@@ -154,12 +154,14 @@ seed_root="${design_root}/seed-${seed}"
 attempt_parent="${seed_root}/attempt-${attempt_index}"
 job_dir="${attempt_parent}/job-${job_id}"
 campaign_registry="${design_root}/campaign-registry"
+registry_admissions="${campaign_registry}/admissions"
 registry_submissions="${campaign_registry}/submissions"
 registry_executions="${campaign_registry}/executions"
 registry_recoveries="${campaign_registry}/recoveries"
 registry_scheduler_terminals="${campaign_registry}/scheduler-terminals"
 for directory in \
-  "${campaign_registry}" "${registry_submissions}" "${registry_executions}" \
+  "${campaign_registry}" "${registry_admissions}" \
+  "${registry_submissions}" "${registry_executions}" \
   "${registry_recoveries}" "${registry_scheduler_terminals}"; do
   [[ -d "${directory}" && ! -L "${directory}" ]] \
     || die "campaign registry directory is missing or unsafe: ${directory}"
@@ -201,6 +203,29 @@ fi
 if (( ${#existing_jobs[@]} == 1 )) && [[ "${existing_jobs[0]}" != "${job_dir}" ]]; then
   die "attempt is already claimed by a different job directory"
 fi
+validate_existing_terminal_bundle() {
+  local terminal_path="$1"
+  python3 -I -S \
+    "${repo_root}/scripts/hpc4/validate_phase2_terminal.py" \
+    "${terminal_path}" "${seed}" "${design_sha}" "${base_hash}" \
+    "${PRORM_GIT_COMMIT}" \
+    "$(python3 -I -S - "${campaign_registry}/campaign-plan.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["producer"]["image_sha256"])
+PY
+)" \
+    "$(python3 -I -S - "${campaign_registry}/campaign-plan.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["producer"]["hf_inventory_sha256"])
+PY
+)" >/dev/null
+}
 if [[ -d "${job_dir}" && ! -L "${job_dir}" ]]; then
   success_components=0
   for filename in SUCCESS phase2-success-terminal.json; do
@@ -219,6 +244,8 @@ if [[ -d "${job_dir}" && ! -L "${job_dir}" ]]; then
       [[ ! -e "${job_dir}/${conflicting}" && ! -L "${job_dir}/${conflicting}" ]] \
         || die "successful attempt has conflicting failure evidence"
     done
+    validate_existing_terminal_bundle "${job_dir}/phase2-success-terminal.json" \
+      || die "existing success bundle failed full terminal/registry validation"
     fsync_file_and_parent "${job_dir}/SUCCESS" \
       || die "existing SUCCESS marker durability repair failed"
     fsync_directory "${attempt_parent}" \
@@ -242,6 +269,8 @@ if [[ -d "${job_dir}" && ! -L "${job_dir}" ]]; then
       && -f "${job_dir}/phase2-attempt-ledger.json" \
       && ! -L "${job_dir}/phase2-attempt-ledger.json" ]] \
       || die "authoritative compute-failure bundle is partial or unsafe"
+    validate_existing_terminal_bundle "${job_dir}/phase2-failure-terminal.json" \
+      || die "existing compute-failure bundle failed full terminal/registry validation"
     fsync_file_and_parent "${job_dir}/FAILED" \
       || die "existing FAILED marker durability repair failed"
     fsync_directory "${attempt_parent}" \
@@ -258,6 +287,8 @@ if [[ -d "${job_dir}" && ! -L "${job_dir}" ]]; then
       && -f "${job_dir}/phase2-attempt-ledger.json" \
       && ! -L "${job_dir}/phase2-attempt-ledger.json" ]] \
       || die "authoritative scheduler-failure bundle is partial or unsafe"
+    validate_existing_terminal_bundle "${job_dir}/phase2-failure-terminal.json" \
+      || die "existing scheduler-failure bundle failed full terminal/registry validation"
     fsync_file_and_parent "${job_dir}/SCHEDULER_FAILED" \
       || die "existing SCHEDULER_FAILED marker durability repair failed"
     fsync_directory "${attempt_parent}" \
@@ -288,7 +319,8 @@ python3 -I -S - \
   "${array_task_id}" "${scheduler_sha}" "${design_sha}" "${base_hash}" \
   "${runtime_sha}" "${PRORM_GIT_COMMIT}" "${PRORM_CLUSTER_NAME}" \
   "${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256}" \
-  "${registry_submissions}" "${registry_executions}" <<'PY'
+  "${campaign_registry}" "${registry_submissions}" \
+  "${registry_executions}" <<'PY'
 import hashlib
 import json
 import re
@@ -311,6 +343,7 @@ from pathlib import Path
     git_commit,
     cluster_name,
     freeze_sha,
+    campaign_registry_raw,
     submissions_raw,
     executions_raw,
 ) = sys.argv[1:]
@@ -383,7 +416,10 @@ if len(fields) != 5:
         "scheduler evidence must be Cluster|JobIDRaw|JobID|State|ExitCode"
     )
 observed_cluster, slurm_job_id, observed_array_task, state, exit_code = fields
-state = state.split("+", 1)[0]
+state_tokens = state.split()
+if not state_tokens:
+    raise SystemExit("scheduler state is empty")
+state = state_tokens[0].split("+", 1)[0]
 if observed_cluster != cluster_name or observed_array_task != job_id:
     raise SystemExit("scheduler evidence belongs to a different array task")
 if re.fullmatch(r"[1-9][0-9]*", slurm_job_id) is None:
@@ -405,35 +441,159 @@ if re.fullmatch(r"[0-9]+:[0-9]+", exit_code) is None:
 
 submission_path = Path(submissions_raw) / f"array-{array_job_id}.json"
 if submission_path.is_symlink() or not submission_path.is_file():
-    raise SystemExit("scheduler terminal lacks its held-array submission registry")
+    raise SystemExit("scheduler terminal lacks its fixed-wave submission registry")
 submission = load(submission_path)
-entries = submission.get("entries")
-selected = (
-    [
-        entry
-        for entry in entries
-        if isinstance(entry, dict)
-        and entry.get("seed") == seed
-        and entry.get("attempt_index") == attempt_index
-        and entry.get("array_job_id") == array_job_id
-        and entry.get("array_task_id") == int(array_task_id)
-    ]
-    if isinstance(entries, list)
-    else []
+plan_path = Path(campaign_registry_raw) / "campaign-plan.json"
+if plan_path.is_symlink() or not plan_path.is_file():
+    raise SystemExit("scheduler terminal lacks the immutable campaign plan")
+plan_bytes = plan_path.read_bytes()
+plan = load(plan_path)
+plan_sha = hashlib.sha256(plan_bytes).hexdigest()
+wave_tasks = (
+    (0, 1, 2, 3),
+    (4, 5, 6, 7),
+    (8, 9, 10, 11),
+    (12, 13, 14, 15),
+    (16, 17, 18, 19),
+    (20, 21, 22, 23),
+    (24, 25, 26, 27),
+    (28, 29),
 )
+task_id = int(array_task_id)
+wave_index = next(
+    (index for index, tasks in enumerate(wave_tasks) if task_id in tasks),
+    -1,
+)
+if wave_index < 0 or seed != 20260901 + task_id:
+    raise SystemExit(
+        "scheduler terminal seed does not match its immutable global array task"
+    )
+expected_waves = [
+    {
+        "wave_index": index,
+        "array_spec": f"{tasks[0]}-{tasks[-1]}%2",
+        "array_task_ids": list(tasks),
+        "seeds": [20260901 + task for task in tasks],
+    }
+    for index, tasks in enumerate(wave_tasks)
+]
 if (
-    submission.get("schema_version") != "prorm-phase2-campaign-submission/v1"
+    plan.get("schema_version") != "prorm-phase2-fixed-wave-campaign-plan/v1"
+    or plan.get("status") != "precommitted_before_first_slurm_submission"
+    or plan.get("phase2_design_sha256") != design_sha
+    or plan.get("base_config_hash") != base_hash
+    or plan.get("git_commit") != git_commit
+    or plan.get("accepted_freeze_aggregate_sha256") != freeze_sha
+    or plan.get("ordered_seeds") != list(range(20260901, 20260931))
+    or plan.get("attempt_index") != 1
+    or plan.get("retry_policy") != "single_predeclared_attempt_no_retry"
+    or plan.get("replacement_seed_allowed") is not False
+    or plan.get("optional_stopping_allowed") is not False
+    or plan.get("max_submitted_tasks") != 4
+    or plan.get("max_running_tasks") != 2
+    or plan.get("waves") != expected_waves
+):
+    raise SystemExit("scheduler terminal campaign plan is invalid")
+expected_submission_fields = {
+    "schema_version",
+    "status",
+    "campaign_plan_sha256",
+    "wave_admission_sha256",
+    "scheduler_request_sha256",
+    "scheduler_request",
+    "wave_index",
+    "phase2_design_sha256",
+    "base_config_hash",
+    "git_commit",
+    "accepted_freeze_aggregate_sha256",
+    "array_job_id",
+    "submitted_cluster",
+    "array_spec",
+    "attempt_index",
+    "entries",
+    "job_tuple",
+    "producer",
+    "replacement_seed_allowed",
+    "created_at_utc",
+}
+expected_entries = [
+    {
+        "seed": 20260901 + task,
+        "attempt_index": 1,
+        "array_job_id": array_job_id,
+        "array_task_id": task,
+    }
+    for task in wave_tasks[wave_index]
+]
+if (
+    set(submission) != expected_submission_fields
+    or submission.get("schema_version") != "prorm-phase2-campaign-submission/v3"
     or submission.get("status") != "committed_while_slurm_held"
+    or submission.get("campaign_plan_sha256") != plan_sha
+    or submission.get("wave_index") != wave_index
     or submission.get("phase2_design_sha256") != design_sha
     or submission.get("base_config_hash") != base_hash
     or submission.get("git_commit") != git_commit
     or submission.get("accepted_freeze_aggregate_sha256") != freeze_sha
+    or submission.get("array_job_id") != array_job_id
     or submission.get("submitted_cluster") != cluster_name
     or cluster_name != "hpc4"
+    or submission.get("array_spec") != expected_waves[wave_index]["array_spec"]
+    or submission.get("attempt_index") != 1
+    or submission.get("entries") != expected_entries
+    or submission.get("job_tuple") != plan.get("job_tuple")
+    or submission.get("producer") != plan.get("producer")
     or submission.get("replacement_seed_allowed") is not False
-    or len(selected) != 1
 ):
-    raise SystemExit("scheduler terminal disagrees with the held-array registry")
+    raise SystemExit("scheduler terminal disagrees with the fixed-wave registry")
+admission_path = Path(campaign_registry_raw) / "admissions" / f"wave-{wave_index}.json"
+if (
+    admission_path.is_symlink()
+    or not admission_path.is_file()
+    or hashlib.sha256(admission_path.read_bytes()).hexdigest()
+    != submission.get("wave_admission_sha256")
+):
+    raise SystemExit("scheduler terminal lacks its immutable wave admission receipt")
+admission = load(admission_path)
+if (
+    admission.get("schema_version") != "prorm-phase2-wave-admission/v1"
+    or admission.get("status")
+    != "committed_before_current_wave_scheduler_submission"
+    or admission.get("campaign_plan_sha256") != plan_sha
+    or admission.get("wave_index") != wave_index
+    or admission.get("wave") != expected_waves[wave_index]
+    or admission.get("admission_rule")
+    != "predecessor_terminal_completeness_only_outcome_independent"
+):
+    raise SystemExit("scheduler terminal wave admission receipt is invalid")
+scheduler_request = submission.get("scheduler_request")
+if (
+    not isinstance(scheduler_request, dict)
+    or hashlib.sha256(
+        (
+            json.dumps(
+                scheduler_request,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+    ).hexdigest()
+    != submission.get("scheduler_request_sha256")
+    or scheduler_request.get("schema_version")
+    != "prorm-phase2-held-scheduler-request/v1"
+    or scheduler_request.get("captured_while_held") is not True
+    or scheduler_request.get("normalized", {}).get("array_job_id") != array_job_id
+    or scheduler_request.get("normalized", {}).get("array_spec")
+    != expected_waves[wave_index]["array_spec"]
+    or scheduler_request.get("normalized", {}).get("array_task_throttle") != 2
+    or scheduler_request.get("normalized", {}).get("qos") != "l20_qos"
+    or scheduler_request.get("normalized", {}).get("walltime")
+    != plan.get("job_tuple", {}).get("walltime")
+):
+    raise SystemExit("scheduler terminal held request evidence is invalid")
 submission_sha = hashlib.sha256(submission_path.read_bytes()).hexdigest()
 execution_path = (
     Path(executions_raw) / f"seed-{seed}-attempt-{attempt_index}.json"
@@ -677,7 +837,60 @@ if existing_claim_raw:
         if not key or key in claim_fields:
             raise SystemExit("existing attempt claim repeats an identity")
         claim_fields[key] = value
-    if (
+    shared_mismatch = (
+        claim_fields.get("cluster_name") != attestation["cluster_name"]
+        or claim_fields.get("array_job_id") != attestation["array_job_id"]
+        or claim_fields.get("array_task_id") != str(attestation["array_task_id"])
+        or claim_fields.get("slurm_job_id") != attestation["slurm_job_id"]
+        or claim_fields.get("slurm_restart_count") != "0"
+        or claim_fields.get("attempt_index") != attempt_raw
+        or claim_fields.get("seed") != seed_raw
+        or claim_fields.get("phase2_design_sha256") != design
+        or claim_fields.get("base_config_hash") != base
+        or claim_fields.get("git_commit") != attestation["git_commit"]
+        or claim_fields.get("accepted_freeze_aggregate_sha256")
+        != attestation["accepted_freeze_aggregate_sha256"]
+        or claim_fields.get("registry_submission_sha256")
+        != attestation["registry_submission_sha256"]
+        or claim_fields.get("registry_execution_sha256")
+        != (attestation["registry_execution_sha256"] or "none")
+    )
+    compute_claim = (
+        claim_fields.get("schema_version")
+        == "prorm-phase2-formal-attempt-claim/v1"
+        and claim_fields.get("status") == "CLAIMED"
+        and "registry_scheduler_terminal_sha256" not in claim_fields
+    )
+    scheduler_claim = (
+        claim_fields.get("schema_version")
+        == "prorm-phase2-formal-scheduler-attempt-claim/v1"
+        and claim_fields.get("status") == "CLAIMED_BY_SCHEDULER_RECONCILIATION"
+        and claim_fields.get("registry_scheduler_terminal_sha256")
+        == scheduler_registry_sha
+    )
+    if shared_mismatch or not (compute_claim or scheduler_claim):
+        raise SystemExit("existing attempt claim disagrees with scheduler evidence")
+    if scheduler_claim and set(claim_fields) != {
+        "schema_version",
+        "status",
+        "cluster_name",
+        "array_job_id",
+        "array_task_id",
+        "slurm_job_id",
+        "slurm_restart_count",
+        "attempt_index",
+        "seed",
+        "phase2_design_sha256",
+        "base_config_hash",
+        "git_commit",
+        "accepted_freeze_aggregate_sha256",
+        "registry_submission_sha256",
+        "registry_execution_sha256",
+        "registry_scheduler_terminal_sha256",
+        "created_at_utc",
+    }:
+        raise SystemExit("existing scheduler attempt claim fields are invalid")
+    if compute_claim and (
         claim_fields.get("schema_version")
         != "prorm-phase2-formal-attempt-claim/v1"
         or claim_fields.get("status") != "CLAIMED"

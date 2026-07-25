@@ -197,6 +197,8 @@ for name in \
   PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256 \
   PRORM_PHASE2_FROZEN_GLOBAL_BETA \
   PRORM_PHASE2_CAMPAIGN_REGISTRY \
+  PRORM_PHASE2_CAMPAIGN_PLAN_SHA256 PRORM_PHASE2_WAVE_ADMISSION_SHA256 \
+  PRORM_PHASE2_WAVE_INDEX \
   PRORM_PHASE2_ATTEMPT_INDEX; do
   [[ -n "${!name:-}" ]] || die "${name} is required"
 done
@@ -224,6 +226,8 @@ case "${SLURM_RESTART_COUNT:-0}" in
 esac
 [[ "${PRORM_PHASE2_ATTEMPT_INDEX}" =~ ^[1-9][0-9]*$ ]] \
   || die "PRORM_PHASE2_ATTEMPT_INDEX must be a positive integer"
+[[ "${PRORM_PHASE2_WAVE_INDEX}" =~ ^[0-7]$ ]] \
+  || die "PRORM_PHASE2_WAVE_INDEX must identify one of eight fixed waves"
 [[ "${SLURM_JOB_ACCOUNT:-}" = "sigroup" ]] \
   || die "Phase-2 confirmatory run requires Slurm account sigroup"
 case "${SLURM_JOB_PARTITION:-}" in
@@ -245,7 +249,7 @@ esac
 reject_ambient_controls
 
 for command_name in \
-  apptainer flock git python3 realpath sha256sum awk grep mktemp cp mv ln; do
+  apptainer flock git python3 realpath sha256sum awk grep mktemp cp mv ln scontrol; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || die "required command is unavailable: ${command_name}"
 done
@@ -291,7 +295,8 @@ for digest_name in \
   PRORM_IMAGE_SHA256 PRORM_PHASE2_DESIGN_SHA256 \
   PRORM_PHASE2_BASE_CONFIG_HASH PRORM_PHASE2_OVERLAY_FILE_SHA256 \
   PRORM_PHASE2_BASE_FILE_SHA256 PRORM_IDENTITIES_FILE_SHA256 \
-  PRORM_HF_INVENTORY_SHA256 PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256; do
+  PRORM_HF_INVENTORY_SHA256 PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256 \
+  PRORM_PHASE2_CAMPAIGN_PLAN_SHA256 PRORM_PHASE2_WAVE_ADMISSION_SHA256; do
   [[ "${!digest_name}" =~ ^[0-9a-f]{64}$ ]] \
     || die "${digest_name} must be lowercase SHA256"
 done
@@ -367,13 +372,15 @@ expected_campaign_registry="${formal_design_root}/campaign-registry"
 [[ "${PRORM_PHASE2_CAMPAIGN_REGISTRY}" = "${expected_campaign_registry}" ]] \
   || die "campaign registry is not addressed by the formal design identity"
 registry_submissions="${PRORM_PHASE2_CAMPAIGN_REGISTRY}/submissions"
+registry_admissions="${PRORM_PHASE2_CAMPAIGN_REGISTRY}/admissions"
 registry_executions="${PRORM_PHASE2_CAMPAIGN_REGISTRY}/executions"
 registry_recoveries="${PRORM_PHASE2_CAMPAIGN_REGISTRY}/recoveries"
 registry_scheduler_terminals="${PRORM_PHASE2_CAMPAIGN_REGISTRY}/scheduler-terminals"
 registry_staging="${PRORM_PHASE2_CAMPAIGN_REGISTRY}/.staging"
 registry_lock="${PRORM_PHASE2_CAMPAIGN_REGISTRY}/registry.lock"
 for registry_directory in \
-  "${registry_submissions}" "${registry_executions}" "${registry_recoveries}" \
+  "${registry_admissions}" "${registry_submissions}" \
+  "${registry_executions}" "${registry_recoveries}" \
   "${registry_scheduler_terminals}" "${registry_staging}"; do
   [[ -d "${registry_directory}" && ! -L "${registry_directory}" \
     && "$(realpath -e -- "${registry_directory}")" = "${registry_directory}" ]] \
@@ -396,6 +403,10 @@ PY
 
 mapfile -t registry_submission_info < <(
   python3 -I -S - \
+    "${PRORM_PHASE2_CAMPAIGN_REGISTRY}/campaign-plan.json" \
+    "${PRORM_PHASE2_CAMPAIGN_PLAN_SHA256}" \
+    "${registry_admissions}/wave-${PRORM_PHASE2_WAVE_INDEX}.json" \
+    "${PRORM_PHASE2_WAVE_ADMISSION_SHA256}" "${PRORM_PHASE2_WAVE_INDEX}" \
     "${registry_submissions}" "${SLURM_ARRAY_JOB_ID}" \
     "${SLURM_ARRAY_TASK_ID}" "${seed}" "${PRORM_PHASE2_ATTEMPT_INDEX}" \
     "${PRORM_PHASE2_DESIGN_SHA256}" "${PRORM_PHASE2_BASE_CONFIG_HASH}" \
@@ -409,9 +420,15 @@ import json
 import re
 import sys
 from pathlib import Path
+from pathlib import PurePosixPath
 
 
 (
+    plan_raw,
+    plan_sha,
+    admission_raw,
+    admission_sha,
+    wave_raw,
     submissions_raw,
     array_job_id,
     task_raw,
@@ -432,6 +449,7 @@ from pathlib import Path
 task_id = int(task_raw)
 seed = int(seed_raw)
 attempt_index = int(attempt_raw)
+wave_index = int(wave_raw)
 
 
 def reject_duplicates(pairs):
@@ -443,26 +461,288 @@ def reject_duplicates(pairs):
     return value
 
 
-paths = sorted(Path(submissions_raw).iterdir())
-if len(paths) != 1:
-    raise SystemExit("formal compute lacks one unique held-array registry submission")
-path = paths[0]
-if (
-    path.name != f"array-{array_job_id}.json"
-    or path.is_symlink()
-    or not path.is_file()
-):
-    raise SystemExit("formal campaign submission path is unsafe or unexpected")
-value = json.loads(
-    path.read_text(encoding="utf-8"),
+plan_path = Path(plan_raw)
+if plan_path.is_symlink() or not plan_path.is_file():
+    raise SystemExit("formal compute lacks its immutable fixed-wave campaign plan")
+plan_bytes = plan_path.read_bytes()
+if hashlib.sha256(plan_bytes).hexdigest() != plan_sha:
+    raise SystemExit("formal fixed-wave campaign plan SHA256 changed")
+plan = json.loads(
+    plan_bytes.decode("utf-8"),
     object_pairs_hook=reject_duplicates,
     parse_constant=lambda item: (_ for _ in ()).throw(
         ValueError(f"non-finite JSON constant: {item}")
     ),
 )
+if plan_bytes != (
+    json.dumps(
+        plan,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+).encode():
+    raise SystemExit("formal fixed-wave campaign plan is not canonical JSON")
+expected_wave_tasks = (
+    (0, 1, 2, 3),
+    (4, 5, 6, 7),
+    (8, 9, 10, 11),
+    (12, 13, 14, 15),
+    (16, 17, 18, 19),
+    (20, 21, 22, 23),
+    (24, 25, 26, 27),
+    (28, 29),
+)
+expected_waves = [
+    {
+        "wave_index": index,
+        "array_spec": f"{tasks[0]}-{tasks[-1]}%2",
+        "array_task_ids": list(tasks),
+        "seeds": [20260901 + task for task in tasks],
+    }
+    for index, tasks in enumerate(expected_wave_tasks)
+]
+plan_job = plan.get("job_tuple")
+plan_producer = plan.get("producer")
+expected_plan_fields = {
+    "schema_version",
+    "status",
+    "phase2_design_sha256",
+    "base_config_hash",
+    "git_commit",
+    "accepted_freeze_aggregate_sha256",
+    "ordered_seeds",
+    "attempt_index",
+    "retry_policy",
+    "replacement_seed_allowed",
+    "optional_stopping_allowed",
+    "max_submitted_tasks",
+    "max_running_tasks",
+    "waves",
+    "job_tuple",
+    "producer",
+    "created_at_utc",
+}
+if (
+    set(plan) != expected_plan_fields
+    or plan.get("schema_version") != "prorm-phase2-fixed-wave-campaign-plan/v1"
+    or plan.get("status") != "precommitted_before_first_slurm_submission"
+    or plan.get("phase2_design_sha256") != design_sha
+    or plan.get("base_config_hash") != base_hash
+    or plan.get("git_commit") != git_commit
+    or plan.get("accepted_freeze_aggregate_sha256") != freeze_sha
+    or plan.get("ordered_seeds") != list(range(20260901, 20260931))
+    or plan.get("attempt_index") != 1
+    or plan.get("retry_policy") != "single_predeclared_attempt_no_retry"
+    or plan.get("replacement_seed_allowed") is not False
+    or plan.get("optional_stopping_allowed") is not False
+    or plan.get("max_submitted_tasks") != 4
+    or plan.get("max_running_tasks") != 2
+    or plan.get("waves") != expected_waves
+    or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        str(plan.get("created_at_utc", "")),
+    )
+    is None
+    or not isinstance(plan_job, dict)
+    or not isinstance(plan_producer, dict)
+):
+    raise SystemExit("formal compute campaign plan differs from the frozen exact-30 waves")
+if task_id not in expected_wave_tasks[wave_index]:
+    raise SystemExit("array task is not a member of its immutable fixed wave")
+
+admission_path = Path(admission_raw)
+if admission_path.is_symlink() or not admission_path.is_file():
+    raise SystemExit("formal compute lacks its immutable wave admission receipt")
+admission_bytes = admission_path.read_bytes()
+if hashlib.sha256(admission_bytes).hexdigest() != admission_sha:
+    raise SystemExit("formal wave admission receipt SHA256 changed")
+admission = json.loads(
+    admission_bytes.decode("utf-8"),
+    object_pairs_hook=reject_duplicates,
+    parse_constant=lambda item: (_ for _ in ()).throw(
+        ValueError(f"non-finite JSON constant: {item}")
+    ),
+)
+if admission_bytes != (
+    json.dumps(
+        admission,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+).encode():
+    raise SystemExit("formal wave admission receipt is not canonical JSON")
+expected_admission_fields = {
+    "schema_version",
+    "status",
+    "campaign_plan_sha256",
+    "wave_index",
+    "wave",
+    "admission_rule",
+    "predecessor_wave_index",
+    "predecessor_admission_sha256",
+    "predecessor_submission_sha256",
+    "predecessor_terminal_snapshot",
+    "predecessor_terminal_snapshot_sha256",
+    "created_at_utc",
+}
+predecessor_index = None if wave_index == 0 else wave_index - 1
+snapshot = admission.get("predecessor_terminal_snapshot")
+if not isinstance(snapshot, list):
+    raise SystemExit("wave admission predecessor snapshot is invalid")
+canonical_snapshot = (
+    json.dumps(
+        snapshot,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+).encode()
+if (
+    set(admission) != expected_admission_fields
+    or admission.get("schema_version") != "prorm-phase2-wave-admission/v1"
+    or admission.get("status")
+    != "committed_before_current_wave_scheduler_submission"
+    or admission.get("campaign_plan_sha256") != plan_sha
+    or admission.get("wave_index") != wave_index
+    or admission.get("wave") != expected_waves[wave_index]
+    or admission.get("admission_rule")
+    != "predecessor_terminal_completeness_only_outcome_independent"
+    or admission.get("predecessor_wave_index") != predecessor_index
+    or admission.get("predecessor_terminal_snapshot_sha256")
+    != hashlib.sha256(canonical_snapshot).hexdigest()
+    or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        str(admission.get("created_at_utc", "")),
+    )
+    is None
+):
+    raise SystemExit("formal wave admission receipt differs from the locked schema")
+design_root = plan_path.parent.parent.resolve()
+if predecessor_index is None:
+    if (
+        admission.get("predecessor_admission_sha256") is not None
+        or admission.get("predecessor_submission_sha256") is not None
+        or snapshot != []
+    ):
+        raise SystemExit("wave zero admission must have an empty predecessor snapshot")
+else:
+    predecessor_tasks = expected_wave_tasks[predecessor_index]
+    if (
+        len(snapshot) != len(predecessor_tasks)
+        or admission.get("predecessor_admission_sha256") is None
+        or admission.get("predecessor_submission_sha256") is None
+    ):
+        raise SystemExit("wave admission lacks its complete predecessor chain")
+    previous_admission = admission_path.parent / f"wave-{predecessor_index}.json"
+    if (
+        previous_admission.is_symlink()
+        or not previous_admission.is_file()
+        or hashlib.sha256(previous_admission.read_bytes()).hexdigest()
+        != admission["predecessor_admission_sha256"]
+    ):
+        raise SystemExit("wave admission predecessor receipt hash is invalid")
+    predecessor_submission_matches = []
+    for candidate in Path(submissions_raw).iterdir():
+        if candidate.is_symlink() or not candidate.is_file():
+            raise SystemExit("formal submission registry contains an unsafe entry")
+        raw = candidate.read_bytes()
+        if hashlib.sha256(raw).hexdigest() == admission["predecessor_submission_sha256"]:
+            predecessor_submission_matches.append(raw)
+    if len(predecessor_submission_matches) != 1:
+        raise SystemExit("wave admission lacks one hash-bound predecessor submission")
+    expected_snapshot_keys = {
+        "seed",
+        "terminal_relative_path",
+        "terminal_sha256",
+        "marker_relative_path",
+        "marker_sha256",
+    }
+    for entry, predecessor_task in zip(snapshot, predecessor_tasks, strict=True):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != expected_snapshot_keys
+            or entry.get("seed") != 20260901 + predecessor_task
+        ):
+            raise SystemExit("wave admission predecessor snapshot order is invalid")
+        for path_key, sha_key in (
+            ("terminal_relative_path", "terminal_sha256"),
+            ("marker_relative_path", "marker_sha256"),
+        ):
+            relative_raw = entry.get(path_key)
+            expected_sha = entry.get(sha_key)
+            if (
+                not isinstance(relative_raw, str)
+                or not isinstance(expected_sha, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+            ):
+                raise SystemExit("wave admission predecessor binding is malformed")
+            relative = PurePosixPath(relative_raw)
+            if (
+                relative.is_absolute()
+                or any(part in {"", ".", ".."} for part in relative.parts)
+                or "\\" in relative_raw
+                or ":" in relative_raw
+            ):
+                raise SystemExit("wave admission predecessor path is unsafe")
+            evidence = design_root.joinpath(*relative.parts)
+            if (
+                evidence.is_symlink()
+                or not evidence.is_file()
+                or hashlib.sha256(evidence.read_bytes()).hexdigest() != expected_sha
+            ):
+                raise SystemExit("wave admission predecessor evidence hash changed")
+
+paths = sorted(Path(submissions_raw).iterdir())
+if any(
+    re.fullmatch(r"array-[1-9][0-9]*\.json", candidate.name) is None
+    or candidate.is_symlink()
+    or not candidate.is_file()
+    for candidate in paths
+):
+    raise SystemExit("formal submission registry contains an unsafe entry")
+selected = [candidate for candidate in paths if candidate.name == f"array-{array_job_id}.json"]
+if len(selected) != 1:
+    raise SystemExit("formal compute lacks one unique fixed-wave submission")
+path = selected[0]
+if (
+    path.name != f"array-{array_job_id}.json"
+):
+    raise SystemExit("formal campaign submission path is unsafe or unexpected")
+submission_bytes = path.read_bytes()
+value = json.loads(
+    submission_bytes.decode("utf-8"),
+    object_pairs_hook=reject_duplicates,
+    parse_constant=lambda item: (_ for _ in ()).throw(
+        ValueError(f"non-finite JSON constant: {item}")
+    ),
+)
+if submission_bytes != (
+    json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+).encode():
+    raise SystemExit("formal fixed-wave submission is not canonical JSON")
 expected_fields = {
     "schema_version",
     "status",
+    "campaign_plan_sha256",
+    "wave_admission_sha256",
+    "scheduler_request_sha256",
+    "scheduler_request",
+    "wave_index",
     "phase2_design_sha256",
     "base_config_hash",
     "git_commit",
@@ -484,12 +764,13 @@ expected_entries = [
         "array_job_id": array_job_id,
         "array_task_id": index,
     }
-    for index in range(30)
+    for index in expected_wave_tasks[wave_index]
 ]
 job_tuple = value.get("job_tuple")
 expected_job_tuple = {
     "account": "sigroup",
     "partition": "gpu-l20",
+    "qos": "l20_qos",
     "nodes": 1,
     "tasks": 1,
     "cpus_per_task": 8,
@@ -509,10 +790,53 @@ expected_producer = {
     "image_sha256": image_sha,
     "hf_inventory_sha256": inventory_sha,
 }
+scheduler_request = value.get("scheduler_request")
+scheduler_normalized = (
+    scheduler_request.get("normalized")
+    if isinstance(scheduler_request, dict)
+    else None
+)
 if (
     set(value) != expected_fields
-    or value.get("schema_version") != "prorm-phase2-campaign-submission/v1"
+    or value.get("schema_version") != "prorm-phase2-campaign-submission/v3"
     or value.get("status") != "committed_while_slurm_held"
+    or value.get("campaign_plan_sha256") != plan_sha
+    or value.get("wave_admission_sha256") != admission_sha
+    or not isinstance(scheduler_request, dict)
+    or hashlib.sha256(
+        (
+            json.dumps(
+                scheduler_request,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+    ).hexdigest()
+    != value.get("scheduler_request_sha256")
+    or scheduler_request.get("schema_version")
+    != "prorm-phase2-held-scheduler-request/v1"
+    or scheduler_request.get("captured_while_held") is not True
+    or not isinstance(scheduler_request.get("raw_scontrol_record"), str)
+    or hashlib.sha256(scheduler_request["raw_scontrol_record"].encode()).hexdigest()
+    != scheduler_request.get("raw_scontrol_sha256")
+    or not isinstance(scheduler_normalized, dict)
+    or scheduler_normalized.get("array_job_id") != array_job_id
+    or scheduler_normalized.get("job_name")
+    != f"prorm-p2-{plan_sha[:12]}-w{wave_index}"
+    or scheduler_normalized.get("array_spec")
+    != expected_waves[wave_index]["array_spec"]
+    or scheduler_normalized.get("array_task_throttle") != 2
+    or scheduler_normalized.get("qos") != "l20_qos"
+    or scheduler_normalized.get("walltime") != job_tuple.get("walltime")
+    or scheduler_normalized.get("memory") != "64G"
+    or scheduler_normalized.get("cpus_per_task") != 8
+    or scheduler_normalized.get("gpus_per_node") != 1
+    or scheduler_normalized.get("requeue") is not False
+    or scheduler_normalized.get("restarts") != 0
+    or value.get("wave_index") != wave_index
     or value.get("phase2_design_sha256") != design_sha
     or value.get("base_config_hash") != base_hash
     or value.get("git_commit") != git_commit
@@ -520,14 +844,17 @@ if (
     or value.get("array_job_id") != array_job_id
     or value.get("submitted_cluster") != cluster
     or cluster != "hpc4"
-    or re.fullmatch(r"0-29%[12]", str(value.get("array_spec", ""))) is None
+    or value.get("array_spec") != expected_waves[wave_index]["array_spec"]
     or value.get("attempt_index") != 1
     or attempt_index != 1
     or value.get("entries") != expected_entries
-    or expected_entries[task_id]["seed"] != seed
+    or seed != 20260901 + task_id
     or value.get("replacement_seed_allowed") is not False
-    or not isinstance(value.get("created_at_utc"), str)
-    or not value["created_at_utc"]
+    or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        str(value.get("created_at_utc", "")),
+    )
+    is None
     or not isinstance(job_tuple, dict)
     or set(job_tuple) != set(expected_job_tuple) | {"walltime"}
     or any(
@@ -540,16 +867,78 @@ if (
     )
     is None
     or value.get("producer") != expected_producer
+    or job_tuple != plan_job
+    or value.get("producer") != plan_producer
 ):
-    raise SystemExit("formal compute identity differs from the exact held-array schema")
+    raise SystemExit("formal compute identity differs from the fixed-wave schema")
 print(path)
 print(hashlib.sha256(path.read_bytes()).hexdigest())
+print(job_tuple["walltime"])
 PY
 )
-[[ "${#registry_submission_info[@]}" -eq 2 ]] \
+[[ "${#registry_submission_info[@]}" -eq 3 ]] \
   || die "failed to resolve the immutable held-array registry submission"
 registry_submission="${registry_submission_info[0]}"
 registry_submission_sha256="${registry_submission_info[1]}"
+registered_walltime="${registry_submission_info[2]}"
+
+runtime_scheduler_record="$(
+  scontrol show job --oneliner "${SLURM_JOB_ID}"
+)" || die "cannot inspect the running task scheduler identity"
+python3 -I -S - \
+  "${runtime_scheduler_record}" "${SLURM_ARRAY_JOB_ID}" \
+  "${SLURM_ARRAY_TASK_ID}" "${registered_walltime}" <<'PY'
+import re
+import sys
+
+
+record, array_job_id, array_task_id, walltime = sys.argv[1:]
+records = [line for line in record.splitlines() if line]
+if len(records) != 1 or "\r" in record:
+    raise SystemExit("running task lacks one safe scontrol identity")
+fields = {}
+for token in records[0].split():
+    if "=" not in token:
+        continue
+    key, value = token.split("=", 1)
+    if key in fields:
+        raise SystemExit(f"running task repeats scontrol field {key}")
+    fields[key] = value
+tres = {}
+for entry in str(fields.get("TRES", "")).split(","):
+    if "=" not in entry:
+        continue
+    key, value = entry.split("=", 1)
+    if key in tres:
+        raise SystemExit(f"running task repeats TRES field {key}")
+    tres[key] = value
+if (
+    fields.get("ArrayJobId") != array_job_id
+    or fields.get("ArrayTaskId") != array_task_id
+    or fields.get("ArrayTaskThrottle") != "2"
+    or fields.get("Account") != "sigroup"
+    or fields.get("Partition") != "gpu-l20"
+    or fields.get("QOS") != "l20_qos"
+    or fields.get("Requeue") != "0"
+    or fields.get("Restarts") != "0"
+    or fields.get("NumNodes") != "1"
+    or fields.get("NumTasks") != "1"
+    or fields.get("NumCPUs") != "8"
+    or fields.get("CPUs/Task") != "8"
+    or fields.get("MinMemoryNode") != "64G"
+    or fields.get("TimeLimit") != walltime
+    or tres.get("cpu") != "8"
+    or tres.get("mem") != "64G"
+    or tres.get("node") != "1"
+    or tres.get("gres/gpu") != "1"
+    or re.fullmatch(
+        r"gres(?::|/)gpu(?::[A-Za-z0-9_.-]+)?:1",
+        str(fields.get("TresPerNode", "")),
+    )
+    is None
+):
+    raise SystemExit("running task resources differ from the immutable scheduler request")
+PY
 [[ "${registry_submission_sha256}" =~ ^[0-9a-f]{64}$ ]] \
   || die "held-array registry submission SHA256 is invalid"
 
@@ -788,6 +1177,52 @@ if (
     raise SystemExit("container-computed formal Phase-2 identities are invalid")
 if base.get("status") != "ok" or base.get("config_hash") != expected_base:
     raise SystemExit("container-computed formal base identity is invalid")
+PY
+
+accepted_freeze_preflight="${job_dir}/accepted-freeze-preflight.json"
+"${container[@]}" python - \
+  "${execution_overlay}" "${PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE}" \
+  "${PRORM_PHASE2_FROZEN_GLOBAL_BETA}" <<'PY' \
+  >"${accepted_freeze_preflight}"
+import json
+import math
+import sys
+from smart_reward.phase2_config import load_phase2_config_bundle
+from smart_reward.phase2_pilot_aggregate import (
+    verify_beta_source_aggregate,
+    verify_horizon_parent_aggregate,
+)
+
+overlay, aggregate, expected_beta = sys.argv[1:]
+config = load_phase2_config_bundle(overlay).config
+beta = verify_beta_source_aggregate(config, aggregate)
+horizon = verify_horizon_parent_aggregate(config, aggregate)
+if (
+    beta is None
+    or horizon is None
+    or beta.get("source_pilot_phase") != "freeze"
+    or horizon.get("source_pilot_phase") != "freeze"
+    or not math.isclose(
+        float(beta["accepted_beta"]),
+        float(expected_beta),
+        rel_tol=0.0,
+        abs_tol=1.0e-12,
+    )
+):
+    raise SystemExit("accepted freeze failed recursive pre-compute verification")
+print(json.dumps({
+    "schema_version": "prorm-phase2-confirmatory-accepted-freeze-preflight/v1",
+    "status": "passed",
+    "accepted_freeze_schema": (
+        "v3_post_recovery"
+        if config["schema_version"] == "prorm-common-beta-post-recovery-experiment/v1"
+        else "v2_legacy_replay"
+    ),
+    "accepted_beta": beta["accepted_beta"],
+    "source_pilot_phase": "freeze",
+    "outcome_information_consumed": False,
+    "reward_head_or_optimizer_state_reused": False,
+}, allow_nan=False, sort_keys=True, separators=(",", ":")))
 PY
 
 mapfile -t run_info < <(
@@ -1183,6 +1618,7 @@ finalize_run() {
   fi
   for filename in \
     phase2-config-check.json base-config-check.json \
+    accepted-freeze-preflight.json \
     hf-inventory-verification.json gpu-check.log env-report.log \
     run-manifest.json materialize.log memory-materialize.json \
     artifact-materialization.json artifact-verification.json \
@@ -1196,6 +1632,7 @@ finalize_run() {
   if (( success_terminal_ready == 1 )); then
     for filename in \
       phase2-config-check.json base-config-check.json \
+      accepted-freeze-preflight.json \
       hf-inventory-verification.json gpu-check.log env-report.log \
       run-manifest.json artifact-materialization.json \
       artifact-verification.json phase2-run.log memory-phase2.json \

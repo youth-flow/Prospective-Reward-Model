@@ -55,8 +55,8 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 
 | Item | Status |
 |---|---|
-| Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
-| Automated verification | Pilot code has its historical test record; the six post-edit formal Phase 2 shell entry points separately passed `bash -n` on HPC4 on 2026-07-25, while a fresh non-confirmatory CUDA rehearsal remains mandatory before exact-30 launch |
+| Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented in the working tree; the next HPC4 submission still requires a commit-bound release audit |
+| Automated verification | Historical test and HPC4 `bash -n` records remain provenance for the snapshots that produced them, not certification of a later worktree. The exact commit used next must pass the full Python/static suite, HPC4 shell syntax checks, and a fresh non-confirmatory CUDA rehearsal before exact-30 launch |
 | Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
@@ -64,9 +64,9 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Offline Hugging Face snapshots | Cached and offline-validated; main inventory SHA256 `095d5dc5e5a952be53ce07279aa7b5f1eda57a7a8b5745a1e4afa545a1f11f7c` |
 | Historical pre-fix controlled smoke | **Passed**, job `1641475` on NVIDIA L20 (`00:03:14`), but only under the superseded FP32-solver identity |
 | Superseded main attempt | Seed `20260722`, job `1641489`, failed the mandatory initial ProRM+ PCG gate: true relative residual `2.717e-5 > 1e-5` after 2048 iterations |
-| Current numerical design | Main config `ae5d628e…a0df6`; FP64 policy geometry and 8192-iteration main ceiling |
-| Five-seed accepted main experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
-| Formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
+| Frozen Phase-1 numerical design | Main config `ae5d628e…a0df6`; FP64 policy geometry and 8192-iteration main ceiling |
+| Phase-1 five-seed accepted experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
+| Phase-1 formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
 | Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed aggregation implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
 | First Phase-2 calibration pilot | All three excluded pilot seeds fail-closed at the BT first-order gate under constant-`1e-3` AdamW; a train-only diagnostic established a deterministic decay path that passes without held-out access. The one-shot recovery has a separate identity and can only authorize a new full calibration pilot; it cannot produce or enter a beta aggregate |
@@ -497,6 +497,17 @@ underlying Bernoulli labels. Because `E[N]=10`, this costs 40 labels per
 canonical edge in expectation and has an unbounded geometric tail; exact
 unbiasedness is statistically useful but annotation-expensive.
 
+This stream is finite-variance but not light-tailed. At the locked probability
+endpoints, the second-moment tail ratio is `0.75/0.9 < 1`, whereas the
+fourth-moment ratio is `0.75/0.9^3 > 1`; a single replicate therefore has an
+infinite fourth moment there. Averaging `R=4` divides conditional variance by
+four but does not change the tail exponent. Post-recovery and confirmatory
+artifacts consequently bind a scalar-only
+`repeated-label-tail-diagnostics/v1` record into `label_stream_sha256`. Its
+nearest-rank `p50/p90/p95/p99/max` summaries are descriptive only: they may not
+clip or select samples, choose beta or seeds, gate acceptance, or authorize a
+retry. The project makes no sub-Gaussian or finite-fourth-moment claim.
+
 Phase 2 also fails closed on prompt semantics. Qwen2.5 renders the complete
 original user prompt with its own tokenizer/chat template and
 `truncation=False`. A reproducible local audit of all 5,323 unique prompts in
@@ -799,8 +810,58 @@ the validated **SIF SHA256**; it does not require the source commit to equal ima
 accepted smoke record. See [hpc4.md](docs/hpc4.md) for exact aggregation acceptance and scratch-retention
 commands.
 
-Phase 2 uses a dedicated outcome-blind entry point and the **base** config for
-HF inventory staging:
+### Legacy pre-recovery Phase 2 pilot — historical replay only
+
+The commands in this subsection document the original v2
+`common_beta_pilot.yaml` campaign. That calibration identity has already
+terminated at its frozen optimization gate and must **not** be invoked to
+continue the current experiment. The only admissible continuation is:
+
+```text
+one-shot recovery revision 2 reaches a valid three-seed terminal state
+  -> recovery-success authorization is built and verified
+  -> a fresh authorization-bound post-recovery calibration is materialized
+  -> the post-recovery pilot/aggregate control plane is used
+```
+
+The authoritative transition documents are
+[the recovery protocol](docs/phase2_recovery_protocol.md),
+[the recovery authorization contract](docs/phase2_recovery_authorization.md),
+and the
+[post-recovery HPC4 runbook](docs/phase2_post_recovery_hpc4.md).
+Do not use `submit_phase2_pilot.sh`, `submit_phase2_pilot_aggregate.sh`, or the
+historical `common_beta_pilot.yaml` identity as a substitute for that chain.
+They remain available only for byte-compatible historical replay.
+
+The current post-recovery control plane is crash-resumable and
+evidence-bearing. GPU arrays and CPU aggregation attempts are created held,
+their exact scheduler requests are fsynced to immutable ledgers, and only then
+released. For CPU aggregation, the wrapper reads the declared
+`commit:scripts/hpc4/phase2_post_recovery_aggregate.sbatch` with binary
+`git cat-file blob` and passes those exact bytes to `sbatch` on stdin; no
+mutable script pathname is submitted. While the job remains held, the
+controller-accepted script is read back, compared byte-for-byte, durably bound
+to the attempt, and checked once more immediately before release. A CPU
+aggregation job writes a persistent `aggregate.json`, `evidence/`, and `READY`
+under its attempt namespace; it never publishes the production aggregate
+itself. After Slurm records the unique registered attempt as
+`COMPLETED/0:0/0:0`, an external terminalizer executes the crash-resumable,
+no-overwrite sequence
+`ATTEMPT -> evidence -> aggregate -> PUBLISHED -> TERMINAL -> SUCCESS`.
+Because the HPC4 project filesystem lacks atomic directory
+`RENAME_NOREPLACE`, evidence publication uses an atomic `mkdir` claim,
+`EVIDENCE_CLAIM.json`, and per-file hard-link create-if-absent from a complete
+fsynced sibling tree. A partial tree is resumable only when it is an exact
+claim-bound prefix; `.PUBLISHED`, not directory existence or `READY`, is the
+publication-completeness gate.
+The resulting exact-tree bundle contains the committed script, every
+controller readback, the complete attempt/failure chain, and raw
+scheduler-authority evidence. Live publication resolves the declared Git
+object again; later offline verification validates the self-contained byte
+and digest chain without depending on Slurm or the live submission registry.
+
+In that historical v2 path, Phase 2 used a dedicated outcome-blind entry point
+and the **base** config for HF inventory staging:
 
 ```bash
 bash scripts/hpc4/submit_hf_stage.sh \
@@ -858,10 +919,27 @@ uses the accepted calibration aggregate as both `--beta-source-aggregate` and
 failed freeze as its beta source while retaining the accepted calibration as
 its horizon parent. Exact commands are in [docs/hpc4.md](docs/hpc4.md).
 
-These retries belong only to outcome-blind pilot design selection. The formal
-campaign has a different, stricter contract: one exact ordered array,
-seeds `20260901` through `20260930`, and exactly `attempt-1` for every seed.
-There is no formal retry, requeue, or replacement seed.
+The historical commands above end here. In the current design, retries belong
+only to outcome-blind pilot design selection. The formal
+campaign has a different, stricter contract: the exact ordered seeds
+`20260901` through `20260930`, exactly `attempt-1` for every seed, and an
+immutable `campaign-plan.json` committed before the first Slurm submission.
+There is no formal retry, requeue, replacement seed, or optional stopping.
+The scheduler realizes that one scientific campaign as eight predeclared
+waves: `0-3%2`, `4-7%2`, `8-11%2`, `12-15%2`, `16-19%2`, `20-23%2`,
+`24-27%2`, and `28-29%2`. This keeps at most four submitted tasks and two
+running tasks under the observed HPC4 `l20_qos MaxSubmitJobsPU=4`; it does not
+change the exact-30 estimand or any scientific configuration.
+
+Every wave also has an immutable `admissions/wave-<index>.json` committed and
+fsynced before its `sbatch`. Wave 0 binds an empty predecessor; every later
+receipt hash-binds the preceding admission, submission, and the exact ordered
+terminal-manifest/marker snapshot. The submission v3 record then binds that
+receipt plus the raw and normalized held `scontrol` request. Caller walltime,
+`l20_qos`, `%2`, CPU, memory, node, and GPU resources must equal the plan.
+Before a new submit, both `squeue` and historical `sacct` are checked under the
+deterministic wave name; any unregistered historical identity fails closed and
+is never replaced.
 
 ### Formal Phase 2 execution
 
@@ -871,9 +949,7 @@ their real paths on HPC4. With the required `PRORM_*` environment already
 exported and a clean committed checkout:
 
 ```bash
-export PRORM_PHASE2_ARRAY_CONCURRENCY=2
-
-array_submission="$(
+wave_submission="$(
   bash scripts/hpc4/submit_phase2_confirmatory.sh \
     configs/REPLACE_WITH_CONFIRMATORY_OVERLAY.yaml \
     configs/REPLACE_WITH_CONFIRMATORY_BASE.yaml \
@@ -881,14 +957,19 @@ array_submission="$(
     gpu-l20 \
     REPLACE_WITH_WALLTIME
 )"
-printf '%s\n' "${array_submission}"
+printf '%s\n' "${wave_submission}"
 ```
 
-The optional sixth argument is accepted only as the literal full range
-`0-29`; a subset is invalid. The wrapper submits the array held, commits the
-exact-30 registry, and then releases it. If the shell is interrupted after the
-registry commit but before release, rerun the **identical command**: it
-validates and releases that held array without calling `sbatch` again.
+The command accepts no caller-selected range or concurrency override. On its
+first invocation it durably commits the complete ordered seed/attempt/wave
+plan before submitting wave 0 held; each later identical invocation derives
+the only admissible next action from that plan and the immutable registry.
+A next wave becomes eligible only after every task in every preceding wave has
+a valid terminal bundle, regardless of whether those bundles record success or
+failure. If the shell is interrupted after Slurm accepts a held wave but before
+its registry record or release, rerun the **identical command**: the
+deterministic wave identity is recovered and released without creating a
+replacement job.
 
 Every task must publish one terminal head. A canonical job directory with
 `FAILURE_PENDING` is finalized by
@@ -928,8 +1009,12 @@ schemas, and monitoring commands are in [docs/hpc4.md](docs/hpc4.md).
 | Formal five-seed results and scientific conclusion | [docs/phase1_results.md](docs/phase1_results.md) |
 | Phase 2 pilot boundary, global-beta decision and formal gates | [docs/phase2_design_decisions.md](docs/phase2_design_decisions.md) |
 | First Phase-2 failure, optimizer diagnosis and one-shot recovery boundary | [docs/phase2_recovery_protocol.md](docs/phase2_recovery_protocol.md) |
+| Recovery terminal evidence and success-authorization boundary | [docs/phase2_recovery_authorization.md](docs/phase2_recovery_authorization.md) |
+| Authorization-bound post-recovery pilot and promotion runbook | [docs/phase2_post_recovery_hpc4.md](docs/phase2_post_recovery_hpc4.md) |
 | HPC4 environment closure and Slurm execution | [docs/hpc4.md](docs/hpc4.md) |
-| Config identities | [configs/main.yaml](configs/main.yaml), [configs/common_beta_pilot.yaml](configs/common_beta_pilot.yaml), [configs/identities.json](configs/identities.json) |
+| Base and recovery config identities | [configs/main.yaml](configs/main.yaml), historical [configs/common_beta_pilot.yaml](configs/common_beta_pilot.yaml), [configs/common_beta_recovery_pilot.yaml](configs/common_beta_recovery_pilot.yaml), [configs/identities.json](configs/identities.json) |
+
+Selected implementation map:
 
 ```text
 Smart-Reward-Model/             # retained repository name
@@ -943,10 +1028,15 @@ Smart-Reward-Model/             # retained repository name
 │   ├── training.py             # paired BT-MLE / ProRM+ trainers
 │   ├── phase1.py               # immutable real-model materialization
 │   ├── rollout.py              # natural directions and measured-KL updates
+│   ├── repeated_label_diagnostics.py # randomized-estimator tail diagnostics
 │   ├── phase2_training.py      # objective-specific convergence and controls
 │   ├── phase2_rollout.py       # global-beta one-step deployment
 │   ├── phase2_aggregate.py     # formal paired-seed gates
 │   ├── phase2_pilot_aggregate.py # target-free calibration/freeze decisions
+│   ├── phase2_recovery_aggregate.py # head-free recovery authorization
+│   ├── phase2_post_recovery_control.py # crash-safe post-recovery control plane
+│   ├── phase2_post_recovery_aggregate.py # calibration/freeze aggregation
+│   ├── phase2_post_recovery_output.py # post-recovery output verification
 │   ├── phase2_campaign.py      # exact-30 terminal-slot finalization
 │   ├── phase2_sensitivity.py   # frozen ridge/beta sensitivity grid
 │   ├── phase2_mechanism.py     # exact-target and low-dimensional qualifiers
@@ -960,25 +1050,33 @@ Smart-Reward-Model/             # retained repository name
 1. Preserve the completed Phase 1 aggregate and its `not_passed` conclusion.
 2. Freeze and verify the Phase 2 implementation, image, base inventory, and
    dual base/overlay identities.
-3. Run the three-seed target-free calibration pilot and strict aggregate.
+3. Preserve the failed original calibration and recovery execution revision 1
+   as immutable history. Finish recovery execution revision 2; only three
+   successful seed receipts plus exact terminal scheduler evidence may produce
+   the head-free recovery-success authorization.
+4. From that authorization, materialize and run a fresh three-seed
+   post-recovery calibration and its strict aggregate. Recovery heads, labels,
+   beta values, optimizer state, and policy state do not cross this boundary.
    If the length gate fails, rerun calibration under a new identity at the next
    horizon in `[256, 512, 1024]`, binding the failed parent aggregate SHA-256.
-4. Run a second target-free freeze pilot with one global beta for every
+5. Run a second target-free freeze pilot with one global beta for every
    seed/arm. Start at the maximum calibration candidate; failures may only
    issue a new identity at the next `beta*=2` grid point, byte-bound to the
    immediately preceding failed freeze aggregate.
-5. Bind the accepted freeze aggregate SHA-256, global `beta_0`, and all
+6. Bind the accepted freeze aggregate SHA-256, global `beta_0`, and all
    numerical/KL/horizon gates into a new confirmatory identity.
-6. Audit the implemented confirmatory GPU wrapper, terminalizers, immutable
+7. Audit the implemented confirmatory GPU wrapper, terminalizers, immutable
    campaign registry, resolver, and CPU finalizer before formal allocation.
-7. Submit the one exact ordered array for paired seeds
-   `20260901`–`20260930`. Each seed has exactly one predeclared attempt
-   (`attempt-1`): there is no formal retry and no replacement seed. Every slot
-   must end in one atomically published success or terminal-failure bundle.
-   One failed seed produces `not_passed_due_to_seed_failure` and suppresses the
-   primary CI. A complete valid campaign may still return the scientifically
-   meaningful status `not_passed`.
-8. Only afterward run the frozen ridge/beta sensitivity grid, mechanism
+8. Precommit the immutable exact-30 campaign plan, then submit its eight fixed
+   Slurm waves in order for paired seeds `20260901`–`20260930`. Each seed has
+   exactly one predeclared attempt (`attempt-1`): there is no formal retry,
+   replacement seed, or outcome-dependent stopping. Advance only after all
+   tasks in prior waves have terminal bundles, irrespective of their outcome.
+   Every slot must end in one atomically published success or terminal-failure
+   bundle. One failed seed produces `not_passed_due_to_seed_failure` and
+   suppresses the primary CI. A complete valid campaign may still return the
+   scientifically meaningful status `not_passed`.
+9. Only afterward run the frozen ridge/beta sensitivity grid, mechanism
    qualifiers, capacity/sample-size, all-six-pair, and OOD/human-label
    robustness experiments as secondary evidence.
 

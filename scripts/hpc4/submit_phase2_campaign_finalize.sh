@@ -312,12 +312,18 @@ mapfile -t terminal_inputs < <(
 )
 [[ "${#terminal_inputs[@]}" -eq "${expected_terminal_count}" ]] \
   || die "campaign registry did not resolve exactly 30 terminal heads"
+campaign_plan="${campaign_root}/campaign-registry/campaign-plan.json"
+campaign_plan="$(resolve_project_path "${campaign_plan}" file)"
+campaign_plan_sha256="$(sha256sum -- "${campaign_plan}" | awk '{print $1}')"
+[[ "${campaign_plan_sha256}" =~ ^[0-9a-f]{64}$ ]] \
+  || die "fixed-wave campaign plan SHA256 is invalid"
 
 terminals=()
 terminal_sha256s=()
 markers=()
 marker_sha256s=()
 source_bindings=()
+source_bindings+=("${campaign_plan}:${campaign_plan_sha256}")
 accepted_freeze_aggregate_sha256=""
 declare -A seen_terminal_paths=()
 declare -A seen_terminal_seeds=()
@@ -395,7 +401,8 @@ done
 for value in \
   "${project_root}" "${scratch_root}" "${repo_root}" "${overlay}" "${base_config}" \
   "${identity_path}" "${image}" "${hf_cache}" "${inventory}" "${output_dir}" \
-  "${terminal_output}" "${aggregate_output}" "${terminals[@]}" "${markers[@]}"; do
+  "${terminal_output}" "${aggregate_output}" "${campaign_plan}" \
+  "${terminals[@]}" "${markers[@]}"; do
   reject_delimiters "${value}"
 done
 
@@ -426,7 +433,7 @@ done
 [[ ! -e "${output_dir}" && ! -L "${output_dir}" ]] \
   || die "campaign publication destination appeared before submission"
 
-export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_REPO_ROOT=${repo_root},PRORM_PHASE2_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_PHASE2_OVERLAY_FILE_SHA256=${overlay_file_sha256},PRORM_PHASE2_BASE_FILE_SHA256=${base_file_sha256},PRORM_IDENTITIES_FILE_SHA256=${identity_file_sha256},PRORM_PHASE2_DESIGN_SHA256=${design_sha256},PRORM_PHASE2_BASE_CONFIG_HASH=${base_config_hash},PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256=${accepted_freeze_aggregate_sha256},PRORM_GIT_COMMIT=${git_commit},PRORM_PHASE2_TERMINAL_COUNT=30,PRORM_PHASE2_CAMPAIGN_OUTPUT_DIR=${output_dir},PRORM_PHASE2_CAMPAIGN_TERMINAL_OUTPUT=${terminal_output},PRORM_PHASE2_PRIMARY_AGGREGATE_OUTPUT=${aggregate_output}"
+export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_REPO_ROOT=${repo_root},PRORM_PHASE2_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_PHASE2_OVERLAY_FILE_SHA256=${overlay_file_sha256},PRORM_PHASE2_BASE_FILE_SHA256=${base_file_sha256},PRORM_IDENTITIES_FILE_SHA256=${identity_file_sha256},PRORM_PHASE2_DESIGN_SHA256=${design_sha256},PRORM_PHASE2_BASE_CONFIG_HASH=${base_config_hash},PRORM_PHASE2_ACCEPTED_FREEZE_AGGREGATE_SHA256=${accepted_freeze_aggregate_sha256},PRORM_PHASE2_CAMPAIGN_PLAN_SHA256=${campaign_plan_sha256},PRORM_GIT_COMMIT=${git_commit},PRORM_PHASE2_TERMINAL_COUNT=30,PRORM_PHASE2_CAMPAIGN_OUTPUT_DIR=${output_dir},PRORM_PHASE2_CAMPAIGN_TERMINAL_OUTPUT=${terminal_output},PRORM_PHASE2_PRIMARY_AGGREGATE_OUTPUT=${aggregate_output}"
 for index in {0..29}; do
   printf -v slot '%02d' "${index}"
   export_spec+=",PRORM_PHASE2_TERMINAL_${slot}=${terminals[$index]},PRORM_PHASE2_TERMINAL_SHA256_${slot}=${terminal_sha256s[$index]},PRORM_PHASE2_MARKER_${slot}=${markers[$index]},PRORM_PHASE2_MARKER_SHA256_${slot}=${marker_sha256s[$index]}"

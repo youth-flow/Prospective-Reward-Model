@@ -102,6 +102,59 @@ for path in "${overlay}" "${base_config}"; do
 done
 overlay_relative="$(realpath --relative-to="${repo_root}" "${overlay}")"
 base_relative="$(realpath --relative-to="${repo_root}" "${base_config}")"
+
+# Keep the historical v2 implementation below intact.  Post-recovery
+# overlays route to the native v3 aggregator with terminal Slurm evidence and
+# the schedule-only recovery authorization.
+if grep -Eq \
+  '^schema_version:[[:space:]]*prorm-common-beta-post-recovery-experiment/v1[[:space:]]*$' \
+  "${overlay}"; then
+  declared_base="$(
+    PYTHONPATH="${repo_root}/src" python3 - "${overlay}" <<'PY'
+import sys
+from smart_reward.phase2_config import load_phase2_config_bundle
+print(load_phase2_config_bundle(sys.argv[1]).base_config_path)
+PY
+  )" || die "could not resolve post-recovery declared base"
+  declared_base="$(realpath -e -- "${declared_base}")" \
+    || die "post-recovery declared base is missing"
+  [[ "${base_config}" = "${declared_base}" ]] \
+    || die "submitted base differs from the post-recovery overlay binding"
+  pilot_phase="$(
+    awk '/^  pilot_phase:[[:space:]]*(calibration|freeze)[[:space:]]*$/ {print $2}' \
+      "${overlay}"
+  )"
+  [[ "${pilot_phase}" = "calibration" || "${pilot_phase}" = "freeze" ]] \
+    || die "could not resolve one post-recovery pilot phase"
+  array_job_id=""
+  for task in 0 1 2; do
+    run_name="$(basename "${run_inputs[$task]}")"
+    [[ "${run_name}" =~ ^job-([1-9][0-9]*)_${task}$ ]] \
+      || die "post-recovery run ${task} does not expose its array identity"
+    if [[ -z "${array_job_id}" ]]; then
+      array_job_id="${BASH_REMATCH[1]}"
+    else
+      [[ "${BASH_REMATCH[1]}" = "${array_job_id}" ]] \
+        || die "post-recovery runs come from different arrays"
+    fi
+  done
+  authorization="${PRORM_PROJECT_ROOT}/runs/phase2-recovery-pilot/recovery-success-authorization.json"
+  terminal="${PRORM_PROJECT_ROOT}/runs/phase2-post-recovery-${pilot_phase}/terminal-${array_job_id}.json"
+  command=(
+    bash "${repo_root}/scripts/hpc4/submit_phase2_post_recovery_aggregate.sh"
+    "${authorization}" "${terminal}" "${array_job_id}" "${output_input}"
+    "${partition}" "${walltime}" "${producer_git_commit}"
+    "${run_inputs[@]}" --overlay "${overlay}"
+  )
+  if [[ -n "${beta_source_input}" ]]; then
+    command+=(--beta-source-aggregate "${beta_source_input}")
+  fi
+  if [[ -n "${horizon_parent_input}" ]]; then
+    command+=(--horizon-parent-aggregate "${horizon_parent_input}")
+  fi
+  exec "${command[@]}"
+fi
+
 [[ "${overlay_relative}" = "configs/common_beta_pilot.yaml" ]] \
   || die "entry accepts only configs/common_beta_pilot.yaml"
 [[ "${base_relative}" = "configs/common_beta_pilot_base.yaml" ]] \

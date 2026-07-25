@@ -10,7 +10,12 @@
 保留。公开 CLI 为 `prorm`，公开 environment keys 统一为 `PRORM_*`；旧 `SRM_*` keys 只作为
 迁移期兼容 alias 被脚本接受。
 
-## 0. 从登录到结论的七个门
+## 0. 已完成 Phase 1 的七个环境/主链门
+
+这张表保存 Phase 1 从首次登录到五-seed aggregate 的冻结执行顺序。当前 Phase 2 复用其中
+已经验证的 account、image 与 offline-cache 证据，但不会再次提交 Gate 6 的
+`configs/main.yaml` 或 Gate 7 的五-seed aggregate。当前 continuation 由第 6.1 节指向的
+recovery authorization 与 post-recovery runbook 唯一决定。
 
 | Gate | 执行动作 | 通过标准 | 失败后 |
 |---|---|---|---|
@@ -62,7 +67,7 @@ Gate 2 产生的只是 **candidate image**。只有 Gate 3 在目标 HPC4 partit
 - credential 只通过受控 secret 注入；不得写入仓库、YAML、manifest、artifact 或 Slurm log。
 - ITSO password、Duo/2FA response、SSH private key 和 recovery code 只由用户在受信任的 SSH
   客户端中处理；绝不发送给 Codex，也不要求 Codex 代填。
-- formal array 排队和执行期间不得切换、pull、修改或复用其 checkout 做开发。submit 绑定
+- formal wave/job 排队和执行期间不得切换、pull、修改或复用其 checkout 做开发。submit 绑定
   当时的 clean `HEAD`；compute 从该 commit 建立私有 detached scratch clone 并在每个 phase
   边界复验，登录 checkout 后续变化不会进入 job。
 - 提交与 compute 都拒绝任何导出的 `APPTAINER*`/`SINGULARITY*` ambient control variable；
@@ -520,9 +525,21 @@ submit 脚本在 committed identity 中读取完整 seed 数，并形成
 单 index 或连续闭区间，`PRORM_ARRAY_CONCURRENCY` 必须是正整数。当前用户决定拉满已确认
 QoS，因此 accepted FP64 campaign 取 2；`MaxJobsPU=2` 仍是所有 split arrays 的全局并发上限。
 
-### 6.1 Phase 2 outcome-blind pilot
+### 6.1 历史 pre-recovery Phase 2 pilot（禁止用于当前续跑）
 
-Phase 2 使用两个被同时锁定的 config：
+本节保存首次 v2 calibration/freeze 控制面的历史命令与证据语义。原始
+`common_beta_pilot.yaml` calibration identity 已在冻结的优化门槛终止；当前实验不得再次
+调用本节的 `submit_phase2_pilot.sh` 或
+`submit_phase2_pilot_aggregate.sh` 来续跑、补跑或替代 recovery。
+
+唯一 admissible 的当前转换是：one-shot recovery revision 2 先产生三份合法 seed
+终态和 scheduler 终态证据，再构造 head-free recovery-success authorization；随后按
+[recovery authorization contract](phase2_recovery_authorization.md) 和
+[post-recovery HPC4 runbook](phase2_post_recovery_hpc4.md) 物化新的
+authorization-bound calibration identity。下列命令只用于 byte-compatible historical
+replay，不是当前 operator 入口。
+
+这个历史 Phase 2 路径使用两个被同时锁定的 config：
 
 - `configs/common_beta_pilot_base.yaml` 定义 real-model materialization，决定 HF inventory
   与 content-addressed artifact identity；
@@ -561,12 +578,12 @@ bash scripts/hpc4/submit_phase2_pilot.sh \
   gpu-l20 1-00:00:00
 ```
 
-当前可执行的 Phase 2 pilot GPU design 固定为 `gpu-l20`（NVIDIA L20）；专用 pilot 提交
+该历史 Phase 2 pilot GPU design 固定为 `gpu-l20`（NVIDIA L20）；专用 pilot 提交
 入口会拒绝任何其他 GPU partition。已实现的 confirmatory wrapper 同样只接受
 `gpu-l20`，避免把跨硬件 producer 差异混入方法效应。CPU pilot aggregation 与正式
 campaign finalization 仍只允许 `amd|intel`，不受此 GPU 锁定影响。
 
-可选第五参数仍是一个 zero-based index 或连续闭区间。该专用入口在 allocation 前验证：
+历史接口的可选第五参数是一个 zero-based index 或连续闭区间。该专用入口在 allocation 前验证：
 
 - clean exact Git commit（上面的 operator precheck 另行保证它已推送到 `origin/main`）；
 - overlay/base/`identities.json` 的 committed bytes、file SHA256 与 semantic hash；
@@ -748,7 +765,8 @@ bash scripts/hpc4/submit_phase2_pilot_aggregate.sh \
 新的 no-overwrite output。只有最终 `selection_accepted=true` 的 freeze aggregate 才能生成
 confirmatory identity。
 
-正式实验只有在 pilot 结束后，才建立新的 confirmatory config：冻结一个对所有 formal
+以上历史 v2 操作模板到此结束；不得从其旧 aggregate 直接进入当前 formal chain。
+当前 post-recovery pilot 结束后，才建立新的 confirmatory config：冻结一个对所有 formal
 seeds/arms 相同的 global `beta_0`、response horizon、optimization/KL/length gates，并使用
 顺序锁定的 30 个 paired seeds `20260901`–`20260930`。正式 beta sensitivity 只运行固定的
 `beta in {0.5*beta_0, 2.0*beta_0}`；seed-specific curvature calibration 仅是 pilot
@@ -1040,7 +1058,8 @@ rm -r -- "${targets[@]}"
 本节是正式 Phase 2 的权威操作入口。上文出现的 calibration/freeze “retry”只表示
 **outcome-blind pilot 设计产生新 identity**，不适用于 confirmatory seed。正式 campaign
 固定 seeds `20260901`–`20260930`，每个 seed 只有 `attempt-1`，不允许 retry、requeue、
-replacement seed 或手工补跑。
+replacement seed、optional stopping 或手工补跑。调度上的八个固定 wave 只为满足 HPC4
+提交上限，不改变 exact-30 科学 campaign。
 
 本仓库文档不记录尚未产生的 confirmatory config SHA、Git commit、image/inventory SHA、
 accepted-freeze SHA、Slurm job ID 或当前运行状态。以下 `REPLACE_WITH_*` 必须在正式提交时
@@ -1072,15 +1091,15 @@ export PRORM_SCRATCH_ROOT=/ABS/PATH/TO/SCRATCH
 export PRORM_IMAGE=/ABS/PATH/TO/LOCKED_IMAGE.sif
 export PRORM_IMAGE_SHA256=REPLACE_WITH_64_HEX_IMAGE_SHA256
 export PRORM_HF_CACHE=/ABS/PATH/TO/OFFLINE_HF_CACHE
-export PRORM_PHASE2_ARRAY_CONCURRENCY=2
 ```
 
-`PRORM_PHASE2_ARRAY_CONCURRENCY` 只能是 `1` 或 `2`，默认是 `2`；它只限制同时占用的
-L20 数量，不改变 exact-30 seed 集或 attempt policy。
+正式 submitter 拒绝 `PRORM_PHASE2_ARRAY_CONCURRENCY` 和调用者指定的 array range。
+并发是预注册计划的一部分，固定为每波最多 4 个 submitted tasks、其中最多 2 个 running
+tasks。该边界对应在 HPC4 实测的 `l20_qos MaxSubmitJobsPU=4`。
 
-### 11.2 唯一正式提交与 held-array 恢复
+### 11.2 预提交固定波次计划与 held-wave 恢复
 
-只提交完整数组，不按 seed 拆分：
+同一命令负责创建计划、提交当前唯一合格的 wave，或报告已有 active/complete 状态：
 
 ```bash
 overlay=configs/REPLACE_WITH_CONFIRMATORY_OVERLAY.yaml
@@ -1088,7 +1107,7 @@ base=configs/REPLACE_WITH_CONFIRMATORY_BASE.yaml
 accepted_freeze=/ABS/PATH/TO/accepted-freeze-aggregate.json
 gpu_walltime=REPLACE_WITH_HH_MM_SS_OR_D_HH_MM_SS
 
-submission="$(
+wave_status="$(
   bash scripts/hpc4/submit_phase2_confirmatory.sh \
     "${overlay}" \
     "${base}" \
@@ -1096,22 +1115,42 @@ submission="$(
     gpu-l20 \
     "${gpu_walltime}"
 )"
-printf '%s\n' "${submission}"
-array_job_id="${submission%%;*}"
-test -n "${array_job_id}"
+printf '%s\n' "${wave_status}"
 ```
 
-可选第六参数只允许字面值 `0-29`；省略即可。`0`、子区间或第二个 array 都会被拒绝。
-wrapper 的顺序是：
+该命令只有上述 5 个参数。第一次调用必须在任何 `sbatch` 之前原子发布并 fsync
+`campaign-registry/campaign-plan.json`。计划不可变地绑定：
 
-1. 校验 clean Git、双 config identity、accepted freeze、SIF 和 inventory；
-2. 用 `--hold --array=0-29%1|2 --no-requeue` 提交唯一数组；
-3. 在 registry lock 下原子提交 exact-30 submission record；
-4. fsync registry 后才执行 `scontrol release`。
+- ordered seeds `20260901..20260930` 与每个 seed 唯一的 `attempt-1`；
+- wave 0–7 依次为 `0-3%2`、`4-7%2`、`8-11%2`、`12-15%2`、
+  `16-19%2`、`20-23%2`、`24-27%2`、`28-29%2`；
+- `max_submitted_tasks=4`、`max_running_tasks=2`；
+- `single_predeclared_attempt_no_retry`、禁止 replacement、禁止 optional stopping；
+- Git/config/image/inventory/accepted-freeze 与完整 job tuple，包括 `l20_qos` 和 walltime。
 
-如果进程在第 3 步之后、第 4 步之前中断，**原样重跑上面的同一命令**。wrapper 会从
-immutable registry 找到同一个 held array，复核其 Slurm record 并 release；它不会再次调用
-`sbatch`。不要手工提交新数组，也不要自行执行 `scontrol release` 绕过复核。
+每个 wave 的 `admissions/wave-<index>.json` 必须在对应 `sbatch` 前原子发布并 fsync。
+wave 0 绑定空前驱；后续 receipt hash-bind 前一 admission、前一 submission，以及前一
+wave 全部 terminal manifest/marker 的有序快照。submission v3 再 hash-bind该 receipt，
+并内嵌 held 状态下的原始 `scontrol` 记录、原始 SHA256 和规范化资源 identity。
+caller 传入的 walltime 必须和 plan 完全相同。
+
+fresh submission 前，submitter 以确定性 job name 同时查询 `squeue` 与历史 `sacct`。
+当前 held identity 只有在完整资源验证后才能恢复；任何其他未注册历史 identity 或歧义
+都 fail closed，禁止 cancel-and-replace 或再次 `sbatch`。
+
+每次调用都由 resolver 从 plan 和 registry 唯一推导状态，不接受 seed、range 或 wave 选择：
+
+1. `ready`：以确定性 job name 用 `--hold --array=<预定波次> --no-requeue` 提交；
+2. fsync 该 wave 的 submission record 后才 `scontrol release`；
+3. `active`：复核并返回当前 wave，不创建另一个 submission；
+4. 只有当前及所有更早 wave 的每个 task 都有严格 terminal bundle 时，下一 wave 才
+   `ready`。该条件只看终态完整性，不看 success/failure 或任何效果指标；
+5. wave 7 完整终态后才返回 `complete`。
+
+如果进程在 Slurm 接受 held wave 后、registry commit 或 release 前中断，**原样重跑同一
+命令**。wrapper 用计划 hash 与 wave index 组成的确定性 job name 找回原 held job，复核后
+提交同一 record 并 release，不 cancel-and-replace。不要手工选择新 wave，也不要自行执行
+`scontrol release` 绕过复核。
 
 正式 design root 由已提交 overlay 的 semantic identity 决定：
 
@@ -1120,15 +1159,21 @@ design_sha=REPLACE_WITH_COMMITTED_CONFIRMATORY_DESIGN_SHA256
 design_root="${PRORM_PROJECT_ROOT}/runs/phase2-confirmatory/${design_sha}"
 registry="${design_root}/campaign-registry"
 
-test -f "${registry}/submissions/array-${array_job_id}.json"
+test -f "${registry}/campaign-plan.json"
+test -d "${registry}/admissions"
 test -z "$(find "${registry}/recoveries" -mindepth 1 -maxdepth 1 -print -quit)"
 ```
 
 ### 11.3 监控
 
-只读监控不会改变 campaign：
+`wave_status` 的规范输出为
+`SUBMITTED|ACTIVE;<wave-index>;<array-job-id>;<cluster>` 或
+`COMPLETE;<campaign-plan-sha256>`。对当前 wave 提取 array job ID 后，只读监控不会改变
+campaign：
 
 ```bash
+array_job_id=REPLACE_WITH_CURRENT_WAVE_ARRAY_JOB_ID
+
 squeue -j "${array_job_id}" \
   -o '%.18i %.9P %.24j %.8T %.10M %.6D %R'
 
@@ -1280,7 +1325,7 @@ bash scripts/hpc4/terminalize_phase2_scheduler_failure.sh \
   "${sacct_raw}"
 ```
 
-attempt index 必须是字面值 `1`。该命令要求 canonical job 不存在，验证 held-array
+attempt index 必须是字面值 `1`。该命令要求 canonical job 不存在，验证 fixed-wave
 submission、可用时的 execution registry 和 raw `sacct` SHA256，然后在 registry lock 下
 原子发布 scheduler failure terminal。它不会授权 retry。
 
@@ -1289,8 +1334,15 @@ submission、可用时的 execution registry 和 raw `sacct` SHA256，然后在 
 只有 30 个 slot 都 terminal 后才提交 finalizer。通常不要直接调用 resolver：
 `submit_phase2_campaign_finalize.sh` 会在提交前和 CPU compute 内各运行一次 resolver，验证：
 
-- 只有一个 exact ordered `0..29` attempt-1 submission；
+- `campaign-plan.json` 在第一次 Slurm submission 前预提交且 SHA256 绑定全部 wave records；
+- 每个 submission v3 精确绑定对应 admission receipt；admission chain 逐 wave 重算前序
+  submission 与 terminal manifest/marker hashes；
+- held `scontrol` 原始记录与规范化资源 identity 一致，walltime、`l20_qos`、CPU、内存、
+  node、GPU 与 throttle 均匹配 plan；
+- submitted waves 必须是计划的连续前缀，精确为
+  `0-3%2,4-7%2,...,24-27%2,28-29%2`，无 gap、overlap 或 reordered wave；
 - task-to-seed 映射严格为 `20260901..20260930`；
+- 每个 task 只有 `attempt-1`，无 retry、replacement 或 optional stopping；
 - Git、design/base、SIF、inventory、accepted-freeze 与 producer hashes 一致；
 - `recoveries/` 为空，每个 seed 只有唯一 terminal owner；
 - terminal manifest、marker、attempt ledger 与 nested success evidence 的 hashes 一致。

@@ -41,6 +41,13 @@ The parent `FAILED` markers, logs, manifests, and artifacts remain immutable.
 The recovery receives a new config hash, design identity, run directory, and
 result lineage.
 
+The recovery executions also retain their original `ad7613b` producer schema
+exactly. The scalar-only repeated-label tail diagnostics predeclared later for
+fresh post-recovery and confirmatory runs are not retrofitted into, inferred
+for, or required from these immutable recovery artifacts. Recovery
+authorization validates their historical rich PCG and label-stream evidence;
+only a newly trained post-recovery head may emit the new diagnostic schema.
+
 ## 2. Train-only diagnostic
 
 The diagnostic was committed before execution and ran as HPC4 job `1647982`
@@ -227,3 +234,7 @@ evidence. Recovery outputs never enter a calibration aggregate and never
 produce a beta candidate. An all-seed recovery pass only authorizes a new,
 schedule-frozen full calibration pilot; that later pilot must independently
 materialize every required calibration endpoint before any beta freeze.
+
+The exact scheduler capture, three-seed aggregation, head-free artifact, and
+consumer-verification contract is specified in
+[Phase-2 recovery success authorization](phase2_recovery_authorization.md).

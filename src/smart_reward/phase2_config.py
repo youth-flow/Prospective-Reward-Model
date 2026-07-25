@@ -33,6 +33,11 @@ from .config import (
 
 PHASE2_SCHEMA_VERSION = "prorm-common-beta-config/v2"
 PHASE2_RECOVERY_SCHEMA_VERSION = "prorm-common-beta-recovery-config/v1"
+PHASE2_POST_RECOVERY_SCHEMA_VERSION = "prorm-common-beta-post-recovery-experiment/v1"
+# Backward-compatible public import used while the first post-recovery
+# calibration entry point is being wired.  The schema itself intentionally
+# covers the complete calibration -> freeze/retry -> confirmatory lineage.
+PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION = PHASE2_POST_RECOVERY_SCHEMA_VERSION
 PHASE1_MAIN_CONFIG = "configs/main.yaml"
 PHASE1_MAIN_CONFIG_HASH = "ae5d628ee47ff74a1fa2b89478c40b4fdd289935d8cf58dcbcf98b42f69a0df6"
 PHASE1_MAIN_SEEDS = frozenset({20260722, 20260723, 20260724, 20260725, 20260726})
@@ -100,6 +105,12 @@ _RECOVERY_LR_STAGES = (
     (10761, 12760, 1.0e-5),
 )
 _RECOVERY_TIE_BREAK = "exact_zero_initialized_deterministic_adamw_lr_decay_path"
+_RECOVERY_DESIGN_SHA256 = "9602b0f00a73880545fd57ce1886ec65d7901385cce2b919fd72f3efec4592d4"
+_RECOVERY_ARRAY_JOB_ID = "1648125"
+_RECOVERY_EXECUTION_REVISION = 2
+PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA = "prorm-phase2-recovery-success-authorization/v1"
+PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA = "prorm-phase2-recovery-success-reference/v1"
+PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA = "prorm-phase2-recovery-success-projection/v1"
 
 
 def _recovery_schedule_payload() -> dict[str, object]:
@@ -820,13 +831,29 @@ def _validate_annotations(value: object, probability_floor: float) -> None:
     )
 
 
-def _validate_recovery_optimizer_protocol(value: object) -> None:
+def _validate_recovery_optimizer_protocol(
+    value: object,
+    *,
+    adopted_schedule_authorization_sha256: str | None = None,
+) -> None:
+    adopted = adopted_schedule_authorization_sha256 is not None
+    identity_fields = (
+        {
+            "schema_version",
+            "role",
+            "source_recovery_authorization_sha256",
+        }
+        if adopted
+        else {
+            "schema_version",
+            "one_time_recovery",
+        }
+    )
     protocol = _keys(
         value,
         path="reward_model.optimizer_protocol",
-        required={
-            "schema_version",
-            "one_time_recovery",
+        required=identity_fields
+        | {
             "scope",
             "initialization",
             "learning_rate_schedule",
@@ -842,16 +869,33 @@ def _validate_recovery_optimizer_protocol(value: object) -> None:
             "validation_or_test_selection",
         },
     )
-    _locked_string(
-        protocol["schema_version"],
-        "reward_model.optimizer_protocol.schema_version",
-        "deterministic-adamw-lr-decay-recovery/v1",
-    )
-    _locked_boolean(
-        protocol["one_time_recovery"],
-        "reward_model.optimizer_protocol.one_time_recovery",
-        True,
-    )
+    if adopted:
+        _locked_string(
+            protocol["schema_version"],
+            "reward_model.optimizer_protocol.schema_version",
+            "deterministic-adamw-lr-decay/v1",
+        )
+        _locked_string(
+            protocol["role"],
+            "reward_model.optimizer_protocol.role",
+            "frozen_post_recovery_phase2_optimizer",
+        )
+        _locked_string(
+            protocol["source_recovery_authorization_sha256"],
+            "reward_model.optimizer_protocol.source_recovery_authorization_sha256",
+            adopted_schedule_authorization_sha256,
+        )
+    else:
+        _locked_string(
+            protocol["schema_version"],
+            "reward_model.optimizer_protocol.schema_version",
+            "deterministic-adamw-lr-decay-recovery/v1",
+        )
+        _locked_boolean(
+            protocol["one_time_recovery"],
+            "reward_model.optimizer_protocol.one_time_recovery",
+            True,
+        )
     _locked_string(
         protocol["scope"],
         "reward_model.optimizer_protocol.scope",
@@ -1032,6 +1076,7 @@ def _validate_reward_model(
     *,
     stage: str,
     recovery_protocol: bool,
+    adopted_schedule_authorization_sha256: str | None = None,
 ) -> None:
     required = {
         "model",
@@ -1050,7 +1095,7 @@ def _validate_reward_model(
         "adaptive_convergence",
         "identifiability",
     }
-    if recovery_protocol:
+    if recovery_protocol or adopted_schedule_authorization_sha256 is not None:
         required.add("optimizer_protocol")
     reward = _keys(
         value,
@@ -1113,7 +1158,8 @@ def _validate_reward_model(
         "reward_model.adaptive_convergence.minimum_steps",
         100,
     )
-    expected_maximum_steps = _RECOVERY_MAXIMUM_STEPS if recovery_protocol else 5760
+    decay_protocol = recovery_protocol or adopted_schedule_authorization_sha256 is not None
+    expected_maximum_steps = _RECOVERY_MAXIMUM_STEPS if decay_protocol else 5760
     maximum_steps = _locked_integer(
         convergence["maximum_steps"],
         "reward_model.adaptive_convergence.maximum_steps",
@@ -1169,7 +1215,7 @@ def _validate_reward_model(
         True,
     )
     expected_tie_break = (
-        _RECOVERY_TIE_BREAK if recovery_protocol else "zero_initialized_adamw_implicit_bias"
+        _RECOVERY_TIE_BREAK if decay_protocol else "zero_initialized_adamw_implicit_bias"
     )
     _locked_string(
         convergence["solution_tie_break"],
@@ -1256,8 +1302,11 @@ def _validate_reward_model(
         "reward_model.identifiability.confirmatory_freeze_requirement",
         expected_freeze,
     )
-    if recovery_protocol:
-        _validate_recovery_optimizer_protocol(reward["optimizer_protocol"])
+    if decay_protocol:
+        _validate_recovery_optimizer_protocol(
+            reward["optimizer_protocol"],
+            adopted_schedule_authorization_sha256=(adopted_schedule_authorization_sha256),
+        )
 
 
 def _validate_common_beta(
@@ -2459,6 +2508,229 @@ def _validate_recovery_experiment_scope(root: Mapping[str, object]) -> None:
         )
 
 
+def _validate_recovery_success_projection(
+    value: object,
+    *,
+    path: str,
+    reference_projection: bool,
+) -> tuple[dict[str, Any], tuple[int, ...]]:
+    schema_fields = (
+        {"schema_version", "source_schema_version"} if reference_projection else {"schema_version"}
+    )
+    authorization = _keys(
+        value,
+        path=path,
+        required=schema_fields
+        | {
+            "recovery_design_sha256",
+            "optimizer_schedule_sha256",
+            "source_array_job_id",
+            "execution_revision",
+            "ordered_seeds",
+            "recovery_status",
+            "full_calibration_authorized",
+            "authorized_information",
+            "recovery_outputs_reusable",
+            "validation_or_heldout_access_authorized",
+            "policy_or_final_utility_access_authorized",
+        },
+    )
+    if reference_projection:
+        _locked_string(
+            authorization["schema_version"],
+            f"{path}.schema_version",
+            PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA,
+        )
+        _locked_string(
+            authorization["source_schema_version"],
+            f"{path}.source_schema_version",
+            PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA,
+        )
+    else:
+        _locked_string(
+            authorization["schema_version"],
+            f"{path}.schema_version",
+            PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA,
+        )
+    _locked_string(
+        authorization["recovery_design_sha256"],
+        f"{path}.recovery_design_sha256",
+        _RECOVERY_DESIGN_SHA256,
+    )
+    _locked_string(
+        authorization["optimizer_schedule_sha256"],
+        f"{path}.optimizer_schedule_sha256",
+        PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+    )
+    _locked_string(
+        authorization["source_array_job_id"],
+        f"{path}.source_array_job_id",
+        _RECOVERY_ARRAY_JOB_ID,
+    )
+    _locked_integer(
+        authorization["execution_revision"],
+        f"{path}.execution_revision",
+        _RECOVERY_EXECUTION_REVISION,
+    )
+    ordered_seeds = tuple(
+        _unique_integers(
+            authorization["ordered_seeds"],
+            f"{path}.ordered_seeds",
+        )
+    )
+    if ordered_seeds != _PHASE2_RECOVERY_PILOT_SEEDS:
+        raise ConfigError(
+            f"{path}.ordered_seeds must equal [20260801, 20260802, 20260803] in that order"
+        )
+    _locked_string(
+        authorization["recovery_status"],
+        f"{path}.recovery_status",
+        "all_three_seeds_success",
+    )
+    _locked_boolean(
+        authorization["full_calibration_authorized"],
+        f"{path}.full_calibration_authorized",
+        True,
+    )
+    _locked_string(
+        authorization["authorized_information"],
+        f"{path}.authorized_information",
+        "optimizer_schedule_only",
+    )
+    _locked_boolean(
+        authorization["recovery_outputs_reusable"],
+        f"{path}.recovery_outputs_reusable",
+        False,
+    )
+    _locked_boolean(
+        authorization["validation_or_heldout_access_authorized"],
+        f"{path}.validation_or_heldout_access_authorized",
+        False,
+    )
+    _locked_boolean(
+        authorization["policy_or_final_utility_access_authorized"],
+        f"{path}.policy_or_final_utility_access_authorized",
+        False,
+    )
+    normalized = copy.deepcopy(dict(authorization))
+    if reference_projection:
+        normalized["schema_version"] = normalized.pop("source_schema_version")
+    return normalized, ordered_seeds
+
+
+def _contains_reward_head_field(value: object) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            "head" in str(key).lower() or _contains_reward_head_field(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_contains_reward_head_field(child) for child in value)
+    return False
+
+
+def validate_post_recovery_authorization_reference(
+    value: object,
+    *,
+    authorization_payload_sha256: str | None = None,
+    authorization_payload: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Validate a config reference and, when supplied, its real aggregate.
+
+    ``artifact_sha256`` binds the raw authorization JSON bytes.  Runtime
+    submit/job gates pass that independently computed digest together with the
+    parsed payload; this function then revalidates the exact scientific
+    projection instead of trusting the YAML envelope.
+    """
+
+    reference = _keys(
+        value,
+        path="recovery_success_reference",
+        required={
+            "schema_version",
+            "artifact_sha256",
+            "authorization_projection",
+        },
+    )
+    _locked_string(
+        reference["schema_version"],
+        "recovery_success_reference.schema_version",
+        PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA,
+    )
+    artifact_sha256 = _string(
+        reference["artifact_sha256"],
+        "recovery_success_reference.artifact_sha256",
+    )
+    if _HEX_DIGEST_PATTERN.fullmatch(artifact_sha256) is None:
+        raise ConfigError(
+            "recovery_success_reference.artifact_sha256 must be a lowercase SHA256 digest"
+        )
+    projection, _ = _validate_recovery_success_projection(
+        reference["authorization_projection"],
+        path="recovery_success_reference.authorization_projection",
+        reference_projection=True,
+    )
+    if (authorization_payload_sha256 is None) != (authorization_payload is None):
+        raise ConfigError(
+            "authorization payload and its raw artifact SHA256 must be supplied together"
+        )
+    if authorization_payload_sha256 is not None:
+        if _HEX_DIGEST_PATTERN.fullmatch(authorization_payload_sha256) is None:
+            raise ConfigError("authorization_payload_sha256 must be a lowercase SHA256 digest")
+        if authorization_payload_sha256 != artifact_sha256:
+            raise ConfigError(
+                "authorization payload bytes do not match "
+                "recovery_success_reference.artifact_sha256"
+            )
+        payload = _mapping(
+            authorization_payload,
+            "authorization_payload",
+        )
+        if _contains_reward_head_field(payload):
+            raise ConfigError("authorization payload must not expose reward-head fields")
+        payload_projection = {field: payload.get(field) for field in projection}
+        validated_payload_projection, _ = _validate_recovery_success_projection(
+            payload_projection,
+            path="authorization_payload",
+            reference_projection=False,
+        )
+        if validated_payload_projection != projection:
+            raise ConfigError(
+                "authorization payload projection does not match the config reference"
+            )
+    return copy.deepcopy(dict(reference))
+
+
+def _validate_post_recovery_experiment_scope(root: Mapping[str, object]) -> str:
+    """Lock schedule propagation across the complete post-recovery lineage."""
+
+    design = _mapping(root["design"], "design")
+    stage = _string(design.get("stage"), "design.stage")
+    if stage not in _DESIGN_STAGES:
+        raise ConfigError(f"design.stage must be one of {_DESIGN_STAGES!r}")
+    name = _string(design.get("name"), "design.name")
+    if "post-recovery" not in name.lower():
+        raise ConfigError("post-recovery design.name must contain 'post-recovery'")
+    if stage == "pilot":
+        pilot_phase = _string(design.get("pilot_phase"), "design.pilot_phase")
+        if pilot_phase not in _PILOT_PHASES:
+            raise ConfigError(f"design.pilot_phase must be one of {_PILOT_PHASES!r}")
+    elif design.get("pilot_phase") is not None:
+        raise ConfigError("post-recovery confirmatory design.pilot_phase must be null")
+
+    run = _mapping(root["run"], "run")
+    run_seeds = tuple(_unique_integers(run.get("seeds"), "run.seeds"))
+    if stage == "pilot" and run_seeds != _PHASE2_RECOVERY_PILOT_SEEDS:
+        raise ConfigError(
+            "post-recovery pilot run.seeds must equal [20260801, 20260802, 20260803] in that order"
+        )
+    reference = validate_post_recovery_authorization_reference(root["recovery_success_reference"])
+    return _string(
+        reference["artifact_sha256"],
+        "recovery_success_reference.artifact_sha256",
+    )
+
+
 def _at(value: Mapping[str, object], path: str) -> object:
     result: object = value
     for component in path.split("."):
@@ -2521,7 +2793,18 @@ def _validate_base_binding(
         "reward_model.microbatch_size",
         "reward_model.max_grad_norm",
     )
+    max_length = _mapping(
+        _mapping(phase2["evaluation"], "evaluation")["max_length"],
+        "evaluation.max_length",
+    )
+    escalated_horizon_override = (
+        max_length["horizon_grid_index"] > 0
+        and max_length["previous_horizon_failed_length_gate"] is True
+        and phase2["policy"]["max_response_tokens"] == max_length["candidate_horizon_tokens"]
+    )
     for path in identical_paths:
+        if path == "policy.max_response_tokens" and escalated_horizon_override:
+            continue
         if _at(phase2, path) != _at(base, path):
             raise ConfigError(f"Phase-2 field {path} must remain bound to {declared_source}")
 
@@ -2582,6 +2865,7 @@ def validate_phase2_config(
 
     schema_hint = config.get("schema_version") if isinstance(config, Mapping) else None
     recovery_schema_hint = schema_hint == PHASE2_RECOVERY_SCHEMA_VERSION
+    post_recovery_schema_hint = schema_hint == PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION
     required_root = {
         "schema_version",
         "design",
@@ -2599,6 +2883,8 @@ def validate_phase2_config(
     }
     if recovery_schema_hint:
         required_root.add("recovery_control")
+    if post_recovery_schema_hint:
+        required_root.add("recovery_success_reference")
     root = _keys(
         config,
         path="config",
@@ -2608,15 +2894,21 @@ def validate_phase2_config(
     if schema_version not in {
         PHASE2_SCHEMA_VERSION,
         PHASE2_RECOVERY_SCHEMA_VERSION,
+        PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION,
     }:
         raise ConfigError(
-            "schema_version must equal either "
-            f"{PHASE2_SCHEMA_VERSION!r} or {PHASE2_RECOVERY_SCHEMA_VERSION!r}"
+            "schema_version must equal one of "
+            f"{PHASE2_SCHEMA_VERSION!r}, {PHASE2_RECOVERY_SCHEMA_VERSION!r}, or "
+            f"{PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION!r}"
         )
     recovery_protocol = schema_version == PHASE2_RECOVERY_SCHEMA_VERSION
+    post_recovery_protocol = schema_version == PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION
+    adopted_schedule_authorization_sha256: str | None = None
     if recovery_protocol:
         _validate_recovery_control(root["recovery_control"])
         _validate_recovery_experiment_scope(root)
+    if post_recovery_protocol:
+        adopted_schedule_authorization_sha256 = _validate_post_recovery_experiment_scope(root)
     stage, pilot_phase, _, _ = _validate_design(root["design"])
     train_prompts, _ = _validate_run(root["run"], stage=stage)
     num_candidates = _validate_data(root["data"])
@@ -2627,6 +2919,7 @@ def validate_phase2_config(
         root["reward_model"],
         stage=stage,
         recovery_protocol=recovery_protocol,
+        adopted_schedule_authorization_sha256=(adopted_schedule_authorization_sha256),
     )
     train_fisher_nodes = train_prompts * num_candidates
     shared_by = _validate_objective(
@@ -2805,9 +3098,14 @@ __all__ = [
     "PHASE2_PILOT_BASE_CONFIG",
     "PHASE2_PILOT_CONFIG",
     "PHASE2_PILOT_SEEDS",
+    "PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION",
+    "PHASE2_POST_RECOVERY_SCHEMA_VERSION",
     "PHASE2_RECOVERY_LR_SCHEDULE_SHA256",
     "PHASE2_RECOVERY_PILOT_CONFIG",
     "PHASE2_RECOVERY_SCHEMA_VERSION",
+    "PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA",
+    "PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA",
+    "PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA",
     "PHASE2_SCHEMA_VERSION",
     "Phase2ConfigBundle",
     "load_phase2_config",
@@ -2815,4 +3113,5 @@ __all__ = [
     "phase2_config_hash",
     "phase2_design_identity",
     "validate_phase2_config",
+    "validate_post_recovery_authorization_reference",
 ]
