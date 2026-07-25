@@ -32,12 +32,15 @@ from .config import (
 )
 
 PHASE2_SCHEMA_VERSION = "prorm-common-beta-config/v2"
+PHASE2_RECOVERY_SCHEMA_VERSION = "prorm-common-beta-recovery-config/v1"
 PHASE1_MAIN_CONFIG = "configs/main.yaml"
 PHASE1_MAIN_CONFIG_HASH = "ae5d628ee47ff74a1fa2b89478c40b4fdd289935d8cf58dcbcf98b42f69a0df6"
 PHASE1_MAIN_SEEDS = frozenset({20260722, 20260723, 20260724, 20260725, 20260726})
 PHASE2_PILOT_CONFIG = "configs/common_beta_pilot.yaml"
 PHASE2_PILOT_BASE_CONFIG = "configs/common_beta_pilot_base.yaml"
+PHASE2_RECOVERY_PILOT_CONFIG = "configs/common_beta_recovery_pilot.yaml"
 PHASE2_PILOT_SEEDS = frozenset({20260801, 20260802, 20260803})
+_PHASE2_RECOVERY_PILOT_SEEDS = (20260801, 20260802, 20260803)
 PHASE2_CONFIRMATORY_SEEDS = tuple(range(20260901, 20260931))
 PHASE2_CONFIRMATORY_NUM_SEEDS = len(PHASE2_CONFIRMATORY_SEEDS)
 # Backward-compatible import name.  The contract is exact, not a lower bound.
@@ -87,6 +90,34 @@ _COMMON_BETA_ARMS = ("bt_mle", "prorm_plus", "oracle_step")
 _DESIGN_STAGES = ("pilot", "confirmatory")
 _PILOT_PHASES = ("calibration", "freeze")
 _HORIZON_SEQUENCE = (256, 512, 1024)
+_RECOVERY_MAXIMUM_STEPS = 12760
+_RECOVERY_LEGACY_BOUNDARY_STEPS = 5760
+_RECOVERY_LR_STAGES = (
+    (1, 5760, 1.0e-3),
+    (5761, 6760, 3.0e-4),
+    (6761, 8760, 1.0e-4),
+    (8761, 10760, 3.0e-5),
+    (10761, 12760, 1.0e-5),
+)
+_RECOVERY_TIE_BREAK = "exact_zero_initialized_deterministic_adamw_lr_decay_path"
+
+
+def _recovery_schedule_payload() -> dict[str, object]:
+    return {
+        "update_indexing": "one_indexed_inclusive",
+        "application": "set_learning_rate_immediately_before_optimizer_update",
+        "stages": [
+            {
+                "first_update": first_update,
+                "last_update": last_update,
+                "learning_rate": learning_rate,
+            }
+            for first_update, last_update, learning_rate in _RECOVERY_LR_STAGES
+        ],
+    }
+
+
+PHASE2_RECOVERY_LR_SCHEDULE_SHA256 = config_hash(_recovery_schedule_payload())
 
 
 @dataclass(frozen=True)
@@ -789,27 +820,242 @@ def _validate_annotations(value: object, probability_floor: float) -> None:
     )
 
 
-def _validate_reward_model(value: object, *, stage: str) -> None:
+def _validate_recovery_optimizer_protocol(value: object) -> None:
+    protocol = _keys(
+        value,
+        path="reward_model.optimizer_protocol",
+        required={
+            "schema_version",
+            "one_time_recovery",
+            "scope",
+            "initialization",
+            "learning_rate_schedule",
+            "legacy_constant_lr_boundary_snapshot_steps",
+            "state_transition",
+            "adamw",
+            "reward_head_dtype",
+            "first_order_audit_dtype",
+            "microbatch_order",
+            "optimizer_state_reset_at_lr_milestone",
+            "one_optimizer_update_per_step",
+            "tie_break",
+            "validation_or_test_selection",
+        },
+    )
+    _locked_string(
+        protocol["schema_version"],
+        "reward_model.optimizer_protocol.schema_version",
+        "deterministic-adamw-lr-decay-recovery/v1",
+    )
+    _locked_boolean(
+        protocol["one_time_recovery"],
+        "reward_model.optimizer_protocol.one_time_recovery",
+        True,
+    )
+    _locked_string(
+        protocol["scope"],
+        "reward_model.optimizer_protocol.scope",
+        "every_phase2_first_order_convergence_trainer",
+    )
+    _locked_string(
+        protocol["initialization"],
+        "reward_model.optimizer_protocol.initialization",
+        "exact_zero_head_and_fresh_optimizer_state",
+    )
+    schedule = _keys(
+        protocol["learning_rate_schedule"],
+        path="reward_model.optimizer_protocol.learning_rate_schedule",
+        required={
+            "update_indexing",
+            "application",
+            "stages",
+            "schedule_sha256",
+        },
+    )
+    _locked_string(
+        schedule["update_indexing"],
+        "reward_model.optimizer_protocol.learning_rate_schedule.update_indexing",
+        "one_indexed_inclusive",
+    )
+    _locked_string(
+        schedule["application"],
+        "reward_model.optimizer_protocol.learning_rate_schedule.application",
+        "set_learning_rate_immediately_before_optimizer_update",
+    )
+    stages = _sequence(
+        schedule["stages"],
+        "reward_model.optimizer_protocol.learning_rate_schedule.stages",
+    )
+    if len(stages) != len(_RECOVERY_LR_STAGES):
+        raise ConfigError(
+            "reward_model.optimizer_protocol.learning_rate_schedule.stages "
+            f"must contain exactly {len(_RECOVERY_LR_STAGES)} stages"
+        )
+    normalized_stages: list[dict[str, object]] = []
+    for index, (stage_value, expected) in enumerate(zip(stages, _RECOVERY_LR_STAGES, strict=True)):
+        path = f"reward_model.optimizer_protocol.learning_rate_schedule.stages[{index}]"
+        stage = _keys(
+            stage_value,
+            path=path,
+            required={"first_update", "last_update", "learning_rate"},
+        )
+        first_update = _locked_integer(
+            stage["first_update"],
+            f"{path}.first_update",
+            expected[0],
+        )
+        last_update = _locked_integer(
+            stage["last_update"],
+            f"{path}.last_update",
+            expected[1],
+        )
+        learning_rate = _locked_number(
+            stage["learning_rate"],
+            f"{path}.learning_rate",
+            expected[2],
+        )
+        normalized_stages.append(
+            {
+                "first_update": first_update,
+                "last_update": last_update,
+                "learning_rate": learning_rate,
+            }
+        )
+    schedule_payload = {
+        "update_indexing": schedule["update_indexing"],
+        "application": schedule["application"],
+        "stages": normalized_stages,
+    }
+    actual_schedule_sha256 = config_hash(schedule_payload)
+    declared_schedule_sha256 = _string(
+        schedule["schedule_sha256"],
+        "reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256",
+    )
+    if _HEX_DIGEST_PATTERN.fullmatch(declared_schedule_sha256) is None:
+        raise ConfigError(
+            "reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256 "
+            "must be a lowercase SHA256 digest"
+        )
+    if declared_schedule_sha256 != actual_schedule_sha256:
+        raise ConfigError(
+            "reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256 "
+            "does not bind the declared schedule"
+        )
+    if actual_schedule_sha256 != PHASE2_RECOVERY_LR_SCHEDULE_SHA256:
+        raise ConfigError("recovery learning-rate schedule does not match the locked protocol")
+    _locked_integer(
+        protocol["legacy_constant_lr_boundary_snapshot_steps"],
+        "reward_model.optimizer_protocol.legacy_constant_lr_boundary_snapshot_steps",
+        _RECOVERY_LEGACY_BOUNDARY_STEPS,
+    )
+    _locked_string(
+        protocol["state_transition"],
+        "reward_model.optimizer_protocol.state_transition",
+        "preserve_all_adamw_moments_across_learning_rate_boundaries",
+    )
+    adamw = _keys(
+        protocol["adamw"],
+        path="reward_model.optimizer_protocol.adamw",
+        required={
+            "betas",
+            "eps",
+            "amsgrad",
+            "maximize",
+            "foreach",
+            "fused",
+            "capturable",
+            "differentiable",
+        },
+    )
+    _locked_number_sequence(
+        adamw["betas"],
+        "reward_model.optimizer_protocol.adamw.betas",
+        (0.9, 0.999),
+    )
+    _locked_number(
+        adamw["eps"],
+        "reward_model.optimizer_protocol.adamw.eps",
+        1.0e-8,
+    )
+    for field in (
+        "amsgrad",
+        "maximize",
+        "foreach",
+        "fused",
+        "capturable",
+        "differentiable",
+    ):
+        _locked_boolean(
+            adamw[field],
+            f"reward_model.optimizer_protocol.adamw.{field}",
+            False,
+        )
+    _locked_string(
+        protocol["reward_head_dtype"],
+        "reward_model.optimizer_protocol.reward_head_dtype",
+        "float32",
+    )
+    _locked_string(
+        protocol["first_order_audit_dtype"],
+        "reward_model.optimizer_protocol.first_order_audit_dtype",
+        "float64",
+    )
+    _locked_string(
+        protocol["microbatch_order"],
+        "reward_model.optimizer_protocol.microbatch_order",
+        "canonical_edge_order_contiguous_ascending_no_shuffle",
+    )
+    _locked_boolean(
+        protocol["optimizer_state_reset_at_lr_milestone"],
+        "reward_model.optimizer_protocol.optimizer_state_reset_at_lr_milestone",
+        False,
+    )
+    _locked_boolean(
+        protocol["one_optimizer_update_per_step"],
+        "reward_model.optimizer_protocol.one_optimizer_update_per_step",
+        True,
+    )
+    _locked_string(
+        protocol["tie_break"],
+        "reward_model.optimizer_protocol.tie_break",
+        _RECOVERY_TIE_BREAK,
+    )
+    _locked_boolean(
+        protocol["validation_or_test_selection"],
+        "reward_model.optimizer_protocol.validation_or_test_selection",
+        False,
+    )
+
+
+def _validate_reward_model(
+    value: object,
+    *,
+    stage: str,
+    recovery_protocol: bool,
+) -> None:
+    required = {
+        "model",
+        "revision",
+        "dtype",
+        "parameterization",
+        "feature_pooling",
+        "linear_head_bias",
+        "outer_steps",
+        "refresh_dual_every_steps",
+        "optimizer",
+        "learning_rate",
+        "weight_decay",
+        "microbatch_size",
+        "max_grad_norm",
+        "adaptive_convergence",
+        "identifiability",
+    }
+    if recovery_protocol:
+        required.add("optimizer_protocol")
     reward = _keys(
         value,
         path="reward_model",
-        required={
-            "model",
-            "revision",
-            "dtype",
-            "parameterization",
-            "feature_pooling",
-            "linear_head_bias",
-            "outer_steps",
-            "refresh_dual_every_steps",
-            "optimizer",
-            "learning_rate",
-            "weight_decay",
-            "microbatch_size",
-            "max_grad_norm",
-            "adaptive_convergence",
-            "identifiability",
-        },
+        required=required,
     )
     _locked_string(reward["model"], "reward_model.model", _POLICY_MODEL)
     _locked_string(reward["revision"], "reward_model.revision", _POLICY_REVISION)
@@ -867,10 +1113,11 @@ def _validate_reward_model(value: object, *, stage: str) -> None:
         "reward_model.adaptive_convergence.minimum_steps",
         100,
     )
+    expected_maximum_steps = _RECOVERY_MAXIMUM_STEPS if recovery_protocol else 5760
     maximum_steps = _locked_integer(
         convergence["maximum_steps"],
         "reward_model.adaptive_convergence.maximum_steps",
-        5760,
+        expected_maximum_steps,
     )
     interval = _locked_integer(
         convergence["check_interval_steps"],
@@ -921,10 +1168,13 @@ def _validate_reward_model(value: object, *, stage: str) -> None:
         "reward_model.adaptive_convergence.fail_closed",
         True,
     )
+    expected_tie_break = (
+        _RECOVERY_TIE_BREAK if recovery_protocol else "zero_initialized_adamw_implicit_bias"
+    )
     _locked_string(
         convergence["solution_tie_break"],
         "reward_model.adaptive_convergence.solution_tie_break",
-        "zero_initialized_adamw_implicit_bias",
+        expected_tie_break,
     )
     _locked_boolean(
         convergence["unique_solution_claim"],
@@ -989,7 +1239,7 @@ def _validate_reward_model(value: object, *, stage: str) -> None:
     _locked_string(
         identifiability["algorithmic_tie_break"],
         "reward_model.identifiability.algorithmic_tie_break",
-        "zero_initialized_adamw_implicit_bias",
+        expected_tie_break,
     )
     _locked_boolean(
         identifiability["minimum_norm_claim"],
@@ -1006,6 +1256,8 @@ def _validate_reward_model(value: object, *, stage: str) -> None:
         "reward_model.identifiability.confirmatory_freeze_requirement",
         expected_freeze,
     )
+    if recovery_protocol:
+        _validate_recovery_optimizer_protocol(reward["optimizer_protocol"])
 
 
 def _validate_common_beta(
@@ -2078,6 +2330,135 @@ def _validate_secondary_experiments(value: object) -> None:
     )
 
 
+def _validate_recovery_control(value: object) -> None:
+    recovery = _keys(
+        value,
+        path="recovery_control",
+        required={
+            "schema_version",
+            "parent_failure_registry",
+            "parent_failure_registry_sha256",
+            "optimizer_diagnostic_path",
+            "optimizer_diagnostic_sha256",
+            "optimizer_diagnostic_source_git_commit",
+            "optimizer_diagnostic_source_job_id",
+            "optimizer_diagnostic_role",
+            "parent_phase2_design_sha256",
+            "parent_source_job_array_id",
+            "parent_seeds",
+            "parent_terminal_status",
+            "parent_failure_aggregate_present",
+            "parent_failure_evidence",
+            "artifact_reuse",
+            "artifact_producer_identity_separate_from_recovery_training_identity",
+            "execution_scope",
+            "policy_rollout_allowed",
+            "validation_or_test_access_allowed",
+            "final_oracle_allowed",
+            "downstream_utility_allowed",
+            "one_shot_no_further_adaptation",
+            "failure_action",
+        },
+    )
+    exact_strings = {
+        "schema_version": "prorm-phase2-recovery-control/v1",
+        "parent_failure_registry": "configs/phase2_recovery_parent_failures.json",
+        "parent_failure_registry_sha256": (
+            "7be4ee90b1f494d32f96214f407a57cbee54be86a77dacc1206d2acd527857dc"
+        ),
+        "optimizer_diagnostic_path": (
+            "diagnostics/bt-convergence/seed-20260801-commit-791c2da.json"
+        ),
+        "optimizer_diagnostic_sha256": (
+            "bd7c3d80c26500ee273b14bb1ea8bc3428f71fdb319a49c792bf4de567e2c6a9"
+        ),
+        "optimizer_diagnostic_source_git_commit": ("791c2daac7f1601f6798d5878bef1770ca9d5ebf"),
+        "optimizer_diagnostic_source_job_id": "1647982",
+        "optimizer_diagnostic_role": ("train_only_nonconfirmatory_schedule_selection"),
+        "parent_phase2_design_sha256": (
+            "0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca"
+        ),
+        "parent_source_job_array_id": "1647491",
+        "parent_terminal_status": "FAILED",
+        "parent_failure_evidence": (
+            "exact_three_seed_registry_binds_each_failed_terminal_and_phase2_run_log"
+        ),
+        "artifact_reuse": "immutable_parent_materialization_only",
+        "execution_scope": "train_only",
+        "failure_action": "hard_fail_no_second_recovery",
+    }
+    for field, expected in exact_strings.items():
+        _locked_string(
+            recovery[field],
+            f"recovery_control.{field}",
+            expected,
+        )
+    parent_seeds = tuple(
+        _unique_integers(
+            recovery["parent_seeds"],
+            "recovery_control.parent_seeds",
+        )
+    )
+    if parent_seeds != _PHASE2_RECOVERY_PILOT_SEEDS:
+        raise ConfigError(
+            "recovery_control.parent_seeds must equal [20260801, 20260802, 20260803] in that order"
+        )
+    for field, expected in {
+        "parent_failure_aggregate_present": False,
+        "artifact_producer_identity_separate_from_recovery_training_identity": True,
+        "policy_rollout_allowed": False,
+        "validation_or_test_access_allowed": False,
+        "final_oracle_allowed": False,
+        "downstream_utility_allowed": False,
+        "one_shot_no_further_adaptation": True,
+    }.items():
+        _locked_boolean(
+            recovery[field],
+            f"recovery_control.{field}",
+            expected,
+        )
+
+
+def _validate_recovery_experiment_scope(root: Mapping[str, object]) -> None:
+    """Lock the one-time recovery schema to its sole calibration-pilot use."""
+
+    design = _mapping(root["design"], "design")
+    _locked_string(
+        design.get("stage"),
+        "design.stage",
+        "pilot",
+    )
+    _locked_string(
+        design.get("pilot_phase"),
+        "design.pilot_phase",
+        "calibration",
+    )
+    _locked_string(
+        design.get("name"),
+        "design.name",
+        "common-beta-recovery-pilot-v1",
+    )
+
+    run = _mapping(root["run"], "run")
+    run_seeds = tuple(_unique_integers(run.get("seeds"), "run.seeds"))
+    if run_seeds != _PHASE2_RECOVERY_PILOT_SEEDS:
+        raise ConfigError(
+            "recovery run.seeds must equal [20260801, 20260802, 20260803] in that order"
+        )
+
+    recovery_control = _mapping(root["recovery_control"], "recovery_control")
+    parent_seeds = tuple(
+        _unique_integers(
+            recovery_control.get("parent_seeds"),
+            "recovery_control.parent_seeds",
+        )
+    )
+    if parent_seeds != run_seeds:
+        raise ConfigError(
+            "recovery_control.parent_seeds must exactly match recovery run.seeds in order"
+        )
+
+
 def _at(value: Mapping[str, object], path: str) -> object:
     result: object = value
     for component in path.split("."):
@@ -2199,33 +2580,54 @@ def validate_phase2_config(
     Phase-2 mapping.
     """
 
+    schema_hint = config.get("schema_version") if isinstance(config, Mapping) else None
+    recovery_schema_hint = schema_hint == PHASE2_RECOVERY_SCHEMA_VERSION
+    required_root = {
+        "schema_version",
+        "design",
+        "run",
+        "data",
+        "policy",
+        "oracle",
+        "annotations",
+        "reward_model",
+        "objective",
+        "positive_controls",
+        "arms",
+        "evaluation",
+        "secondary_experiments",
+    }
+    if recovery_schema_hint:
+        required_root.add("recovery_control")
     root = _keys(
         config,
         path="config",
-        required={
-            "schema_version",
-            "design",
-            "run",
-            "data",
-            "policy",
-            "oracle",
-            "annotations",
-            "reward_model",
-            "objective",
-            "positive_controls",
-            "arms",
-            "evaluation",
-            "secondary_experiments",
-        },
+        required=required_root,
     )
-    _locked_string(root["schema_version"], "schema_version", PHASE2_SCHEMA_VERSION)
+    schema_version = _string(root["schema_version"], "schema_version")
+    if schema_version not in {
+        PHASE2_SCHEMA_VERSION,
+        PHASE2_RECOVERY_SCHEMA_VERSION,
+    }:
+        raise ConfigError(
+            "schema_version must equal either "
+            f"{PHASE2_SCHEMA_VERSION!r} or {PHASE2_RECOVERY_SCHEMA_VERSION!r}"
+        )
+    recovery_protocol = schema_version == PHASE2_RECOVERY_SCHEMA_VERSION
+    if recovery_protocol:
+        _validate_recovery_control(root["recovery_control"])
+        _validate_recovery_experiment_scope(root)
     stage, pilot_phase, _, _ = _validate_design(root["design"])
     train_prompts, _ = _validate_run(root["run"], stage=stage)
     num_candidates = _validate_data(root["data"])
     max_response_tokens = _validate_policy(root["policy"], stage=stage)
     probability_floor = _validate_oracle(root["oracle"])
     _validate_annotations(root["annotations"], probability_floor)
-    _validate_reward_model(root["reward_model"], stage=stage)
+    _validate_reward_model(
+        root["reward_model"],
+        stage=stage,
+        recovery_protocol=recovery_protocol,
+    )
     train_fisher_nodes = train_prompts * num_candidates
     shared_by = _validate_objective(
         root["objective"],
@@ -2403,6 +2805,9 @@ __all__ = [
     "PHASE2_PILOT_BASE_CONFIG",
     "PHASE2_PILOT_CONFIG",
     "PHASE2_PILOT_SEEDS",
+    "PHASE2_RECOVERY_LR_SCHEDULE_SHA256",
+    "PHASE2_RECOVERY_PILOT_CONFIG",
+    "PHASE2_RECOVERY_SCHEMA_VERSION",
     "PHASE2_SCHEMA_VERSION",
     "Phase2ConfigBundle",
     "load_phase2_config",

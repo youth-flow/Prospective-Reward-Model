@@ -51,6 +51,7 @@ from .phase2_config import (
     PHASE2_CONFIRMATORY_EXCLUDED_SEEDS,
     PHASE2_CONFIRMATORY_SEEDS,
     PHASE2_PILOT_SEEDS,
+    PHASE2_RECOVERY_SCHEMA_VERSION,
     Phase2ConfigBundle,
     phase2_design_identity,
     validate_phase2_config,
@@ -77,12 +78,15 @@ from .training import (
 )
 
 PHASE2_TRAINING_SCHEMA = "phase2-fresh-head-training/v2"
+PHASE2_RECOVERY_TRAINING_SCHEMA = "phase2-fresh-head-training/v3"
 PRIMARY_TRAINING_ARM = "r4_independent_gamma_0.9"
 EXACT_SOFT_BT_ARM = "exact_soft_label_bt_secondary_diagnostic"
 EXACT_SOFT_BT_ROLE = "noise_free_positive_control_and_secondary_misspecification_diagnostic"
 EXACT_SOFT_BT_INPUT = "sigmoid_of_train_transformed_oracle_margin"
 LABEL_RNG_NAMESPACE = "prorm-common-beta-r4-labels-v1"
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_RECOVERY_TIE_BREAK = "exact_zero_initialized_deterministic_adamw_lr_decay_path"
+_LEGACY_TIE_BREAK = "zero_initialized_adamw_implicit_bias"
 
 
 def _validate_digest(value: object, *, name: str) -> str:
@@ -193,6 +197,152 @@ def _validate_frozen_oracle_rewards(
 
 
 @dataclass(frozen=True, slots=True)
+class LearningRateStage:
+    """One inclusive, one-indexed deterministic optimizer-update interval."""
+
+    first_update: int
+    last_update: int
+    learning_rate: float
+
+    def __post_init__(self) -> None:
+        _positive_integer(self.first_update, name="first_update")
+        _positive_integer(self.last_update, name="last_update")
+        if self.last_update < self.first_update:
+            raise ValueError("last_update must not precede first_update")
+        _finite_float(
+            self.learning_rate,
+            name="learning_rate",
+            minimum=0.0,
+            strictly_greater=True,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "first_update": self.first_update,
+            "last_update": self.last_update,
+            "learning_rate": self.learning_rate,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AdamWRecoveryProtocol:
+    """Hash-bound one-time deterministic AdamW learning-rate recovery path."""
+
+    stages: tuple[LearningRateStage, ...]
+    schedule_sha256: str
+    legacy_boundary_snapshot_steps: int = 5760
+    betas: tuple[float, float] = (0.9, 0.999)
+    eps: float = 1.0e-8
+    amsgrad: bool = False
+    maximize: bool = False
+    foreach: bool = False
+    fused: bool = False
+    capturable: bool = False
+    differentiable: bool = False
+    reward_head_dtype: str = "float32"
+    first_order_audit_dtype: str = "float64"
+    microbatch_order: str = "canonical_edge_order_contiguous_ascending_no_shuffle"
+    optimizer_state_reset_at_lr_milestone: bool = False
+    one_optimizer_update_per_step: bool = True
+    tie_break: str = _RECOVERY_TIE_BREAK
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stages, tuple) or not self.stages:
+            raise ValueError("recovery learning-rate stages must be a non-empty tuple")
+        if not all(isinstance(stage, LearningRateStage) for stage in self.stages):
+            raise TypeError("recovery learning-rate stages must contain LearningRateStage values")
+        expected_first = 1
+        for stage in self.stages:
+            if stage.first_update != expected_first:
+                raise ValueError("recovery learning-rate stages must be contiguous from update 1")
+            expected_first = stage.last_update + 1
+        _validate_digest(self.schedule_sha256, name="schedule_sha256")
+        schedule_payload = {
+            "update_indexing": "one_indexed_inclusive",
+            "application": "set_learning_rate_immediately_before_optimizer_update",
+            "stages": [stage.to_dict() for stage in self.stages],
+        }
+        if self.schedule_sha256 != _canonical_sha256(schedule_payload):
+            raise ValueError("schedule_sha256 does not bind the declared recovery schedule")
+        if self.legacy_boundary_snapshot_steps != 5760:
+            raise ValueError("legacy_boundary_snapshot_steps must equal 5760")
+        if self.stages[0].last_update != self.legacy_boundary_snapshot_steps:
+            raise ValueError(
+                "the first recovery schedule stage must end at the legacy 5760-step boundary"
+            )
+        if self.betas != (0.9, 0.999):
+            raise ValueError("recovery AdamW betas must equal (0.9, 0.999)")
+        if self.eps != 1.0e-8:
+            raise ValueError("recovery AdamW eps must equal 1e-8")
+        for name in (
+            "amsgrad",
+            "maximize",
+            "foreach",
+            "fused",
+            "capturable",
+            "differentiable",
+        ):
+            if getattr(self, name) is not False:
+                raise ValueError(f"recovery AdamW {name} must be false")
+        if self.reward_head_dtype != "float32":
+            raise ValueError("recovery reward-head dtype must equal float32")
+        if self.first_order_audit_dtype != "float64":
+            raise ValueError("recovery first-order audit dtype must equal float64")
+        if self.microbatch_order != ("canonical_edge_order_contiguous_ascending_no_shuffle"):
+            raise ValueError("recovery microbatch order does not match the locked protocol")
+        if self.optimizer_state_reset_at_lr_milestone is not False:
+            raise ValueError("recovery optimizer state must not reset at learning-rate milestones")
+        if self.one_optimizer_update_per_step is not True:
+            raise ValueError("recovery protocol requires one optimizer update per step")
+        if self.tie_break != _RECOVERY_TIE_BREAK:
+            raise ValueError("recovery tie-break does not match the locked protocol")
+
+    @property
+    def maximum_update(self) -> int:
+        return self.stages[-1].last_update
+
+    def learning_rate_for_update(self, update: int) -> float:
+        _positive_integer(update, name="update")
+        for stage in self.stages:
+            if stage.first_update <= update <= stage.last_update:
+                return stage.learning_rate
+        raise ValueError(f"update {update} is outside the locked recovery schedule")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "deterministic-adamw-lr-decay-recovery/v1",
+            "one_time_recovery": True,
+            "scope": "every_phase2_first_order_convergence_trainer",
+            "initialization": "exact_zero_head_and_fresh_optimizer_state",
+            "learning_rate_schedule": {
+                "update_indexing": "one_indexed_inclusive",
+                "application": ("set_learning_rate_immediately_before_optimizer_update"),
+                "stages": [stage.to_dict() for stage in self.stages],
+                "schedule_sha256": self.schedule_sha256,
+            },
+            "legacy_constant_lr_boundary_snapshot_steps": (self.legacy_boundary_snapshot_steps),
+            "state_transition": ("preserve_all_adamw_moments_across_learning_rate_boundaries"),
+            "adamw": {
+                "betas": list(self.betas),
+                "eps": self.eps,
+                "amsgrad": self.amsgrad,
+                "maximize": self.maximize,
+                "foreach": self.foreach,
+                "fused": self.fused,
+                "capturable": self.capturable,
+                "differentiable": self.differentiable,
+            },
+            "reward_head_dtype": self.reward_head_dtype,
+            "first_order_audit_dtype": self.first_order_audit_dtype,
+            "microbatch_order": self.microbatch_order,
+            "optimizer_state_reset_at_lr_milestone": (self.optimizer_state_reset_at_lr_milestone),
+            "one_optimizer_update_per_step": self.one_optimizer_update_per_step,
+            "tie_break": self.tie_break,
+            "validation_or_test_selection": False,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class FirstOrderConvergenceSpec:
     """Objective-specific, train-only first-order stopping rule.
 
@@ -210,6 +360,7 @@ class FirstOrderConvergenceSpec:
     consecutive_checks: int = 3
     gradient_norm_denominator_floor: float = 1.0e-30
     fail_closed: bool = True
+    optimizer_protocol: AdamWRecoveryProtocol | None = None
 
     def __post_init__(self) -> None:
         _finite_float(
@@ -236,10 +387,23 @@ class FirstOrderConvergenceSpec:
         )
         if self.fail_closed is not True:
             raise ValueError("first-order convergence must fail closed")
+        if self.optimizer_protocol is not None:
+            if not isinstance(self.optimizer_protocol, AdamWRecoveryProtocol):
+                raise TypeError("optimizer_protocol must be an AdamWRecoveryProtocol")
+            if self.max_steps != self.optimizer_protocol.maximum_update:
+                raise ValueError(
+                    "recovery convergence max_steps must equal the schedule maximum update"
+                )
+            if self.optimizer_protocol.legacy_boundary_snapshot_steps % self.check_interval != 0:
+                raise ValueError("legacy boundary snapshot must be a scheduled convergence check")
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": "objective-first-order-convergence-spec/v1",
+        result: dict[str, object] = {
+            "schema_version": (
+                "objective-first-order-convergence-spec/v2"
+                if self.optimizer_protocol is not None
+                else "objective-first-order-convergence-spec/v1"
+            ),
             "gradient_ratio_tolerance": self.gradient_ratio_tolerance,
             "min_steps": self.min_steps,
             "max_steps": self.max_steps,
@@ -251,6 +415,9 @@ class FirstOrderConvergenceSpec:
             "denominator": "exact_zero_initialization_gradient_l2_norm",
             "validation_or_test_selection": False,
         }
+        if self.optimizer_protocol is not None:
+            result["optimizer_protocol"] = self.optimizer_protocol.to_dict()
+        return result
 
 
 class OptimizationConvergenceError(RuntimeError):
@@ -459,7 +626,11 @@ class Phase2TrainingSettings:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "phase2-training-settings/v2",
+            "schema_version": (
+                "phase2-training-settings/v3"
+                if self.convergence.optimizer_protocol is not None
+                else "phase2-training-settings/v2"
+            ),
             "phase2_config_hash": self.phase2_config_hash,
             "source_config_hash": self.source_config_hash,
             "stage": self.stage,
@@ -529,6 +700,40 @@ def _settings_from_overlay(
     exact_soft_bt = normalized["positive_controls"]["exact_soft_label_bt"]
     convergence = reward["adaptive_convergence"]
     identifiability = reward["identifiability"]
+    optimizer_protocol: AdamWRecoveryProtocol | None = None
+    if normalized["schema_version"] == PHASE2_RECOVERY_SCHEMA_VERSION:
+        declared_protocol = reward["optimizer_protocol"]
+        declared_schedule = declared_protocol["learning_rate_schedule"]
+        optimizer_protocol = AdamWRecoveryProtocol(
+            stages=tuple(
+                LearningRateStage(
+                    first_update=int(stage["first_update"]),
+                    last_update=int(stage["last_update"]),
+                    learning_rate=float(stage["learning_rate"]),
+                )
+                for stage in declared_schedule["stages"]
+            ),
+            schedule_sha256=str(declared_schedule["schedule_sha256"]),
+            legacy_boundary_snapshot_steps=int(
+                declared_protocol["legacy_constant_lr_boundary_snapshot_steps"]
+            ),
+            betas=tuple(float(value) for value in declared_protocol["adamw"]["betas"]),
+            eps=float(declared_protocol["adamw"]["eps"]),
+            amsgrad=bool(declared_protocol["adamw"]["amsgrad"]),
+            maximize=bool(declared_protocol["adamw"]["maximize"]),
+            foreach=bool(declared_protocol["adamw"]["foreach"]),
+            fused=bool(declared_protocol["adamw"]["fused"]),
+            capturable=bool(declared_protocol["adamw"]["capturable"]),
+            differentiable=bool(declared_protocol["adamw"]["differentiable"]),
+            reward_head_dtype=str(declared_protocol["reward_head_dtype"]),
+            first_order_audit_dtype=str(declared_protocol["first_order_audit_dtype"]),
+            microbatch_order=str(declared_protocol["microbatch_order"]),
+            optimizer_state_reset_at_lr_milestone=bool(
+                declared_protocol["optimizer_state_reset_at_lr_milestone"]
+            ),
+            one_optimizer_update_per_step=bool(declared_protocol["one_optimizer_update_per_step"]),
+            tie_break=str(declared_protocol["tie_break"]),
+        )
     return Phase2TrainingSettings(
         phase2_config_hash=phase2_design_identity(normalized),
         source_config_hash=normalized["design"]["source_config_hash"],
@@ -571,6 +776,7 @@ def _settings_from_overlay(
             consecutive_checks=int(convergence["consecutive_passing_checks"]),
             gradient_norm_denominator_floor=float(convergence["denominator_floor"]),
             fail_closed=bool(convergence["fail_closed"]),
+            optimizer_protocol=optimizer_protocol,
         ),
         identifiability_relative_rank_tolerance=float(identifiability["relative_rank_tolerance"]),
         identifiability_role=str(identifiability["role"]),
@@ -908,9 +1114,17 @@ class Phase2TrainingResult:
         }
 
     @property
+    def schema_version(self) -> str:
+        return (
+            PHASE2_RECOVERY_TRAINING_SCHEMA
+            if self.settings.convergence.optimizer_protocol is not None
+            else PHASE2_TRAINING_SCHEMA
+        )
+
+    @property
     def audit(self) -> dict[str, object]:
         return {
-            "schema_version": PHASE2_TRAINING_SCHEMA,
+            "schema_version": self.schema_version,
             "training_design_sha256": self.training_design_sha256,
             "training_settings_sha256": self.training_settings_sha256,
             "training_instance_sha256": self.training_instance_sha256,
@@ -947,7 +1161,7 @@ class Phase2TrainingResult:
 
     def to_dict(self) -> dict[str, object]:
         payload = {
-            "schema_version": PHASE2_TRAINING_SCHEMA,
+            "schema_version": self.schema_version,
             "heads": {learner: list(self.heads[learner]) for learner in CANONICAL_LEARNERS},
             "audit": self.audit,
             "test_data_accessed": self.test_data_accessed,
@@ -988,15 +1202,22 @@ def _reward_head_identifiability(
     training: TrainingTensorData,
     settings: Phase2TrainingSettings,
 ) -> dict[str, object]:
-    """Measure the train reward-feature difference rank without using outcomes.
+    """Measure reward-feature rank and a recovery-only BT existence diagnostic.
 
-    Full column rank of this matrix is sufficient for a unique finite BT
-    optimum when its Hessian weights are positive.  It is not, by itself, a
-    proof that the ProRM+ moment-map Hessian is full rank, so the evidence says
-    exactly which matrix was measured and never upgrades AdamW to a
-    minimum-norm solver.
+    Full column rank of the complete edge design makes the finite-parameter BT
+    Hessian positive definite, but does not exclude complete or quasi
+    separation and therefore does not prove existence of a finite minimizer.
+    In the one-shot recovery schema we additionally audit the submatrix of
+    edges having both outcomes.  Full column rank of that submatrix is a clean
+    sufficient condition for coercivity, finite existence, and uniqueness.
     """
 
+    recovery = settings.convergence.optimizer_protocol is not None
+    tie_break = (
+        settings.convergence.optimizer_protocol.tie_break
+        if settings.convergence.optimizer_protocol is not None
+        else _LEGACY_TIE_BREAK
+    )
     differences = (training.reward_features[:, 0] - training.reward_features[:, 1]).detach()
     matrix = differences.to(dtype=torch.float64)
     singular_values = torch.linalg.svdvals(matrix)
@@ -1021,7 +1242,9 @@ def _reward_head_identifiability(
     )
     gate_passed = full_column_rank if settings.identifiability_require_full_column_rank else True
     evidence: dict[str, object] = {
-        "schema_version": "reward-head-identifiability/v1",
+        "schema_version": (
+            "reward-head-identifiability/v2" if recovery else "reward-head-identifiability/v1"
+        ),
         "design_matrix": "canonical_edge_reward_feature_differences",
         "split": "train",
         "shape": [int(matrix.shape[0]), column_dimension],
@@ -1040,12 +1263,104 @@ def _reward_head_identifiability(
         "role": settings.identifiability_role,
         "require_full_column_rank": (settings.identifiability_require_full_column_rank),
         "acceptance_gate_passed": gate_passed,
-        "bt_unique_finite_optimum_sufficient_condition_only": True,
         "prorm_moment_map_full_rank_proved": False,
-        "algorithmic_tie_break": "zero_initialized_adamw_implicit_bias",
+        "algorithmic_tie_break": tie_break,
         "minimum_norm_solution_claimed": False,
         "test_or_validation_data_accessed": False,
     }
+    if recovery:
+        mixed_mask = (training.left_wins > 0) & (training.left_wins < training.num_annotations)
+        mixed_source = differences[mixed_mask].detach()
+        mixed_matrix = mixed_source.to(dtype=torch.float64)
+        mixed_count = int(mixed_matrix.shape[0])
+        if mixed_count:
+            mixed_singular_values = torch.linalg.svdvals(mixed_matrix)
+            if mixed_singular_values.ndim != 1 or not bool(
+                torch.isfinite(mixed_singular_values).all()
+            ):
+                raise FloatingPointError(
+                    "mixed-outcome reward-head rank audit produced invalid singular values"
+                )
+            mixed_values, mixed_spectrum_sha256 = _singular_value_payload(mixed_singular_values)
+            mixed_largest = mixed_values[0]
+            mixed_smallest = mixed_values[-1]
+            mixed_threshold = settings.identifiability_relative_rank_tolerance * mixed_largest
+            mixed_retained = [value for value in mixed_values if value > mixed_threshold]
+        else:
+            mixed_values = []
+            mixed_spectrum_sha256 = None
+            mixed_largest = None
+            mixed_smallest = None
+            mixed_threshold = 0.0
+            mixed_retained = []
+        mixed_rank = len(mixed_retained)
+        mixed_smallest_retained = mixed_retained[-1] if mixed_retained else None
+        mixed_full_column_rank = mixed_rank == column_dimension
+        mixed_condition_number = (
+            mixed_largest / mixed_smallest_retained
+            if mixed_largest is not None
+            and mixed_smallest_retained is not None
+            and mixed_smallest_retained > 0.0
+            else None
+        )
+        evidence.update(
+            {
+                "full_design_rank_implication": (
+                    "strict_convexity_at_finite_parameters_and_at_most_one_finite_minimizer;"
+                    "does_not_exclude_complete_or_quasi_separation"
+                ),
+                "full_design_rank_proves_finite_bt_minimizer_exists": False,
+                "mixed_outcome_edge_coercivity_diagnostic": {
+                    "schema_version": "bt-mixed-outcome-coercivity-diagnostic/v1",
+                    "definition": "0 < left_wins < num_annotations",
+                    "split": "train",
+                    "orientation": "candidate_0_minus_candidate_1",
+                    "num_total_edges": int(matrix.shape[0]),
+                    "num_mixed_outcome_edges": mixed_count,
+                    "mixed_outcome_mask_sha256": _tensor_sha256(mixed_mask),
+                    "left_wins_sha256": _tensor_sha256(training.left_wins),
+                    "num_annotations_sha256": _tensor_sha256(training.num_annotations),
+                    "design_matrix": (
+                        "reward_feature_differences_restricted_to_mixed_outcome_edges"
+                    ),
+                    "shape": [mixed_count, column_dimension],
+                    "source_dtype": str(mixed_source.dtype),
+                    "audit_dtype": str(mixed_matrix.dtype),
+                    "design_matrix_sha256": _tensor_sha256(mixed_source),
+                    "relative_rank_tolerance": (settings.identifiability_relative_rank_tolerance),
+                    "absolute_singular_value_threshold": mixed_threshold,
+                    "singular_values_descending": mixed_values,
+                    "singular_values_sha256": mixed_spectrum_sha256,
+                    "largest_singular_value": mixed_largest,
+                    "smallest_singular_value": mixed_smallest,
+                    "smallest_retained_singular_value": mixed_smallest_retained,
+                    "numerical_rank": mixed_rank,
+                    "column_dimension": column_dimension,
+                    "full_column_rank": mixed_full_column_rank,
+                    "retained_condition_number": mixed_condition_number,
+                    "sufficient_condition": (
+                        "full_column_rank_implies_coercive_strictly_convex_binomial_bt;"
+                        "therefore_a_unique_finite_minimizer_exists"
+                    ),
+                    "sufficient_condition_observed": mixed_full_column_rank,
+                    "acceptance_gate_applied": False,
+                    "role": "train_only_measure_and_interpret",
+                    "raw_outcomes_serialized": False,
+                    "test_or_validation_data_accessed": False,
+                },
+                "bt_unique_finite_minimizer_sufficient_condition": (
+                    "mixed_outcome_edge_difference_matrix_full_column_rank"
+                ),
+                "bt_unique_finite_minimizer_sufficient_condition_observed": (
+                    mixed_full_column_rank
+                ),
+            }
+        )
+    else:
+        # Frozen legacy-v1 serialization is retained only for the superseded
+        # constant-LR protocol.  Recovery-v2 above carries the corrected
+        # separation-aware scientific statement.
+        evidence["bt_unique_finite_optimum_sufficient_condition_only"] = True
     if not gate_passed:
         raise OptimizationConvergenceError(
             "reward-head identifiability gate failed",
@@ -1102,6 +1417,12 @@ def _prorm_moment_map_identifiability(
         )
     if projection_sha256 is not None:
         _validate_digest(projection_sha256, name="projection_sha256")
+    recovery = settings.convergence.optimizer_protocol is not None
+    tie_break = (
+        settings.convergence.optimizer_protocol.tie_break
+        if settings.convergence.optimizer_protocol is not None
+        else _LEGACY_TIE_BREAK
+    )
 
     edge_policy_scores = (training.policy_scores[:, 0] - training.policy_scores[:, 1]).detach()
     edge_reward_features = (
@@ -1231,9 +1552,17 @@ def _prorm_moment_map_identifiability(
     )
     evidence: dict[str, object] = {
         "schema_version": (
-            "projected-prorm-moment-map-identifiability/v1"
-            if projected
-            else "prorm-moment-map-identifiability/v1"
+            (
+                "projected-prorm-moment-map-identifiability/v2"
+                if projected
+                else "prorm-moment-map-identifiability/v2"
+            )
+            if recovery
+            else (
+                "projected-prorm-moment-map-identifiability/v1"
+                if projected
+                else "prorm-moment-map-identifiability/v1"
+            )
         ),
         "design_matrix": (
             "canonical_train_edge_projected_moment_jacobian"
@@ -1280,7 +1609,7 @@ def _prorm_moment_map_identifiability(
         "role": settings.identifiability_role,
         "require_full_column_rank": require_full_column_rank,
         "acceptance_gate_passed": gate_passed,
-        "algorithmic_tie_break": "zero_initialized_adamw_implicit_bias",
+        "algorithmic_tie_break": tie_break,
         "minimum_norm_solution_claimed": False,
         "test_or_validation_data_accessed": False,
     }
@@ -1410,6 +1739,7 @@ class _FirstOrderMeasurement:
     objective: float
     gradient_l2_norm: float
     inner_solver: Mapping[str, object] | None = None
+    audit_dtype: str | None = None
 
     def __post_init__(self) -> None:
         _finite_float(self.objective, name="objective")
@@ -1420,9 +1750,11 @@ class _FirstOrderMeasurement:
         )
         if self.inner_solver is not None:
             _strict_json_copy(self.inner_solver, name="inner_solver")
+        if self.audit_dtype is not None and self.audit_dtype != "float64":
+            raise ValueError("first-order audit_dtype must equal float64 when declared")
 
-    def to_dict(self) -> dict[str, object]:
-        return {
+    def to_dict(self, *, include_audit_dtype: bool = False) -> dict[str, object]:
+        result: dict[str, object] = {
             "objective": self.objective,
             "gradient_l2_norm": self.gradient_l2_norm,
             "inner_solver": (
@@ -1431,6 +1763,13 @@ class _FirstOrderMeasurement:
                 else _strict_json_copy(self.inner_solver, name="inner_solver")
             ),
         }
+        if include_audit_dtype:
+            if self.audit_dtype != "float64":
+                raise ValueError(
+                    "recovery first-order measurements must declare audit_dtype='float64'"
+                )
+            result["audit_dtype"] = self.audit_dtype
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1458,12 +1797,473 @@ def _gradient_ratio(
     return ratio
 
 
+def _recovery_adamw_group_payload(
+    optimizer: torch.optim.Optimizer,
+    parameter: torch.Tensor,
+    protocol: AdamWRecoveryProtocol,
+    *,
+    expected_learning_rate: float,
+) -> dict[str, object]:
+    """Validate and serialize every protocol-relevant AdamW group field."""
+
+    if len(optimizer.param_groups) != 1:
+        raise RuntimeError("recovery AdamW must retain exactly one parameter group")
+    group = optimizer.param_groups[0]
+    parameters = group.get("params")
+    if not isinstance(parameters, list) or len(parameters) != 1 or parameters[0] is not parameter:
+        raise RuntimeError("recovery AdamW parameter group no longer contains only the head")
+    expected: dict[str, object] = {
+        "lr": expected_learning_rate,
+        "betas": protocol.betas,
+        "eps": protocol.eps,
+        "weight_decay": 0.0,
+        "amsgrad": protocol.amsgrad,
+        "maximize": protocol.maximize,
+        "foreach": protocol.foreach,
+        "capturable": protocol.capturable,
+        "differentiable": protocol.differentiable,
+        "fused": protocol.fused,
+    }
+    for name, expected_value in expected.items():
+        if group.get(name) != expected_value:
+            raise RuntimeError(
+                f"recovery AdamW parameter-group field {name!r} changed from its locked value"
+            )
+    return {
+        "learning_rate": float(group["lr"]),
+        "betas": [float(value) for value in group["betas"]],
+        "eps": float(group["eps"]),
+        "weight_decay": float(group["weight_decay"]),
+        "amsgrad": bool(group["amsgrad"]),
+        "maximize": bool(group["maximize"]),
+        "foreach": bool(group["foreach"]),
+        "capturable": bool(group["capturable"]),
+        "differentiable": bool(group["differentiable"]),
+        "fused": bool(group["fused"]),
+        "parameter_count": 1,
+        "parameter_is_reward_head": True,
+    }
+
+
+def _recovery_adamw_step_value(value: object, *, expected: int) -> dict[str, object]:
+    if not isinstance(value, torch.Tensor) or value.ndim != 0 or value.numel() != 1:
+        raise RuntimeError("recovery AdamW state['step'] must be a scalar tensor")
+    if value.dtype not in {torch.float32, torch.float64, torch.int32, torch.int64}:
+        raise RuntimeError("recovery AdamW scalar step has an unsupported dtype")
+    if value.device.type != "cpu":
+        raise RuntimeError(
+            "non-capturable, non-fused recovery AdamW scalar step must remain on CPU"
+        )
+    scalar = value.item()
+    if (
+        isinstance(scalar, bool)
+        or not isinstance(scalar, Real)
+        or not math.isfinite(float(scalar))
+        or float(scalar) != float(expected)
+    ):
+        raise RuntimeError(f"recovery AdamW scalar step must equal {expected}, observed {scalar!r}")
+    return {
+        "value": expected,
+        "shape": [],
+        "dtype": str(value.dtype),
+        "device": str(value.device),
+    }
+
+
+def _recovery_adamw_moment_descriptor(
+    value: object,
+    parameter: torch.Tensor,
+    *,
+    name: str,
+) -> dict[str, object]:
+    if not isinstance(value, torch.Tensor):
+        raise RuntimeError(f"recovery AdamW state[{name!r}] must be a tensor")
+    if value.shape != parameter.shape:
+        raise RuntimeError(f"recovery AdamW state[{name!r}] has the wrong shape")
+    if value.dtype != parameter.dtype:
+        raise RuntimeError(f"recovery AdamW state[{name!r}] has the wrong dtype")
+    if value.device != parameter.device:
+        raise RuntimeError(f"recovery AdamW state[{name!r}] has the wrong device")
+    if value.layout != torch.strided or value.is_sparse:
+        raise RuntimeError(f"recovery AdamW state[{name!r}] must be a dense strided tensor")
+    if value.requires_grad or value.grad_fn is not None:
+        raise RuntimeError(f"recovery AdamW state[{name!r}] must be detached")
+    return {
+        "shape": list(value.shape),
+        "dtype": str(value.dtype),
+        "device": str(value.device),
+        "layout": str(value.layout),
+        "detached": True,
+    }
+
+
+def _validate_recovery_adamw_state(
+    optimizer: torch.optim.Optimizer,
+    parameter: torch.Tensor,
+    protocol: AdamWRecoveryProtocol,
+    *,
+    expected_completed_updates: int,
+    expected_learning_rate: float,
+) -> dict[str, object]:
+    """Fail closed unless one AdamW update maps to one exact state step."""
+
+    if isinstance(expected_completed_updates, bool) or expected_completed_updates < 0:
+        raise ValueError("expected_completed_updates must be non-negative")
+    group = _recovery_adamw_group_payload(
+        optimizer,
+        parameter,
+        protocol,
+        expected_learning_rate=expected_learning_rate,
+    )
+    if expected_completed_updates == 0:
+        if len(optimizer.state) != 0:
+            raise RuntimeError("recovery AdamW state must be empty before its first update")
+        return {
+            "expected_completed_updates": 0,
+            "optimizer_state_empty": True,
+            "scalar_step": None,
+            "exp_avg": None,
+            "exp_avg_sq": None,
+            "parameter_group": group,
+        }
+
+    if len(optimizer.state) != 1 or parameter not in optimizer.state:
+        raise RuntimeError(
+            "recovery AdamW must retain exactly one non-empty state entry for the head"
+        )
+    state = optimizer.state[parameter]
+    if set(state) != {"step", "exp_avg", "exp_avg_sq"}:
+        raise RuntimeError(
+            "recovery AdamW head state must contain exactly step, exp_avg, and exp_avg_sq"
+        )
+    return {
+        "expected_completed_updates": expected_completed_updates,
+        "optimizer_state_empty": False,
+        "scalar_step": _recovery_adamw_step_value(
+            state["step"],
+            expected=expected_completed_updates,
+        ),
+        "exp_avg": _recovery_adamw_moment_descriptor(
+            state["exp_avg"],
+            parameter,
+            name="exp_avg",
+        ),
+        "exp_avg_sq": _recovery_adamw_moment_descriptor(
+            state["exp_avg_sq"],
+            parameter,
+            name="exp_avg_sq",
+        ),
+        "parameter_group": group,
+    }
+
+
+def _optimizer_moment_state_sha256(
+    optimizer: torch.optim.Optimizer,
+    parameter: torch.Tensor,
+) -> str:
+    """Hash AdamW state without serializing it or changing device placement."""
+
+    state = optimizer.state.get(parameter, {})
+    digest = hashlib.sha256()
+    for key in sorted(state):
+        digest.update(str(key).encode("utf-8"))
+        value = state[key]
+        if isinstance(value, torch.Tensor):
+            digest.update(_tensor_sha256(value).encode("ascii"))
+        elif isinstance(value, (int, float, bool)):
+            digest.update(repr(value).encode("ascii"))
+        else:
+            raise TypeError(f"unsupported AdamW state value for {key!r}")
+    return digest.hexdigest()
+
+
+def _recovery_optimizer_state_sha256(
+    optimizer: torch.optim.Optimizer,
+    parameter: torch.Tensor,
+    protocol: AdamWRecoveryProtocol,
+    *,
+    expected_completed_updates: int,
+    expected_learning_rate: float,
+) -> str:
+    """Hash validated moments plus every protocol-relevant group field."""
+
+    validated = _validate_recovery_adamw_state(
+        optimizer,
+        parameter,
+        protocol,
+        expected_completed_updates=expected_completed_updates,
+        expected_learning_rate=expected_learning_rate,
+    )
+    state = optimizer.state.get(parameter, {})
+    tensor_state: dict[str, object] = {}
+    for name in ("step", "exp_avg", "exp_avg_sq"):
+        value = state.get(name)
+        tensor_state[name] = (
+            None
+            if value is None
+            else {
+                "sha256": _tensor_sha256(value),
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "device": str(value.device),
+            }
+        )
+    return _canonical_sha256(
+        {
+            "schema_version": "validated-recovery-adamw-state/v1",
+            "optimizer_class": "torch.optim.AdamW",
+            "completed_updates": expected_completed_updates,
+            "state": tensor_state,
+            "parameter_group": validated["parameter_group"],
+            "protocol": {
+                "learning_rate_schedule_sha256": protocol.schedule_sha256,
+                "betas": list(protocol.betas),
+                "eps": protocol.eps,
+                "weight_decay": 0.0,
+                "amsgrad": protocol.amsgrad,
+                "maximize": protocol.maximize,
+                "foreach": protocol.foreach,
+                "capturable": protocol.capturable,
+                "differentiable": protocol.differentiable,
+                "fused": protocol.fused,
+                "one_optimizer_update_per_step": protocol.one_optimizer_update_per_step,
+                "optimizer_state_reset_at_lr_milestone": (
+                    protocol.optimizer_state_reset_at_lr_milestone
+                ),
+            },
+        }
+    )
+
+
+def _checkpoint_value_fingerprint(value: object) -> object:
+    """Convert an in-memory Torch checkpoint to a canonical JSON fingerprint."""
+
+    if isinstance(value, torch.Tensor):
+        return {
+            "kind": "tensor",
+            "sha256": _tensor_sha256(value),
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+            "device": str(value.device),
+        }
+    if isinstance(value, Mapping):
+        entries: list[dict[str, object]] = []
+        for key, item in value.items():
+            if isinstance(key, bool) or not isinstance(key, (str, int)):
+                raise TypeError("checkpoint mappings may use only string or integer keys")
+            entries.append(
+                {
+                    "key_type": type(key).__name__,
+                    "key": key,
+                    "value": _checkpoint_value_fingerprint(item),
+                }
+            )
+        entries.sort(
+            key=lambda item: json.dumps(
+                [item["key_type"], item["key"]],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        return {"kind": "mapping", "entries": entries}
+    if isinstance(value, tuple):
+        return {
+            "kind": "tuple",
+            "items": [_checkpoint_value_fingerprint(item) for item in value],
+        }
+    if isinstance(value, list):
+        return {
+            "kind": "list",
+            "items": [_checkpoint_value_fingerprint(item) for item in value],
+        }
+    if value is None or isinstance(value, (str, bool, int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("checkpoint scalar values must be finite")
+        return {"kind": type(value).__name__, "value": value}
+    raise TypeError(f"unsupported recovery checkpoint value {type(value).__name__}")
+
+
+def _checkpoint_value_sha256(value: object) -> str:
+    return _canonical_sha256(
+        {
+            "schema_version": "in-memory-torch-checkpoint-fingerprint/v1",
+            "value": _checkpoint_value_fingerprint(value),
+        }
+    )
+
+
+def _checkpoint_optimizer_state_dict(
+    trainer_state: Mapping[str, object],
+) -> Mapping[str, object]:
+    optimizer_state = trainer_state.get("optimizer")
+    if not isinstance(optimizer_state, Mapping):
+        raise RuntimeError("recovery selected checkpoint must contain optimizer state")
+    return optimizer_state
+
+
+def _record_recovery_state_check(
+    summary: dict[str, object],
+    digest: Any,
+    *,
+    phase: Literal["before_update", "after_update"],
+    update: int,
+    observation: Mapping[str, object],
+) -> None:
+    counter = f"{phase}_checks"
+    current = summary.get(counter)
+    if isinstance(current, bool) or not isinstance(current, int):
+        raise RuntimeError("recovery per-update state-check counter is invalid")
+    summary[counter] = current + 1
+    if phase == "before_update" and update == 1:
+        if observation.get("optimizer_state_empty") is not True:
+            raise RuntimeError("the first recovery pre-update state check was not empty")
+        summary["first_pre_update_state_empty"] = True
+    digest.update(
+        json.dumps(
+            {
+                "phase": phase,
+                "update": update,
+                "observation": dict(observation),
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+
+
+def _finalize_recovery_state_checks(
+    summary: dict[str, object],
+    digest: Any,
+    *,
+    completed_updates: int,
+) -> None:
+    before = summary.get("before_update_checks")
+    after = summary.get("after_update_checks")
+    if before != completed_updates or after != completed_updates:
+        raise RuntimeError("recovery AdamW did not receive one before/after state check per update")
+    if summary.get("first_pre_update_state_empty") is not True:
+        raise RuntimeError("recovery first pre-update empty-state proof is missing")
+    summary["completed_updates_covered"] = completed_updates
+    summary["check_sequence_sha256"] = digest.hexdigest()
+    summary["all_updates_checked_before_and_after"] = True
+    summary["all_subsequent_pre_update_scalar_steps_exact"] = True
+    summary["all_post_update_scalar_steps_exact"] = True
+    summary["exp_avg_and_exp_avg_sq_shape_dtype_device_valid"] = True
+
+
+def _install_recovery_optimizer(
+    trainer: Any,
+    protocol: AdamWRecoveryProtocol,
+) -> tuple[torch.optim.AdamW, dict[str, object]]:
+    """Install one explicit fresh AdamW instance before the first update."""
+
+    model = getattr(trainer, "model", None)
+    weight = getattr(model, "weight", None)
+    if not isinstance(weight, torch.Tensor):
+        raise TypeError("recovery trainer must expose model.weight")
+    if weight.dtype != torch.float32:
+        raise ValueError("recovery reward head must have torch.float32 dtype")
+    if bool(torch.count_nonzero(weight.detach())):
+        raise ValueError("recovery optimizer requires an exact zero-initialized head")
+    previous = getattr(trainer, "optimizer", None)
+    if not isinstance(previous, torch.optim.AdamW):
+        raise TypeError("recovery protocol requires the trainer's declared optimizer to be AdamW")
+    if previous.state:
+        raise ValueError("recovery protocol requires fresh empty optimizer state")
+    previous_parameters = [
+        parameter for group in previous.param_groups for parameter in group["params"]
+    ]
+    if len(previous_parameters) != 1 or previous_parameters[0] is not weight:
+        raise ValueError("recovery optimizer must contain exactly the reward head")
+    previous_group = previous.param_groups[0]
+    if float(previous_group["lr"]) != protocol.stages[0].learning_rate:
+        raise ValueError("trainer learning rate does not match recovery schedule update 1")
+    if float(previous_group["weight_decay"]) != 0.0:
+        raise ValueError("recovery AdamW requires zero weight decay")
+
+    optimizer = torch.optim.AdamW(
+        [weight],
+        lr=protocol.stages[0].learning_rate,
+        betas=protocol.betas,
+        eps=protocol.eps,
+        weight_decay=0.0,
+        amsgrad=protocol.amsgrad,
+        maximize=protocol.maximize,
+        foreach=protocol.foreach,
+        capturable=protocol.capturable,
+        differentiable=protocol.differentiable,
+        fused=protocol.fused,
+    )
+    trainer.optimizer = optimizer
+    group = optimizer.param_groups[0]
+    expected = {
+        "lr": protocol.stages[0].learning_rate,
+        "betas": protocol.betas,
+        "eps": protocol.eps,
+        "weight_decay": 0.0,
+        "amsgrad": protocol.amsgrad,
+        "maximize": protocol.maximize,
+        "foreach": protocol.foreach,
+        "capturable": protocol.capturable,
+        "differentiable": protocol.differentiable,
+        "fused": protocol.fused,
+    }
+    for parameter_name, expected_value in expected.items():
+        if group.get(parameter_name) != expected_value:
+            raise RuntimeError(f"constructed recovery AdamW field {parameter_name!r} is not locked")
+    evidence = {
+        "schema_version": "deterministic-adamw-lr-decay-execution/v2",
+        "protocol": protocol.to_dict(),
+        "optimizer_class": "torch.optim.AdamW",
+        "parameter_count": 1,
+        "fresh_optimizer_state_before_first_update": len(optimizer.state) == 0,
+        "reward_head_dtype_observed": str(weight.dtype),
+        "first_order_audit_dtype_required": protocol.first_order_audit_dtype,
+        "microbatch_order": protocol.microbatch_order,
+        "one_optimizer_update_per_step": protocol.one_optimizer_update_per_step,
+        "learning_rate_set_immediately_before_every_update": True,
+        "single_optimizer_instance_for_all_updates": True,
+        "optimizer_state_reset_at_lr_milestone": False,
+        "adamw_moments_preserved_at_learning_rate_boundaries": True,
+        "boundary_transitions": [],
+        "completed_updates_observed": None,
+        "per_update_state_checks": {
+            "schema_version": "recovery-adamw-per-update-state-checks/v1",
+            "before_update_checks": 0,
+            "after_update_checks": 0,
+            "first_pre_update_state_empty": False,
+            "completed_updates_covered": None,
+            "check_sequence_sha256": None,
+            "all_updates_checked_before_and_after": False,
+            "all_subsequent_pre_update_scalar_steps_exact": False,
+            "all_post_update_scalar_steps_exact": False,
+            "exp_avg_and_exp_avg_sq_shape_dtype_device_valid": False,
+        },
+        "selected_primary_optimizer_state_restored_and_verified": False,
+        "selected_optimizer_object_identity_preserved": False,
+        "selected_optimizer_moments_restored_and_verified": False,
+        "selected_head_sha256": None,
+        "restored_head_sha256": None,
+        "selected_optimizer_state_sha256": None,
+        "restored_optimizer_state_sha256": None,
+        "selected_checkpoint_optimizer_state_dict_sha256": None,
+        "restored_optimizer_state_dict_sha256": None,
+        "selected_checkpoint_sha256": None,
+        "test_or_validation_data_accessed": False,
+    }
+    return optimizer, evidence
+
+
 def _solution_identification_evidence(
     rank_diagnostic: Mapping[str, object] | None = None,
+    *,
+    tie_break: str = _LEGACY_TIE_BREAK,
 ) -> dict[str, object]:
     return {
         "initialization": "exact_zero_head",
-        "tie_break": "zero_initialized_adamw_implicit_bias",
+        "tie_break": tie_break,
         "primary_iterate_selection": (
             "first_scheduled_iterate_completing_the_sustained_first_order_gate"
         ),
@@ -1499,10 +2299,17 @@ def _convergence_failure_evidence(
     initial: _FirstOrderMeasurement,
     checks: Sequence[Mapping[str, object]],
     fixed_snapshot: Mapping[str, object] | None,
+    legacy_boundary_snapshot: Mapping[str, object] | None = None,
+    optimizer_protocol_execution: Mapping[str, object] | None = None,
     rank_diagnostic: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
-        "schema_version": "objective-first-order-convergence/v1",
+    recovery = spec.optimizer_protocol is not None
+    evidence: dict[str, object] = {
+        "schema_version": (
+            "objective-first-order-convergence/v2"
+            if recovery
+            else "objective-first-order-convergence/v1"
+        ),
         "objective": objective_name,
         "converged": False,
         "fail_closed": True,
@@ -1511,7 +2318,9 @@ def _convergence_failure_evidence(
             "||full_data_unclipped_gradient(w_t)||_2 / "
             "max(||full_data_unclipped_gradient(w_zero)||_2, denominator_floor)"
         ),
-        "initial_zero_head_measurement": initial.to_dict(),
+        "initial_zero_head_measurement": initial.to_dict(
+            include_audit_dtype=recovery,
+        ),
         "checks": [dict(check) for check in checks],
         "selected_primary_step": None,
         "final_gate": None,
@@ -1519,9 +2328,24 @@ def _convergence_failure_evidence(
             None if fixed_snapshot is None else dict(fixed_snapshot)
         ),
         "fixed_step_snapshot_steps": fixed_snapshot_steps,
-        "solution_identification": _solution_identification_evidence(rank_diagnostic),
+        "solution_identification": _solution_identification_evidence(
+            rank_diagnostic,
+            tie_break=(
+                spec.optimizer_protocol.tie_break
+                if spec.optimizer_protocol is not None
+                else _LEGACY_TIE_BREAK
+            ),
+        ),
         "test_or_validation_data_accessed": False,
     }
+    if recovery:
+        evidence["legacy_constant_lr_boundary_snapshot"] = (
+            None if legacy_boundary_snapshot is None else dict(legacy_boundary_snapshot)
+        )
+        evidence["optimizer_protocol_execution"] = (
+            None if optimizer_protocol_execution is None else dict(optimizer_protocol_execution)
+        )
+    return evidence
 
 
 def _run_trainer_to_first_order_convergence(
@@ -1535,10 +2359,11 @@ def _run_trainer_to_first_order_convergence(
 ) -> _ConvergedTrainingRun:
     """Train one objective to its own gate and retain a diagnostic fixed path.
 
-    If the primary gate is reached before the fixed snapshot, training
-    continues only long enough to materialize that diagnostic and the exact
-    primary trainer state is then restored.  Hence the 720-step state never
-    selects or replaces an earlier converged primary head.
+    If the primary gate is reached before a required diagnostic snapshot,
+    training continues only long enough to materialize every such snapshot
+    and the exact primary trainer state is then restored.  Hence neither the
+    720-step state nor the recovery-only 5760-step legacy boundary can select
+    or replace an earlier converged primary head.
     """
 
     if not isinstance(spec, FirstOrderConvergenceSpec):
@@ -1558,27 +2383,168 @@ def _run_trainer_to_first_order_convergence(
     if not isinstance(weight, torch.Tensor) or bool(torch.count_nonzero(weight.detach())):
         raise ValueError("convergence training requires an exact zero-initialized head")
 
+    protocol = spec.optimizer_protocol
+    recovery_optimizer: torch.optim.AdamW | None = None
+    optimizer_protocol_execution: dict[str, object] | None = None
+    recovery_state_check_digest: Any | None = None
+    recovery_state_check_summary: dict[str, object] | None = None
+    if protocol is not None:
+        recovery_optimizer, optimizer_protocol_execution = _install_recovery_optimizer(
+            trainer,
+            protocol,
+        )
+        raw_summary = optimizer_protocol_execution.get("per_update_state_checks")
+        if not isinstance(raw_summary, dict):
+            raise RuntimeError("recovery per-update state-check summary was not initialized")
+        recovery_state_check_summary = raw_summary
+        recovery_state_check_digest = hashlib.sha256()
+
     initial = audit()
+    if protocol is not None and initial.audit_dtype != protocol.first_order_audit_dtype:
+        raise RuntimeError("recovery initial first-order audit did not execute in float64")
     checks: list[dict[str, object]] = []
     consecutive_passes = 0
     selected_state: Mapping[str, object] | None = None
     selected_measurement: _FirstOrderMeasurement | None = None
     selected_step: int | None = None
+    selected_head_sha256: str | None = None
+    selected_optimizer_state_sha256: str | None = None
+    selected_checkpoint_optimizer_state_dict_sha256: str | None = None
+    selected_checkpoint_sha256: str | None = None
     fixed_snapshot: dict[str, object] | None = None
+    legacy_boundary_snapshot: dict[str, object] | None = None
 
     while trainer.completed_steps < spec.max_steps:
+        next_update = int(trainer.completed_steps) + 1
+        learning_rate_used: float | None = None
+        if protocol is not None:
+            if (
+                recovery_optimizer is None
+                or optimizer_protocol_execution is None
+                or recovery_state_check_digest is None
+                or recovery_state_check_summary is None
+            ):
+                raise RuntimeError("recovery optimizer protocol was not initialized")
+            if trainer.optimizer is not recovery_optimizer:
+                raise RuntimeError("trainer replaced the locked recovery AdamW instance")
+            learning_rate_used = protocol.learning_rate_for_update(next_update)
+            previous_update = next_update - 1
+            previous_learning_rate_expected = protocol.learning_rate_for_update(
+                max(1, previous_update)
+            )
+            before_update_state = _validate_recovery_adamw_state(
+                recovery_optimizer,
+                weight,
+                protocol,
+                expected_completed_updates=previous_update,
+                expected_learning_rate=previous_learning_rate_expected,
+            )
+            _record_recovery_state_check(
+                recovery_state_check_summary,
+                recovery_state_check_digest,
+                phase="before_update",
+                update=next_update,
+                observation=before_update_state,
+            )
+            groups = recovery_optimizer.param_groups
+            if len(groups) != 1:
+                raise RuntimeError("recovery AdamW must retain exactly one parameter group")
+            group = groups[0]
+            previous_learning_rate = float(group["lr"])
+            transition = next(
+                (stage for stage in protocol.stages[1:] if stage.first_update == next_update),
+                None,
+            )
+            moment_sha256_before = (
+                _optimizer_moment_state_sha256(recovery_optimizer, weight)
+                if transition is not None
+                else None
+            )
+            # This assignment happens for every update, including within a
+            # stage.  The optimizer instance and its state are never replaced.
+            group["lr"] = learning_rate_used
+            if float(group["lr"]) != learning_rate_used:
+                raise RuntimeError("recovery learning rate was not set before the update")
+            _recovery_adamw_group_payload(
+                recovery_optimizer,
+                weight,
+                protocol,
+                expected_learning_rate=learning_rate_used,
+            )
+            if transition is not None:
+                moment_sha256_after = _optimizer_moment_state_sha256(
+                    recovery_optimizer,
+                    weight,
+                )
+                if moment_sha256_before != moment_sha256_after:
+                    raise RuntimeError(
+                        "setting the recovery learning rate changed AdamW moment state"
+                    )
+                boundary_transitions = optimizer_protocol_execution["boundary_transitions"]
+                if not isinstance(boundary_transitions, list):
+                    raise RuntimeError("recovery transition evidence is not mutable")
+                boundary_transitions.append(
+                    {
+                        "next_update": next_update,
+                        "previous_learning_rate": previous_learning_rate,
+                        "new_learning_rate": learning_rate_used,
+                        "moment_state_sha256_before_lr_assignment": (moment_sha256_before),
+                        "moment_state_sha256_after_lr_assignment": (moment_sha256_after),
+                        "same_optimizer_instance": True,
+                        "moments_preserved": True,
+                    }
+                )
         diagnostic = trainer.step()
         if not isinstance(diagnostic, TrainingStepDiagnostics):
             raise TypeError("trainer.step() must return TrainingStepDiagnostics")
+        if protocol is not None and trainer.optimizer is not recovery_optimizer:
+            raise RuntimeError("trainer replaced recovery AdamW during an update")
         step = int(trainer.completed_steps)
+        if protocol is not None and step != next_update:
+            raise RuntimeError(
+                "recovery trainer did not perform exactly one optimizer update per step"
+            )
+        if protocol is not None:
+            if (
+                recovery_optimizer is None
+                or recovery_state_check_digest is None
+                or recovery_state_check_summary is None
+                or learning_rate_used is None
+            ):
+                raise RuntimeError("recovery optimizer state checks were not initialized")
+            after_update_state = _validate_recovery_adamw_state(
+                recovery_optimizer,
+                weight,
+                protocol,
+                expected_completed_updates=next_update,
+                expected_learning_rate=learning_rate_used,
+            )
+            _record_recovery_state_check(
+                recovery_state_check_summary,
+                recovery_state_check_digest,
+                phase="after_update",
+                update=next_update,
+                observation=after_update_state,
+            )
         if diagnostic.step != step:
             raise RuntimeError("trainer diagnostic step does not match trainer state")
 
         scheduled = step % spec.check_interval == 0
         needs_snapshot = step == fixed_steps
+        needs_legacy_boundary_snapshot = (
+            protocol is not None and step == protocol.legacy_boundary_snapshot_steps
+        )
         measurement: _FirstOrderMeasurement | None = None
-        if (scheduled and selected_state is None) or needs_snapshot:
+        if (
+            (scheduled and selected_state is None)
+            or needs_snapshot
+            or needs_legacy_boundary_snapshot
+        ):
             measurement = audit()
+            if protocol is not None and measurement.audit_dtype != protocol.first_order_audit_dtype:
+                raise RuntimeError(
+                    "recovery scheduled first-order audit did not execute in float64"
+                )
 
         if scheduled and selected_state is None:
             if measurement is None:
@@ -1596,15 +2562,60 @@ def _run_trainer_to_first_order_convergence(
                 "post_update": True,
                 "full_data": True,
                 "gradient_clipping_applied": False,
-                "measurement": measurement.to_dict(),
+                "measurement": measurement.to_dict(
+                    include_audit_dtype=protocol is not None,
+                ),
                 "gradient_ratio_to_zero_initialization": ratio,
                 "eligible_after_min_steps": eligible,
                 "threshold_passed": passed,
                 "consecutive_threshold_passes": consecutive_passes,
             }
+            if learning_rate_used is not None:
+                check["learning_rate_used_for_update"] = learning_rate_used
+                check["learning_rate_schedule_sha256"] = protocol.schedule_sha256
             checks.append(check)
             if consecutive_passes >= spec.consecutive_checks:
-                selected_state = trainer.state_dict()
+                candidate_state = trainer.state_dict()
+                if not isinstance(candidate_state, Mapping):
+                    raise TypeError("recovery trainer state_dict() must return a mapping")
+                if protocol is not None:
+                    if recovery_optimizer is None or learning_rate_used is None:
+                        raise RuntimeError("recovery optimizer was not available at selection")
+                    selected_head_sha256 = _tensor_sha256(weight)
+                    selected_optimizer_state_sha256 = _recovery_optimizer_state_sha256(
+                        recovery_optimizer,
+                        weight,
+                        protocol,
+                        expected_completed_updates=step,
+                        expected_learning_rate=learning_rate_used,
+                    )
+                    checkpoint_optimizer = _checkpoint_optimizer_state_dict(candidate_state)
+                    selected_checkpoint_optimizer_state_dict_sha256 = _checkpoint_value_sha256(
+                        checkpoint_optimizer
+                    )
+                    live_optimizer_state_dict_sha256 = _checkpoint_value_sha256(
+                        recovery_optimizer.state_dict()
+                    )
+                    if (
+                        selected_checkpoint_optimizer_state_dict_sha256
+                        != live_optimizer_state_dict_sha256
+                    ):
+                        raise RuntimeError(
+                            "selected recovery checkpoint optimizer state differs "
+                            "from the live optimizer"
+                        )
+                    selected_checkpoint_sha256 = _canonical_sha256(
+                        {
+                            "schema_version": "selected-recovery-state-binding/v1",
+                            "completed_updates": step,
+                            "head_sha256": selected_head_sha256,
+                            "optimizer_state_sha256": selected_optimizer_state_sha256,
+                            "optimizer_state_dict_sha256": (
+                                selected_checkpoint_optimizer_state_dict_sha256
+                            ),
+                        }
+                    )
+                selected_state = candidate_state
                 selected_measurement = measurement
                 selected_step = step
 
@@ -1615,7 +2626,9 @@ def _run_trainer_to_first_order_convergence(
                 "schema_version": "fixed-step-compute-matched-snapshot/v1",
                 "step": step,
                 "head_sha256": _tensor_sha256(trainer.model.weight),
-                "measurement": measurement.to_dict(),
+                "measurement": measurement.to_dict(
+                    include_audit_dtype=protocol is not None,
+                ),
                 "gradient_ratio_to_zero_initialization": _gradient_ratio(
                     measurement.gradient_l2_norm,
                     initial.gradient_l2_norm,
@@ -1627,11 +2640,50 @@ def _run_trainer_to_first_order_convergence(
                 "coincides_with_selected_primary_iterate": (selected_step == fixed_steps),
             }
 
-        if selected_state is not None and fixed_snapshot is not None:
+        if needs_legacy_boundary_snapshot:
+            if measurement is None or protocol is None:
+                raise RuntimeError("legacy-boundary snapshot audit was not evaluated")
+            legacy_boundary_snapshot = {
+                "schema_version": "legacy-constant-lr-boundary-snapshot/v1",
+                "step": step,
+                "head_sha256": _tensor_sha256(trainer.model.weight),
+                "measurement": measurement.to_dict(include_audit_dtype=True),
+                "gradient_ratio_to_zero_initialization": _gradient_ratio(
+                    measurement.gradient_l2_norm,
+                    initial.gradient_l2_norm,
+                    spec,
+                ),
+                "history_summary": _history_summary(tuple(trainer.history)),
+                "learning_rate_used_for_update": learning_rate_used,
+                "learning_rate_schedule_sha256": protocol.schedule_sha256,
+                "role": "immutable_legacy_constant_lr_failure_boundary_diagnostic",
+                "used_as_primary_selection_rule": False,
+                "coincides_with_selected_primary_iterate": (
+                    selected_step == protocol.legacy_boundary_snapshot_steps
+                ),
+                "test_or_validation_data_accessed": False,
+            }
+
+        all_required_snapshots_observed = fixed_snapshot is not None and (
+            protocol is None or legacy_boundary_snapshot is not None
+        )
+        if selected_state is not None and all_required_snapshots_observed:
             break
 
     if fixed_snapshot is None:
         raise RuntimeError("fixed-step compute-matched snapshot was not reached")
+    if protocol is not None and legacy_boundary_snapshot is None:
+        raise RuntimeError("recovery legacy-boundary snapshot was not reached")
+    controller_updates_executed = int(trainer.completed_steps)
+    if optimizer_protocol_execution is not None:
+        optimizer_protocol_execution["completed_updates_observed"] = controller_updates_executed
+        if recovery_state_check_summary is None or recovery_state_check_digest is None:
+            raise RuntimeError("recovery optimizer state-check evidence is missing")
+        _finalize_recovery_state_checks(
+            recovery_state_check_summary,
+            recovery_state_check_digest,
+            completed_updates=controller_updates_executed,
+        )
     if selected_state is None or selected_measurement is None or selected_step is None:
         evidence = _convergence_failure_evidence(
             objective_name=objective_name,
@@ -1640,6 +2692,8 @@ def _run_trainer_to_first_order_convergence(
             initial=initial,
             checks=checks,
             fixed_snapshot=fixed_snapshot,
+            legacy_boundary_snapshot=legacy_boundary_snapshot,
+            optimizer_protocol_execution=optimizer_protocol_execution,
             rank_diagnostic=rank_diagnostic,
         )
         raise OptimizationConvergenceError(
@@ -1648,10 +2702,74 @@ def _run_trainer_to_first_order_convergence(
             evidence=evidence,
         )
 
+    if protocol is not None:
+        if (
+            recovery_optimizer is None
+            or optimizer_protocol_execution is None
+            or selected_head_sha256 is None
+            or selected_optimizer_state_sha256 is None
+            or selected_checkpoint_optimizer_state_dict_sha256 is None
+            or selected_checkpoint_sha256 is None
+        ):
+            raise RuntimeError("selected recovery optimizer checkpoint evidence is incomplete")
+        if (
+            _checkpoint_value_sha256(_checkpoint_optimizer_state_dict(selected_state))
+            != selected_checkpoint_optimizer_state_dict_sha256
+        ):
+            raise RuntimeError("selected recovery optimizer checkpoint mutated before restoration")
     trainer.load_state_dict(selected_state)
     if trainer.completed_steps != selected_step:
         raise RuntimeError("restored primary trainer step does not match selected step")
+    if protocol is not None:
+        if recovery_optimizer is None or optimizer_protocol_execution is None:
+            raise RuntimeError("recovery optimizer restoration evidence is missing")
+        if trainer.optimizer is not recovery_optimizer:
+            raise RuntimeError(
+                "recovery trainer replaced the optimizer object while restoring the selected state"
+            )
+        restored_head_sha256 = _tensor_sha256(weight)
+        if restored_head_sha256 != selected_head_sha256:
+            raise RuntimeError("restored recovery head differs from the selected head")
+        selected_learning_rate = protocol.learning_rate_for_update(selected_step)
+        restored_optimizer_state_sha256 = _recovery_optimizer_state_sha256(
+            recovery_optimizer,
+            weight,
+            protocol,
+            expected_completed_updates=selected_step,
+            expected_learning_rate=selected_learning_rate,
+        )
+        if restored_optimizer_state_sha256 != selected_optimizer_state_sha256:
+            raise RuntimeError(
+                "restored recovery AdamW moments or parameter-group state differ "
+                "from the selected optimizer state"
+            )
+        restored_optimizer_state_dict_sha256 = _checkpoint_value_sha256(
+            recovery_optimizer.state_dict()
+        )
+        if restored_optimizer_state_dict_sha256 != selected_checkpoint_optimizer_state_dict_sha256:
+            raise RuntimeError(
+                "restored recovery optimizer state_dict differs from the selected checkpoint"
+            )
+        optimizer_protocol_execution.update(
+            {
+                "selected_primary_optimizer_state_restored_without_reconstruction": True,
+                "selected_primary_optimizer_state_restored_and_verified": True,
+                "selected_optimizer_object_identity_preserved": True,
+                "selected_optimizer_moments_restored_and_verified": True,
+                "selected_head_sha256": selected_head_sha256,
+                "restored_head_sha256": restored_head_sha256,
+                "selected_optimizer_state_sha256": selected_optimizer_state_sha256,
+                "restored_optimizer_state_sha256": restored_optimizer_state_sha256,
+                "selected_checkpoint_optimizer_state_dict_sha256": (
+                    selected_checkpoint_optimizer_state_dict_sha256
+                ),
+                "restored_optimizer_state_dict_sha256": (restored_optimizer_state_dict_sha256),
+                "selected_checkpoint_sha256": selected_checkpoint_sha256,
+            }
+        )
     final = audit()
+    if protocol is not None and final.audit_dtype != protocol.first_order_audit_dtype:
+        raise RuntimeError("recovery final first-order audit did not execute in float64")
     final_ratio = _gradient_ratio(
         final.gradient_l2_norm,
         initial.gradient_l2_norm,
@@ -1667,18 +2785,39 @@ def _run_trainer_to_first_order_convergence(
                 initial=initial,
                 checks=checks,
                 fixed_snapshot=fixed_snapshot,
+                legacy_boundary_snapshot=legacy_boundary_snapshot,
+                optimizer_protocol_execution=optimizer_protocol_execution,
                 rank_diagnostic=rank_diagnostic,
             ),
         )
     final_gate = {
         "step": selected_step,
-        "measurement": final.to_dict(),
+        "measurement": final.to_dict(
+            include_audit_dtype=protocol is not None,
+        ),
         "gradient_ratio_to_zero_initialization": final_ratio,
         "threshold_passed": True,
         "fresh_post_restore_audit": True,
     }
+    if protocol is not None:
+        final_gate["learning_rate_at_selected_iterate"] = protocol.learning_rate_for_update(
+            selected_step
+        )
+        if optimizer_protocol_execution is None:
+            raise RuntimeError("recovery optimizer execution evidence is missing")
+        if (
+            optimizer_protocol_execution.get(
+                "selected_primary_optimizer_state_restored_and_verified"
+            )
+            is not True
+        ):
+            raise RuntimeError("recovery selected optimizer state was not verified")
     evidence = {
-        "schema_version": "objective-first-order-convergence/v1",
+        "schema_version": (
+            "objective-first-order-convergence/v2"
+            if protocol is not None
+            else "objective-first-order-convergence/v1"
+        ),
         "objective": objective_name,
         "converged": True,
         "fail_closed": True,
@@ -1687,7 +2826,9 @@ def _run_trainer_to_first_order_convergence(
             "||full_data_unclipped_gradient(w_t)||_2 / "
             "max(||full_data_unclipped_gradient(w_zero)||_2, denominator_floor)"
         ),
-        "initial_zero_head_measurement": initial.to_dict(),
+        "initial_zero_head_measurement": initial.to_dict(
+            include_audit_dtype=protocol is not None,
+        ),
         "checks": checks,
         "selected_primary_step": selected_step,
         "selected_primary_head_sha256": _tensor_sha256(trainer.model.weight),
@@ -1696,9 +2837,15 @@ def _run_trainer_to_first_order_convergence(
         "fixed_step_compute_matched_snapshot": fixed_snapshot,
         "fixed_step_snapshot_steps": fixed_steps,
         "fixed_step_snapshot_is_not_primary_selection": True,
-        "solution_identification": _solution_identification_evidence(rank_diagnostic),
+        "solution_identification": _solution_identification_evidence(
+            rank_diagnostic,
+            tie_break=(protocol.tie_break if protocol is not None else _LEGACY_TIE_BREAK),
+        ),
         "test_or_validation_data_accessed": False,
     }
+    if protocol is not None:
+        evidence["legacy_constant_lr_boundary_snapshot"] = legacy_boundary_snapshot
+        evidence["optimizer_protocol_execution"] = optimizer_protocol_execution
     history = tuple(trainer.history)
     if len(history) != selected_step:
         raise RuntimeError("restored primary history does not match selected step")
@@ -1731,6 +2878,7 @@ def _bt_first_order_measurement(trainer: BTMLETrainer) -> _FirstOrderMeasurement
         objective=float(objective.item()),
         gradient_l2_norm=float(torch.linalg.vector_norm(gradient).item()),
         inner_solver=None,
+        audit_dtype="float64",
     )
 
 
@@ -1753,6 +2901,7 @@ def _exact_soft_bt_first_order_measurement(
         objective=float(objective.item()),
         gradient_l2_norm=float(torch.linalg.vector_norm(gradient).item()),
         inner_solver=None,
+        audit_dtype="float64",
     )
 
 
@@ -1792,6 +2941,7 @@ def _prorm_first_order_measurement(
             "relative_residual": float(evaluation.pcg_relative_residual),
             "converged": True,
         },
+        audit_dtype="float64",
     )
 
 
@@ -2413,6 +3563,7 @@ class _DensePseudoinverseProRMTrainer:
                 "solve_relative_residual": evaluation.solve_relative_residual,
                 "converged": True,
             },
+            audit_dtype="float64",
         )
 
     def step(self) -> TrainingStepDiagnostics:
@@ -3206,13 +4357,16 @@ __all__ = [
     "EXACT_SOFT_BT_INPUT",
     "EXACT_SOFT_BT_ROLE",
     "LABEL_RNG_NAMESPACE",
+    "PHASE2_RECOVERY_TRAINING_SCHEMA",
     "PHASE2_TRAINING_SCHEMA",
     "PRIMARY_TRAINING_ARM",
+    "AdamWRecoveryProtocol",
     "ExactMarginTrainingControl",
     "ExactSoftLabelBTControl",
     "FirstOrderConvergenceSpec",
     "FreshPhase2HeadTrainer",
     "LabelStreamEvidence",
+    "LearningRateStage",
     "OptimizationConvergenceError",
     "Phase2TrainingResult",
     "Phase2TrainingSettings",

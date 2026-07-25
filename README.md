@@ -69,6 +69,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
 | Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed aggregation implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
+| First Phase-2 calibration pilot | All three excluded pilot seeds fail-closed at the BT first-order gate under constant-`1e-3` AdamW; a train-only diagnostic established a deterministic decay path that passes without held-out access. The one-shot recovery has a separate identity and can only authorize a new full calibration pilot; it cannot produce or enter a beta aggregate |
 
 The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
 manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
@@ -925,6 +926,7 @@ schemas, and monitoring commands are in [docs/hpc4.md](docs/hpc4.md).
 | Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
 | Formal five-seed results and scientific conclusion | [docs/phase1_results.md](docs/phase1_results.md) |
 | Phase 2 pilot boundary, global-beta decision and formal gates | [docs/phase2_design_decisions.md](docs/phase2_design_decisions.md) |
+| First Phase-2 failure, optimizer diagnosis and one-shot recovery boundary | [docs/phase2_recovery_protocol.md](docs/phase2_recovery_protocol.md) |
 | HPC4 environment closure and Slurm execution | [docs/hpc4.md](docs/hpc4.md) |
 | Config identities | [configs/main.yaml](configs/main.yaml), [configs/common_beta_pilot.yaml](configs/common_beta_pilot.yaml), [configs/identities.json](configs/identities.json) |
 

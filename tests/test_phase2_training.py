@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import math
@@ -15,7 +16,11 @@ import smart_reward.phase2_training as phase2_training
 from smart_reward.config import load_config
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.experiment import TrainingTensorData
-from smart_reward.phase2_config import load_phase2_config_bundle
+from smart_reward.phase2_config import (
+    PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+    PHASE2_RECOVERY_PILOT_CONFIG,
+    load_phase2_config_bundle,
+)
 from smart_reward.phase2_controls import (
     build_exact_margin_canonical_arm,
     sample_canonical_r4_noisy_arm,
@@ -27,8 +32,10 @@ from smart_reward.phase2_training import (
     EXACT_SOFT_BT_ROLE,
     LABEL_RNG_NAMESPACE,
     PRIMARY_TRAINING_ARM,
+    AdamWRecoveryProtocol,
     FirstOrderConvergenceSpec,
     FreshPhase2HeadTrainer,
+    LearningRateStage,
     OptimizationConvergenceError,
     Phase2TrainingResult,
     Phase2TrainingSettings,
@@ -173,6 +180,83 @@ def test_settings_compile_from_overlay_bundle_and_explicit_mapping(config_bundle
     assert from_bundle.convergence.check_interval == 20
     assert from_bundle.convergence.consecutive_checks == 3
     assert len(from_bundle.sha256) == 64
+
+
+def test_recovery_settings_compile_hash_bound_schedule_for_every_controller() -> None:
+    bundle = load_phase2_config_bundle(ROOT / PHASE2_RECOVERY_PILOT_CONFIG)
+    settings = compile_phase2_training_settings(bundle)
+    protocol = settings.convergence.optimizer_protocol
+
+    assert protocol is not None
+    assert settings.to_dict()["schema_version"] == "phase2-training-settings/v3"
+    assert settings.convergence.max_steps == 12760
+    assert protocol.schedule_sha256 == PHASE2_RECOVERY_LR_SCHEDULE_SHA256
+    assert protocol.legacy_boundary_snapshot_steps == 5760
+    assert [
+        protocol.learning_rate_for_update(update)
+        for update in (1, 5760, 5761, 6760, 6761, 8760, 8761, 10760, 10761, 12760)
+    ] == [
+        1.0e-3,
+        1.0e-3,
+        3.0e-4,
+        3.0e-4,
+        1.0e-4,
+        1.0e-4,
+        3.0e-5,
+        3.0e-5,
+        1.0e-5,
+        1.0e-5,
+    ]
+
+
+def test_recovery_identifiability_is_tie_break_bound_and_separation_aware() -> None:
+    settings = compile_phase2_training_settings(
+        load_phase2_config_bundle(ROOT / PHASE2_RECOVERY_PILOT_CONFIG)
+    )
+    protocol = settings.convergence.optimizer_protocol
+    assert protocol is not None
+    training = _training()
+
+    reward_rank = phase2_training._reward_head_identifiability(training, settings)
+    assert reward_rank["schema_version"] == "reward-head-identifiability/v2"
+    assert reward_rank["algorithmic_tie_break"] == protocol.tie_break
+    assert reward_rank["full_design_rank_proves_finite_bt_minimizer_exists"] is False
+    mixed = reward_rank["mixed_outcome_edge_coercivity_diagnostic"]
+    assert mixed["num_mixed_outcome_edges"] == training.num_prompts
+    assert mixed["shape"] == [training.num_prompts, training.reward_dimension]
+    assert mixed["full_column_rank"] is True
+    assert mixed["sufficient_condition_observed"] is True
+    assert mixed["acceptance_gate_applied"] is False
+    assert mixed["raw_outcomes_serialized"] is False
+    assert reward_rank["bt_unique_finite_minimizer_sufficient_condition_observed"] is True
+
+    all_left_wins = TrainingTensorData(
+        prompt_ids=training.prompt_ids,
+        policy_scores=training.policy_scores,
+        reward_features=training.reward_features,
+        h=training.h,
+        left_wins=training.num_annotations.clone(),
+        num_annotations=training.num_annotations,
+    )
+    separated_rank = phase2_training._reward_head_identifiability(
+        all_left_wins,
+        settings,
+    )
+    assert separated_rank["full_column_rank"] is True
+    separated_mixed = separated_rank["mixed_outcome_edge_coercivity_diagnostic"]
+    assert separated_mixed["num_mixed_outcome_edges"] == 0
+    assert separated_mixed["shape"] == [0, training.reward_dimension]
+    assert separated_mixed["numerical_rank"] == 0
+    assert separated_mixed["full_column_rank"] is False
+    assert separated_mixed["sufficient_condition_observed"] is False
+    assert separated_rank["bt_unique_finite_minimizer_sufficient_condition_observed"] is False
+
+    moment_rank = phase2_training._prorm_moment_map_identifiability(
+        training,
+        settings,
+    )
+    assert moment_rank["schema_version"] == "prorm-moment-map-identifiability/v2"
+    assert moment_rank["algorithmic_tie_break"] == protocol.tie_break
 
 
 def test_settings_reject_nonformal_or_unbound_values(
@@ -745,6 +829,17 @@ def test_result_is_strict_json_and_contains_no_raw_reward_or_label_values(
     payload = result.to_dict()
     rendered = json.dumps(payload, allow_nan=False, sort_keys=True)
 
+    assert payload["schema_version"] == "phase2-fresh-head-training/v2"
+    assert payload["audit"]["schema_version"] == "phase2-fresh-head-training/v2"
+    for head in (result.bt_mle, result.prorm_plus):
+        convergence = head.first_order_convergence
+        measurements = [
+            convergence["initial_zero_head_measurement"],
+            convergence["final_gate"]["measurement"],
+            convergence["fixed_step_compute_matched_snapshot"]["measurement"],
+            *(check["measurement"] for check in convergence["checks"]),
+        ]
+        assert all("audit_dtype" not in measurement for measurement in measurements)
     assert payload["heads"] == {
         BT_MLE: list(result.bt_head),
         PRORM_PLUS: list(result.prorm_plus_head),
@@ -780,6 +875,26 @@ def test_result_is_strict_json_and_contains_no_raw_reward_or_label_values(
         result.training_arm = "phase1"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         result.bt_mle.head_weight = (0.0,)  # type: ignore[misc]
+
+
+def test_recovery_result_uses_fresh_head_training_v3_only(
+    trained_result,
+) -> None:
+    _, _, legacy_result = trained_result
+    recovery_settings = compile_phase2_training_settings(
+        load_phase2_config_bundle(ROOT / PHASE2_RECOVERY_PILOT_CONFIG)
+    )
+    recovery_result = replace(
+        legacy_result,
+        settings=recovery_settings,
+        training_design_sha256=recovery_settings.phase2_config_hash,
+        training_settings_sha256=recovery_settings.sha256,
+    )
+
+    assert recovery_result.schema_version == "phase2-fresh-head-training/v3"
+    assert recovery_result.to_dict()["schema_version"] == "phase2-fresh-head-training/v3"
+    assert recovery_result.audit["schema_version"] == "phase2-fresh-head-training/v3"
+    assert legacy_result.schema_version == "phase2-fresh-head-training/v2"
 
 
 def test_source_phase1_label_fields_cannot_change_primary_or_control_heads(
@@ -925,6 +1040,117 @@ class _FakeFirstOrderTrainer:
         self.history = list(state["history"])
 
 
+class _RecoveryFirstOrderTrainer:
+    """One-parameter trainer whose recorded LR exposes controller ordering."""
+
+    def __init__(self) -> None:
+        self.model = SimpleNamespace(weight=torch.nn.Parameter(torch.zeros(1, dtype=torch.float32)))
+        self.optimizer = torch.optim.AdamW(
+            [self.model.weight],
+            lr=1.0e-3,
+            weight_decay=0.0,
+        )
+        self.completed_steps = 0
+        self.history: list[phase2_training.TrainingStepDiagnostics] = []
+        self.observed_learning_rates: list[float] = []
+
+    def step(self):
+        self.observed_learning_rates.append(float(self.optimizer.param_groups[0]["lr"]))
+        self.optimizer.zero_grad(set_to_none=True)
+        self.model.weight.grad = torch.ones_like(self.model.weight)
+        self.optimizer.step()
+        self.completed_steps += 1
+        diagnostic = phase2_training.TrainingStepDiagnostics(
+            step=self.completed_steps,
+            objective=1.0,
+            gradient_norm=1.0,
+        )
+        self.history.append(diagnostic)
+        return diagnostic
+
+    def state_dict(self):
+        return {
+            "weight": self.model.weight.detach().clone(),
+            "optimizer": copy.deepcopy(self.optimizer.state_dict()),
+            "completed_steps": self.completed_steps,
+            "history": tuple(self.history),
+        }
+
+    def load_state_dict(self, state):
+        with torch.no_grad():
+            self.model.weight.copy_(state["weight"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.completed_steps = state["completed_steps"]
+        self.history = list(state["history"])
+
+
+class _RecoveryDoubleStepTrainer(_RecoveryFirstOrderTrainer):
+    """Failure injection: two AdamW updates are hidden behind one trainer step."""
+
+    def step(self):
+        self.observed_learning_rates.append(float(self.optimizer.param_groups[0]["lr"]))
+        self.optimizer.zero_grad(set_to_none=True)
+        self.model.weight.grad = torch.ones_like(self.model.weight)
+        self.optimizer.step()
+        self.optimizer.step()
+        self.completed_steps += 1
+        diagnostic = phase2_training.TrainingStepDiagnostics(
+            step=self.completed_steps,
+            objective=1.0,
+            gradient_norm=1.0,
+        )
+        self.history.append(diagnostic)
+        return diagnostic
+
+
+class _RecoveryResetMomentsTrainer(_RecoveryFirstOrderTrainer):
+    """Failure injection: erase moments immediately before update two."""
+
+    def step(self):
+        if self.completed_steps == 1:
+            self.optimizer.state.clear()
+        return super().step()
+
+
+class _RecoveryDoesNotRestoreOptimizerTrainer(_RecoveryFirstOrderTrainer):
+    """Failure injection: restore the selected head/history but not AdamW."""
+
+    def load_state_dict(self, state):
+        with torch.no_grad():
+            self.model.weight.copy_(state["weight"])
+        self.completed_steps = state["completed_steps"]
+        self.history = list(state["history"])
+
+
+class _RecoveryReplacesOptimizerTrainer(_RecoveryFirstOrderTrainer):
+    """Failure injection: reconstruct AdamW while restoring a checkpoint."""
+
+    def load_state_dict(self, state):
+        super().load_state_dict(state)
+        replacement = torch.optim.AdamW(
+            [self.model.weight],
+            lr=float(self.optimizer.param_groups[0]["lr"]),
+            weight_decay=0.0,
+            foreach=False,
+            fused=False,
+        )
+        replacement.load_state_dict(state["optimizer"])
+        self.optimizer = replacement
+
+
+def _recovery_optimizer_protocol() -> AdamWRecoveryProtocol:
+    return AdamWRecoveryProtocol(
+        stages=(
+            LearningRateStage(1, 5760, 1.0e-3),
+            LearningRateStage(5761, 6760, 3.0e-4),
+            LearningRateStage(6761, 8760, 1.0e-4),
+            LearningRateStage(8761, 10760, 3.0e-5),
+            LearningRateStage(10761, 12760, 1.0e-5),
+        ),
+        schedule_sha256=PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+    )
+
+
 def test_first_order_controller_early_stops_restores_and_keeps_snapshot() -> None:
     trainer = _FakeFirstOrderTrainer()
     gradients = {0: 10.0, 1: 3.0, 2: 1.0, 3: 0.5, 4: 0.25}
@@ -997,6 +1223,219 @@ def test_first_order_controller_fails_closed_with_complete_evidence() -> None:
     assert (
         evidence["fixed_step_compute_matched_snapshot"]["used_as_primary_selection_rule"] is False
     )
+
+
+def test_recovery_controller_sets_lr_before_update_preserves_moments_and_snapshots() -> None:
+    trainer = _RecoveryFirstOrderTrainer()
+    protocol = _recovery_optimizer_protocol()
+
+    def audit():
+        # Force selection only after the second LR transition so the test
+        # exercises both moment-preserving boundary assignments.
+        gradient = (
+            10.0
+            if trainer.completed_steps == 0
+            else (1.0 if trainer.completed_steps <= 6760 else 0.005)
+        )
+        return phase2_training._FirstOrderMeasurement(
+            objective=1.0,
+            gradient_l2_norm=gradient,
+            audit_dtype="float64",
+        )
+
+    observed = phase2_training._run_trainer_to_first_order_convergence(
+        trainer,
+        audit=audit,
+        spec=FirstOrderConvergenceSpec(
+            gradient_ratio_tolerance=1.0e-3,
+            min_steps=100,
+            max_steps=12760,
+            check_interval=20,
+            consecutive_checks=3,
+            optimizer_protocol=protocol,
+        ),
+        fixed_snapshot_steps=720,
+        objective_name="recovery_test_objective",
+    )
+
+    assert trainer.completed_steps == 6820
+    assert observed.evidence["selected_primary_step"] == 6820
+    assert trainer.observed_learning_rates[5759] == pytest.approx(1.0e-3)
+    assert trainer.observed_learning_rates[5760] == pytest.approx(3.0e-4)
+    assert trainer.observed_learning_rates[6759] == pytest.approx(3.0e-4)
+    assert trainer.observed_learning_rates[6760] == pytest.approx(1.0e-4)
+    assert observed.evidence["fixed_step_compute_matched_snapshot"]["step"] == 720
+    legacy = observed.evidence["legacy_constant_lr_boundary_snapshot"]
+    assert legacy["step"] == 5760
+    assert legacy["learning_rate_used_for_update"] == pytest.approx(1.0e-3)
+    execution = observed.evidence["optimizer_protocol_execution"]
+    assert execution["schema_version"] == "deterministic-adamw-lr-decay-execution/v2"
+    assert execution["completed_updates_observed"] == 6820
+    assert execution["single_optimizer_instance_for_all_updates"] is True
+    assert execution["optimizer_state_reset_at_lr_milestone"] is False
+    assert execution["one_optimizer_update_per_step"] is True
+    transitions = execution["boundary_transitions"]
+    assert [item["next_update"] for item in transitions] == [5761, 6761]
+    assert all(item["moments_preserved"] is True for item in transitions)
+    assert all(
+        item["moment_state_sha256_before_lr_assignment"]
+        == item["moment_state_sha256_after_lr_assignment"]
+        for item in transitions
+    )
+    state_checks = execution["per_update_state_checks"]
+    assert state_checks["before_update_checks"] == 6820
+    assert state_checks["after_update_checks"] == 6820
+    assert state_checks["completed_updates_covered"] == 6820
+    assert state_checks["first_pre_update_state_empty"] is True
+    assert state_checks["all_updates_checked_before_and_after"] is True
+    assert state_checks["all_subsequent_pre_update_scalar_steps_exact"] is True
+    assert state_checks["all_post_update_scalar_steps_exact"] is True
+    assert state_checks["exp_avg_and_exp_avg_sq_shape_dtype_device_valid"] is True
+    assert len(state_checks["check_sequence_sha256"]) == 64
+    assert execution["selected_primary_optimizer_state_restored_and_verified"] is True
+    assert execution["selected_optimizer_object_identity_preserved"] is True
+    assert execution["selected_optimizer_moments_restored_and_verified"] is True
+    assert execution["selected_head_sha256"] == execution["restored_head_sha256"]
+    assert (
+        execution["selected_optimizer_state_sha256"] == execution["restored_optimizer_state_sha256"]
+    )
+    assert (
+        execution["selected_checkpoint_optimizer_state_dict_sha256"]
+        == execution["restored_optimizer_state_dict_sha256"]
+    )
+    for name in (
+        "selected_head_sha256",
+        "selected_optimizer_state_sha256",
+        "selected_checkpoint_optimizer_state_dict_sha256",
+        "selected_checkpoint_sha256",
+    ):
+        assert len(execution[name]) == 64
+    measurements = [
+        observed.evidence["initial_zero_head_measurement"],
+        observed.evidence["final_gate"]["measurement"],
+        observed.evidence["fixed_step_compute_matched_snapshot"]["measurement"],
+        observed.evidence["legacy_constant_lr_boundary_snapshot"]["measurement"],
+        *(check["measurement"] for check in observed.evidence["checks"]),
+    ]
+    assert measurements
+    assert all(measurement["audit_dtype"] == "float64" for measurement in measurements)
+    group = trainer.optimizer.param_groups[0]
+    assert group["betas"] == (0.9, 0.999)
+    assert group["eps"] == pytest.approx(1.0e-8)
+    assert group["amsgrad"] is False
+    assert group["maximize"] is False
+    assert group["foreach"] is False
+    assert group["fused"] is False
+
+
+def test_recovery_controller_rejects_hidden_double_optimizer_step() -> None:
+    trainer = _RecoveryDoubleStepTrainer()
+
+    with pytest.raises(RuntimeError, match="scalar step must equal 1"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=lambda: phase2_training._FirstOrderMeasurement(
+                objective=1.0,
+                gradient_l2_norm=1.0,
+                audit_dtype="float64",
+            ),
+            spec=FirstOrderConvergenceSpec(
+                min_steps=100,
+                max_steps=12760,
+                check_interval=20,
+                consecutive_checks=3,
+                optimizer_protocol=_recovery_optimizer_protocol(),
+            ),
+            fixed_snapshot_steps=720,
+            objective_name="double_step_failure_injection",
+        )
+
+
+def test_recovery_controller_rejects_optimizer_moment_reset() -> None:
+    trainer = _RecoveryResetMomentsTrainer()
+
+    with pytest.raises(RuntimeError, match="scalar step must equal 2"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=lambda: phase2_training._FirstOrderMeasurement(
+                objective=1.0,
+                gradient_l2_norm=1.0,
+                audit_dtype="float64",
+            ),
+            spec=FirstOrderConvergenceSpec(
+                min_steps=100,
+                max_steps=12760,
+                check_interval=20,
+                consecutive_checks=3,
+                optimizer_protocol=_recovery_optimizer_protocol(),
+            ),
+            fixed_snapshot_steps=720,
+            objective_name="moment_reset_failure_injection",
+        )
+
+
+def test_recovery_controller_rejects_missing_optimizer_restore() -> None:
+    trainer = _RecoveryDoesNotRestoreOptimizerTrainer()
+
+    def audit():
+        gradient = (
+            10.0
+            if trainer.completed_steps == 0
+            else (0.005 if trainer.completed_steps >= 100 else 1.0)
+        )
+        return phase2_training._FirstOrderMeasurement(
+            objective=1.0,
+            gradient_l2_norm=gradient,
+            audit_dtype="float64",
+        )
+
+    with pytest.raises(RuntimeError, match="scalar step must equal 100"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=audit,
+            spec=FirstOrderConvergenceSpec(
+                gradient_ratio_tolerance=1.0e-3,
+                min_steps=100,
+                max_steps=12760,
+                check_interval=20,
+                consecutive_checks=1,
+                optimizer_protocol=_recovery_optimizer_protocol(),
+            ),
+            fixed_snapshot_steps=720,
+            objective_name="missing_optimizer_restore_failure_injection",
+        )
+
+
+def test_recovery_controller_rejects_optimizer_object_reconstruction() -> None:
+    trainer = _RecoveryReplacesOptimizerTrainer()
+
+    def audit():
+        gradient = (
+            10.0
+            if trainer.completed_steps == 0
+            else (0.005 if trainer.completed_steps >= 100 else 1.0)
+        )
+        return phase2_training._FirstOrderMeasurement(
+            objective=1.0,
+            gradient_l2_norm=gradient,
+            audit_dtype="float64",
+        )
+
+    with pytest.raises(RuntimeError, match="replaced the optimizer object"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=audit,
+            spec=FirstOrderConvergenceSpec(
+                gradient_ratio_tolerance=1.0e-3,
+                min_steps=100,
+                max_steps=12760,
+                check_interval=20,
+                consecutive_checks=1,
+                optimizer_protocol=_recovery_optimizer_protocol(),
+            ),
+            fixed_snapshot_steps=720,
+            objective_name="optimizer_object_reconstruction_failure_injection",
+        )
 
 
 def test_api_structurally_forbids_heldout_and_old_comparison_heads(

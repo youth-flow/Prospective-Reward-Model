@@ -24,6 +24,9 @@ from smart_reward.phase2_config import (
     PHASE2_PILOT_BASE_CONFIG,
     PHASE2_PILOT_CONFIG,
     PHASE2_PILOT_SEEDS,
+    PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+    PHASE2_RECOVERY_PILOT_CONFIG,
+    PHASE2_RECOVERY_SCHEMA_VERSION,
     PHASE2_SCHEMA_VERSION,
     load_phase2_config,
     load_phase2_config_bundle,
@@ -34,9 +37,11 @@ from smart_reward.phase2_config import (
 ROOT = Path(__file__).resolve().parents[1]
 PILOT_PATH = ROOT / PHASE2_PILOT_CONFIG
 BASE_PATH = ROOT / PHASE2_PILOT_BASE_CONFIG
+RECOVERY_PATH = ROOT / PHASE2_RECOVERY_PILOT_CONFIG
 MAIN_PATH = ROOT / "configs" / "main.yaml"
 EXPECTED_BASE_IDENTITY = "81ccbd3bc9d745d3792d1834116ba2480d34a7201d6f4e463a61d8d8ab0baefa"
 EXPECTED_PILOT_IDENTITY = "0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca"
+EXPECTED_RECOVERY_IDENTITY = "9602b0f00a73880545fd57ce1886ec65d7901385cce2b919fd72f3efec4592d4"
 
 
 @pytest.fixture
@@ -50,6 +55,114 @@ def _set_path(config: dict[str, Any], path: str, value: object) -> None:
     for component in components[:-1]:
         target = target[component]
     target[components[-1]] = value
+
+
+def _recovery_pilot(pilot: dict[str, Any]) -> dict[str, Any]:
+    overlay = copy.deepcopy(pilot)
+    overlay["schema_version"] = PHASE2_RECOVERY_SCHEMA_VERSION
+    overlay["design"]["name"] = "common-beta-recovery-pilot-v1"
+    overlay["reward_model"]["adaptive_convergence"].update(
+        {
+            "maximum_steps": 12760,
+            "solution_tie_break": ("exact_zero_initialized_deterministic_adamw_lr_decay_path"),
+        }
+    )
+    overlay["reward_model"]["identifiability"]["algorithmic_tie_break"] = (
+        "exact_zero_initialized_deterministic_adamw_lr_decay_path"
+    )
+    overlay["reward_model"]["optimizer_protocol"] = {
+        "schema_version": "deterministic-adamw-lr-decay-recovery/v1",
+        "one_time_recovery": True,
+        "scope": "every_phase2_first_order_convergence_trainer",
+        "initialization": "exact_zero_head_and_fresh_optimizer_state",
+        "learning_rate_schedule": {
+            "update_indexing": "one_indexed_inclusive",
+            "application": "set_learning_rate_immediately_before_optimizer_update",
+            "stages": [
+                {
+                    "first_update": 1,
+                    "last_update": 5760,
+                    "learning_rate": 1.0e-3,
+                },
+                {
+                    "first_update": 5761,
+                    "last_update": 6760,
+                    "learning_rate": 3.0e-4,
+                },
+                {
+                    "first_update": 6761,
+                    "last_update": 8760,
+                    "learning_rate": 1.0e-4,
+                },
+                {
+                    "first_update": 8761,
+                    "last_update": 10760,
+                    "learning_rate": 3.0e-5,
+                },
+                {
+                    "first_update": 10761,
+                    "last_update": 12760,
+                    "learning_rate": 1.0e-5,
+                },
+            ],
+            "schedule_sha256": PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
+        },
+        "legacy_constant_lr_boundary_snapshot_steps": 5760,
+        "state_transition": ("preserve_all_adamw_moments_across_learning_rate_boundaries"),
+        "adamw": {
+            "betas": [0.9, 0.999],
+            "eps": 1.0e-8,
+            "amsgrad": False,
+            "maximize": False,
+            "foreach": False,
+            "fused": False,
+            "capturable": False,
+            "differentiable": False,
+        },
+        "reward_head_dtype": "float32",
+        "first_order_audit_dtype": "float64",
+        "microbatch_order": "canonical_edge_order_contiguous_ascending_no_shuffle",
+        "optimizer_state_reset_at_lr_milestone": False,
+        "one_optimizer_update_per_step": True,
+        "tie_break": "exact_zero_initialized_deterministic_adamw_lr_decay_path",
+        "validation_or_test_selection": False,
+    }
+    overlay["recovery_control"] = {
+        "schema_version": "prorm-phase2-recovery-control/v1",
+        "parent_failure_registry": "configs/phase2_recovery_parent_failures.json",
+        "parent_failure_registry_sha256": (
+            "7be4ee90b1f494d32f96214f407a57cbee54be86a77dacc1206d2acd527857dc"
+        ),
+        "optimizer_diagnostic_path": (
+            "diagnostics/bt-convergence/seed-20260801-commit-791c2da.json"
+        ),
+        "optimizer_diagnostic_sha256": (
+            "bd7c3d80c26500ee273b14bb1ea8bc3428f71fdb319a49c792bf4de567e2c6a9"
+        ),
+        "optimizer_diagnostic_source_git_commit": ("791c2daac7f1601f6798d5878bef1770ca9d5ebf"),
+        "optimizer_diagnostic_source_job_id": "1647982",
+        "optimizer_diagnostic_role": "train_only_nonconfirmatory_schedule_selection",
+        "parent_phase2_design_sha256": (
+            "0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca"
+        ),
+        "parent_source_job_array_id": "1647491",
+        "parent_seeds": [20260801, 20260802, 20260803],
+        "parent_terminal_status": "FAILED",
+        "parent_failure_aggregate_present": False,
+        "parent_failure_evidence": (
+            "exact_three_seed_registry_binds_each_failed_terminal_and_phase2_run_log"
+        ),
+        "artifact_reuse": "immutable_parent_materialization_only",
+        "artifact_producer_identity_separate_from_recovery_training_identity": True,
+        "execution_scope": "train_only",
+        "policy_rollout_allowed": False,
+        "validation_or_test_access_allowed": False,
+        "final_oracle_allowed": False,
+        "downstream_utility_allowed": False,
+        "one_shot_no_further_adaptation": True,
+        "failure_action": "hard_fail_no_second_recovery",
+    }
+    return overlay
 
 
 def _future_confirmatory(
@@ -182,6 +295,171 @@ def test_pilot_bundle_binds_overlay_and_declared_base() -> None:
     assert bundle.config["design"]["source_config"] == PHASE2_PILOT_BASE_CONFIG
     assert bundle.base_config_path.resolve() == BASE_PATH.resolve()
     assert bundle.source_path.resolve() == PILOT_PATH.resolve()
+
+
+def test_recovery_schema_is_separate_strict_and_schedule_hash_bound(
+    pilot_config: dict[str, Any],
+) -> None:
+    recovery = _recovery_pilot(pilot_config)
+    validated = validate_phase2_config(
+        recovery,
+        base_config=load_config(BASE_PATH),
+    )
+
+    assert validated["schema_version"] == PHASE2_RECOVERY_SCHEMA_VERSION
+    assert (
+        validated["reward_model"]["optimizer_protocol"]["learning_rate_schedule"]["schedule_sha256"]
+        == PHASE2_RECOVERY_LR_SCHEDULE_SHA256
+    )
+    assert validated["reward_model"]["adaptive_convergence"]["maximum_steps"] == 12760
+    assert phase2_design_identity(validated) != EXPECTED_PILOT_IDENTITY
+
+    old_with_new_field = copy.deepcopy(pilot_config)
+    old_with_new_field["reward_model"]["optimizer_protocol"] = copy.deepcopy(
+        recovery["reward_model"]["optimizer_protocol"]
+    )
+    with pytest.raises(ConfigError, match="unknown keys"):
+        validate_phase2_config(old_with_new_field)
+
+    recovery_without_protocol = copy.deepcopy(recovery)
+    del recovery_without_protocol["reward_model"]["optimizer_protocol"]
+    with pytest.raises(ConfigError, match="missing keys"):
+        validate_phase2_config(recovery_without_protocol)
+
+
+def test_recovery_bundle_compiles_the_tracked_exact_schedule() -> None:
+    bundle = load_phase2_config_bundle(RECOVERY_PATH)
+
+    assert bundle.design_identity == EXPECTED_RECOVERY_IDENTITY
+    assert bundle.base_config_path.resolve() == BASE_PATH.resolve()
+    assert bundle.config["schema_version"] == PHASE2_RECOVERY_SCHEMA_VERSION
+    assert bundle.config["design"]["name"] == "common-beta-recovery-pilot-v1"
+    assert bundle.config["design"]["stage"] == "pilot"
+    assert bundle.config["design"]["pilot_phase"] == "calibration"
+    assert bundle.config["run"]["seeds"] == [20260801, 20260802, 20260803]
+    assert bundle.config["recovery_control"]["parent_seeds"] == [
+        20260801,
+        20260802,
+        20260803,
+    ]
+    schedule = bundle.config["reward_model"]["optimizer_protocol"]["learning_rate_schedule"]
+    assert schedule["schedule_sha256"] == PHASE2_RECOVERY_LR_SCHEDULE_SHA256
+    assert schedule["stages"] == [
+        {"first_update": 1, "last_update": 5760, "learning_rate": 1.0e-3},
+        {"first_update": 5761, "last_update": 6760, "learning_rate": 3.0e-4},
+        {"first_update": 6761, "last_update": 8760, "learning_rate": 1.0e-4},
+        {"first_update": 8761, "last_update": 10760, "learning_rate": 3.0e-5},
+        {"first_update": 10761, "last_update": 12760, "learning_rate": 1.0e-5},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        ("design.name", "common-beta-recovery-pilot-v2", "design.name must equal"),
+        ("design.stage", "confirmatory", "design.stage must equal 'pilot'"),
+        ("design.pilot_phase", "freeze", "design.pilot_phase must equal 'calibration'"),
+        (
+            "run.seeds",
+            [20260803, 20260802, 20260801],
+            "recovery run.seeds must equal",
+        ),
+        (
+            "run.seeds",
+            [20260801, 20260802],
+            "recovery run.seeds must equal",
+        ),
+        (
+            "recovery_control.parent_seeds",
+            [20260803, 20260802, 20260801],
+            "recovery_control.parent_seeds must equal",
+        ),
+        (
+            "recovery_control.parent_seeds",
+            [20260801, 20260802],
+            "recovery_control.parent_seeds must equal",
+        ),
+    ],
+)
+def test_recovery_schema_is_locked_to_one_exact_calibration_pilot(
+    pilot_config: dict[str, Any],
+    path: str,
+    value: object,
+    match: str,
+) -> None:
+    recovery = _recovery_pilot(pilot_config)
+    _set_path(recovery, path, value)
+
+    with pytest.raises(ConfigError, match=match):
+        validate_phase2_config(recovery)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        (
+            "reward_model.optimizer_protocol.learning_rate_schedule.stages",
+            [
+                {
+                    "first_update": 1,
+                    "last_update": 5760,
+                    "learning_rate": 1.0e-3,
+                }
+            ],
+            "exactly 5 stages",
+        ),
+        (
+            "reward_model.optimizer_protocol.learning_rate_schedule.schedule_sha256",
+            "0" * 64,
+            "does not bind",
+        ),
+        (
+            "reward_model.optimizer_protocol.adamw.foreach",
+            True,
+            "must be false",
+        ),
+        (
+            "reward_model.optimizer_protocol.first_order_audit_dtype",
+            "float32",
+            "must equal 'float64'",
+        ),
+        (
+            "reward_model.optimizer_protocol.optimizer_state_reset_at_lr_milestone",
+            True,
+            "must be false",
+        ),
+        (
+            "reward_model.optimizer_protocol.one_optimizer_update_per_step",
+            False,
+            "must be true",
+        ),
+        (
+            "reward_model.adaptive_convergence.maximum_steps",
+            5760,
+            "must equal 12760",
+        ),
+        (
+            "recovery_control.policy_rollout_allowed",
+            True,
+            "must be false",
+        ),
+        (
+            "recovery_control.parent_failure_registry_sha256",
+            "0" * 64,
+            "must equal",
+        ),
+    ],
+)
+def test_recovery_protocol_tampering_fails_closed(
+    pilot_config: dict[str, Any],
+    path: str,
+    value: object,
+    match: str,
+) -> None:
+    recovery = _recovery_pilot(pilot_config)
+    _set_path(recovery, path, value)
+    with pytest.raises(ConfigError, match=match):
+        validate_phase2_config(recovery)
 
 
 def test_pilot_is_permanently_ineligible_and_has_only_three_registered_seeds(

@@ -1,5 +1,10 @@
 {
   "configs": {
+    "configs/common_beta_recovery_pilot.yaml": {
+      "config_hash": "9602b0f00a73880545fd57ce1886ec65d7901385cce2b919fd72f3efec4592d4",
+      "file_sha256": "a6a924dae429ceb0df11cea128542cae16fb42a2e69a0d2120acb0e4f8f1d80f",
+      "seed_count": 3
+    },
     "configs/common_beta_pilot.yaml": {
       "config_hash": "0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca",
       "file_sha256": "b855883b744ed87c998e8771fe8c4f736ed132c97977ddcf672c5eeed143fb29",

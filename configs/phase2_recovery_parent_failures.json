@@ -1,0 +1,164 @@
+{
+  "schema_version": "prorm-phase2-recovery-parent-failures/v1",
+  "campaign": {
+    "source_job_array_id": "1647491",
+    "parent_phase2_design_sha256": "0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca",
+    "base_config_hash": "81ccbd3bc9d745d3792d1834116ba2480d34a7201d6f4e463a61d8d8ab0baefa",
+    "producer": {
+      "git_commit": "ae28e2a10f0bd5762899be01ce66bc5b423374cf",
+      "image_sha256": "d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb",
+      "hf_inventory_sha256": "86c7c0fcab9cc0de612c6a5af05778e8b34617822b2e33474df8ed840eef82fd"
+    },
+    "failure_class": "primary_bt_mle_first_order_convergence_gate_not_met",
+    "failed_optimizer_updates": 5760,
+    "first_order_tolerance": 0.001,
+    "consecutive_passes_required": 3,
+    "failure_aggregate": {
+      "present": false,
+      "reason": "the_failed_job_array_predates_structured_failure_aggregation",
+      "replacement_evidence": "exact_three_seed_registry_binds_each_failed_terminal_and_phase2_run_log"
+    },
+    "one_shot_no_further_adaptation": true,
+    "allowed_recovery_scope": "train_only_same_materialized_artifacts"
+  },
+  "common_artifact_identities": {
+    "eligible_prompt_ids_sha256": "c6061a1b8a7f24a5a5a6873be01edfd4b94a875a149f524d5a2307677a00a1f6",
+    "tensor_schema": {
+      "num_tensor_keys": 11,
+      "train_policy_scores_shape": [
+        1536,
+        4,
+        16384
+      ],
+      "train_reward_features_shape": [
+        1536,
+        4,
+        896
+      ],
+      "validation_policy_scores_shape": [
+        256,
+        4,
+        16384
+      ],
+      "validation_reward_features_shape": [
+        256,
+        4,
+        896
+      ],
+      "test_policy_scores_shape": [
+        256,
+        4,
+        16384
+      ],
+      "test_reward_features_shape": [
+        256,
+        4,
+        896
+      ]
+    }
+  },
+  "optimizer_diagnostic": {
+    "schema_version": "phase2-bt-convergence-diagnostic/v1",
+    "source_job_id": "1647982",
+    "source_git_commit": "791c2daac7f1601f6798d5878bef1770ca9d5ebf",
+    "path": "diagnostics/bt-convergence/seed-20260801-commit-791c2da.json",
+    "sha256": "bd7c3d80c26500ee273b14bb1ea8bc3428f71fdb319a49c792bf4de567e2c6a9",
+    "seed": 20260801,
+    "artifact_metadata_sha256": "83924663eefd089deeb29dd87cc13629eb566bd4e38df0b5ceb57355ae7f343f",
+    "configured_maximum_steps": 5760,
+    "diagnostic_only": true,
+    "train_only": true,
+    "nonconfirmatory": true,
+    "tested_decay_schedule": [
+      {
+        "additional_updates": 1000,
+        "learning_rate": 0.0003
+      },
+      {
+        "additional_updates": 2000,
+        "learning_rate": 0.0001
+      },
+      {
+        "additional_updates": 2000,
+        "learning_rate": 0.00003
+      },
+      {
+        "additional_updates": 2000,
+        "learning_rate": 0.00001
+      }
+    ],
+    "decay_schedule_selected_step": 6900,
+    "lbfgs_gate_passed": true
+  },
+  "seeds": [
+    {
+      "seed": 20260801,
+      "array_task_id": 0,
+      "source_run": "runs/phase2-pilot/0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca/seed-20260801/job-1647491_0",
+      "source_artifact": "artifacts/81ccbd3bc9d745d3792d1834116ba2480d34a7201d6f4e463a61d8d8ab0baefa/d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb/86c7c0fcab9cc0de612c6a5af05778e8b34617822b2e33474df8ed840eef82fd/ae28e2a10f0bd5762899be01ce66bc5b423374cf/seed-20260801",
+      "evidence_sha256": {
+        "FAILED": "ebb235817492f1b2f20875b314c46076b82edc99993c56855465878b05fd92ed",
+        "run-manifest.json": "5feceba80c4717a539a3d2d86a308f5eb20411075007643a4ceb48c43987218a",
+        "artifact-materialization.json": "86d99d1a12a252e59282133f0211c5df7229e8d2495ef0fe67e909fb82d28675",
+        "artifact-verification.json": "6c150d2746cfae5a3b080930649f6886e74e02cb4c043d6c650abd18fd8b239d",
+        "phase2-run.log": "06774b8939272d63889395e31fb34a398c27371a702e7f9fed6913b4009c1966"
+      },
+      "artifact_sha256": {
+        "metadata.json": "83924663eefd089deeb29dd87cc13629eb566bd4e38df0b5ceb57355ae7f343f",
+        "tensors.safetensors": "380ee2fc433ae2c8e2069ec32784d8a010b95d965834151025722991d442df6e",
+        "candidates.jsonl": "41f896f73c11c1a1ad1ebe4c479c0f409d3e722d9fce4cf3b95b4cc1b19b73e9",
+        "prompts.jsonl": "d8451fc987212eac4f7b07b411a52cee5059de7511280f0ea518660d27920de3",
+        "training_edges.jsonl": "d0e8ded74b56bb1eaa40fcb8442cf5cba4bc6c320e806391f9bbcd66935cd5a0",
+        "evaluation_edges.jsonl": "4e43ba2d74027d83d01ea47775207d07040ac78cfffdb881bdeeaecfd3faae2f",
+        "policy_prompt_semantics_records": "65b34f28da5d783cb415157b636f501e5ca92f53ccc15500d5e84c5e6c38d93c",
+        "selected_prompt_ids": "6ea10244b1d704162811254079a5473d9a67f9a3f2d81266bfa33b4c723f7402"
+      }
+    },
+    {
+      "seed": 20260802,
+      "array_task_id": 1,
+      "source_run": "runs/phase2-pilot/0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca/seed-20260802/job-1647491_1",
+      "source_artifact": "artifacts/81ccbd3bc9d745d3792d1834116ba2480d34a7201d6f4e463a61d8d8ab0baefa/d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb/86c7c0fcab9cc0de612c6a5af05778e8b34617822b2e33474df8ed840eef82fd/ae28e2a10f0bd5762899be01ce66bc5b423374cf/seed-20260802",
+      "evidence_sha256": {
+        "FAILED": "695ad4cd2eccaab62699ba89439625ef42016c3952b8bc3570acd9e46c8bf861",
+        "run-manifest.json": "3115c282baecfd29bc3e6854e72c1597334759d823ff00313cb56884a85a0b81",
+        "artifact-materialization.json": "ffdef96fff2b62d821112c305573972f98ca80405ace5d9445a232f74625c3e4",
+        "artifact-verification.json": "190d97e9ecc7774b107b8e2b3a6318002f87de28450c43940ee84bd84f148038",
+        "phase2-run.log": "06774b8939272d63889395e31fb34a398c27371a702e7f9fed6913b4009c1966"
+      },
+      "artifact_sha256": {
+        "metadata.json": "e644ba87a1005f3316a864c75110a5e0f6c83eff3f7aec08d6d4d9f141dbd1b5",
+        "tensors.safetensors": "859e58aae0541226e8865d57ad46fd5f8bc21da87a779f8991252da802867b64",
+        "candidates.jsonl": "b94cca39456139550d901401eb21b7ac45f4378e879d383848e4fec560c6a92d",
+        "prompts.jsonl": "28d0136a9110ffacafb80b5a98ced6547f46b041c57307623928dee7c5aeb6c6",
+        "training_edges.jsonl": "ff559ae113ad0882ad0789c786846cef7bea42a85208cceddb16d91f6a6b43c3",
+        "evaluation_edges.jsonl": "615129f3e451a43994e25480749f0505eae3c1b293253b877ec7e900d1fb3c12",
+        "policy_prompt_semantics_records": "cb5da5163461e25964a5cd33e1981354cd4bbcfae1caff90bc91deabc2c8ff59",
+        "selected_prompt_ids": "c4f8dffe4bcf7130c5de305ff18e4b6309e8e9af9429fc674c58c343708a057a"
+      }
+    },
+    {
+      "seed": 20260803,
+      "array_task_id": 2,
+      "source_run": "runs/phase2-pilot/0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca/seed-20260803/job-1647491_2",
+      "source_artifact": "artifacts/81ccbd3bc9d745d3792d1834116ba2480d34a7201d6f4e463a61d8d8ab0baefa/d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb/86c7c0fcab9cc0de612c6a5af05778e8b34617822b2e33474df8ed840eef82fd/ae28e2a10f0bd5762899be01ce66bc5b423374cf/seed-20260803",
+      "evidence_sha256": {
+        "FAILED": "ed374cd7e6e1f74fc2bab3953b31049ff2f3c7f2e39887b1849cc372662558a0",
+        "run-manifest.json": "6f1a5d0b40fda4e460ee148cd18e21732dfb10c5aae87cdce2c0ce37466fd5c0",
+        "artifact-materialization.json": "4f27a96cc753e73e3874e13c12e8ec8ed6d08382f03200d76f1becf2d12d7efa",
+        "artifact-verification.json": "44c631ebc0c3d76fd9e5448915f17b957ee21364ee023cc2cb1f3c0c9c047678",
+        "phase2-run.log": "06774b8939272d63889395e31fb34a398c27371a702e7f9fed6913b4009c1966"
+      },
+      "artifact_sha256": {
+        "metadata.json": "716e8ddecff2385b0612f7795f0fb768cddd56c93f433f26bbc79721b97f3942",
+        "tensors.safetensors": "f621966e7d68c24297f408e8de50d1dd56286a7e80686b07c12b0b90b6fbac07",
+        "candidates.jsonl": "0546eaef57d1617fa983529be5b3f5cace9748662887b0c6cf588348699bd52b",
+        "prompts.jsonl": "1a70f315bb9b70238efcf0c6a7f38696b0c7c9b4abcb07037b34d99c54b19819",
+        "training_edges.jsonl": "23e8e89de16bc4273bb44198c83c06b1fdefdad5c6dd08646a69ab67cd20a460",
+        "evaluation_edges.jsonl": "0c4ecdc15b5fe9f2ab8360250725558b1c4af1d49b6835790a17448b36c8c2a2",
+        "policy_prompt_semantics_records": "bf521e52bc3602c1786f225597bae91055ef00ff62635aef5c92bd1a93d12618",
+        "selected_prompt_ids": "3468db7ee480d4c62ed64b5f6a91658a69b6b42b5026b0b645ee52263fcd04b5"
+      }
+    }
+  ]
+}
