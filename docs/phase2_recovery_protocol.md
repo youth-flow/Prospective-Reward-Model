@@ -5,6 +5,20 @@ common-beta calibration pilot terminated. It is an optimization-protocol
 amendment, not an efficacy result and not a retry under the original design
 identity.
 
+The scientific recovery schedule remains one-shot. Execution revision 1
+(`1648094`) stopped during immutable-asset verification, before the trainer was
+entered, because Hugging Face Datasets attempted to place a runtime lock in the
+read-only shared cache. Its failure evidence is retained. Execution revision 2
+keeps the shared Hub cache and inventory read-only and routes only per-process
+Datasets locks and derived Arrow cache files to an empty job-local scratch
+directory. This is an infrastructure correction; it does not change examples,
+labels, heads, optimizer state, schedule, gates, or any scientific identity.
+Both submission-time and job-time gates verify the exact three revision-1
+`FAILED` markers, their complete file sets, Slurm stdout/stderr hashes, and the
+absence of every trainer/result file against
+`configs/phase2_recovery_infrastructure_failure.json`. Revision 2 cannot start
+if that pre-trainer provenance changes.
+
 ## 1. Immutable parent outcome
 
 The original calibration design has identity

@@ -1,0 +1,65 @@
+{
+  "execution_revision": 1,
+  "next_execution_revision": 2,
+  "next_execution_reason": "pretrainer_hf_datasets_runtime_lock",
+  "recovery_design_sha256": "9602b0f00a73880545fd57ce1886ec65d7901385cce2b919fd72f3efec4592d4",
+  "recovery_git_commit": "734d2a27473f974431b96d5d196f9793e14b2755",
+  "schema_version": "prorm-phase2-recovery-infrastructure-failure/v1",
+  "source_array_job_id": "1648094",
+  "tasks": [
+    {
+      "array_task_id": 0,
+      "failure_class": "hf_datasets_read_only_runtime_lock",
+      "files": {
+        "FAILED": "17e911201224e5acb8e1a93a6ad0d45a3f6cc9bdf3669d7500833ac6e70ad7d4",
+        "artifact-snapshot-before.json": "e105e0b0c78456c72fe42421ff6c0458fe479b1d647f7b3ed15f1012f0b33454",
+        "base-config-check.json": "5f93b73d80e55617ac1196039344b334cd0fd4b77b3236120eadadae182cf7a2",
+        "hf-inventory-verification.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "parent-run-snapshot-before.json": "6b7b618fbfb5a904ea4e55bd1a66f47b38092daeaa91823d28c94d67cb497243",
+        "parent-verification-before.json": "09e9560ee01433c90e9d23bf7420081f856b939947ae331b90630712263cb4ee",
+        "phase2-config-check.json": "c4e19959ced2eaf485f56c02d8a8570bab7089e4f5e94ab3eea8a8ed4736bcc1"
+      },
+      "final_exit_code": 1,
+      "seed": 20260801,
+      "stderr_sha256": "f752ab9fe0d1e5568a8c7d48bcd2a900a202b99317d17a3ade9c7f36523fe599",
+      "stdout_sha256": "10aa681611abccb58f586a73e83194e39b9e3e103c7ce4f3b15f163987f9adb3",
+      "workload_exit_code": 1
+    },
+    {
+      "array_task_id": 1,
+      "failure_class": "hf_datasets_read_only_runtime_lock",
+      "files": {
+        "FAILED": "b015ba028ec0d930eadcadaf00eba48e716fc88a3713aa6b1269da27c0a4a13a",
+        "artifact-snapshot-before.json": "5ab998e70724c9301147aa7bda620dfa9e8f543ba4dbb6cf833b51d693ff1675",
+        "base-config-check.json": "59167a55a3bf206fddbbacf0f474cc5c3ffb380eb4338a1c27547922cf8543b3",
+        "hf-inventory-verification.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "parent-run-snapshot-before.json": "55f668e37c1e79d8ade2f822786639d1f19ed632c9542df589b7c450016eae6c",
+        "parent-verification-before.json": "92eee72b3cd1b4aaf44c10248114aa7184cf34d82eee190c5b4a4d18e7b102c4",
+        "phase2-config-check.json": "929048a9f168936947e1a711b8720ab78ddd51a48234df9cf4c27784c179388f"
+      },
+      "final_exit_code": 1,
+      "seed": 20260802,
+      "stderr_sha256": "d8acaa0a799d14f8449ecc5b924110eadf5d0ec27913e9c5ff6a9af42e9f1094",
+      "stdout_sha256": "22b05086322bde1b16ac6f5789aeaabbe4e06ffabfc65a79424b77979d702107",
+      "workload_exit_code": 1
+    },
+    {
+      "array_task_id": 2,
+      "failure_class": "cancelled_before_training_after_sibling_preflight_failure",
+      "files": {
+        "FAILED": "dbda4d9ddc30da269ce9ab944a56de9b3530c8840d5c64bbac3581c164f6fc90",
+        "artifact-snapshot-before.json": "f1bbd24ba450fd1e618315372b85755673924b4675aba1ec98961414272de616",
+        "base-config-check.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "parent-run-snapshot-before.json": "15f0f0f56a203ce9b962f029f817376355fabccdbbe2ca470b68447617b58e26",
+        "parent-verification-before.json": "ee7d1a1173be0a4abe7e7c8437ebda1f3e5f84c97150a36f35488ee2c817fcc1",
+        "phase2-config-check.json": "e967878c2e02e1042a5f7c2ce3e58486d8f083156457ab2ca9019ecad01516e2"
+      },
+      "final_exit_code": 1,
+      "seed": 20260803,
+      "stderr_sha256": "71bd508410cb12969dacd14d701553cca426e61b5740e35d79ec4be901cb5042",
+      "stdout_sha256": "e967878c2e02e1042a5f7c2ce3e58486d8f083156457ab2ca9019ecad01516e2",
+      "workload_exit_code": 0
+    }
+  ],
+  "trainer_entered": false
+}

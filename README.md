@@ -70,6 +70,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
 | Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed aggregation implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
 | First Phase-2 calibration pilot | All three excluded pilot seeds fail-closed at the BT first-order gate under constant-`1e-3` AdamW; a train-only diagnostic established a deterministic decay path that passes without held-out access. The one-shot recovery has a separate identity and can only authorize a new full calibration pilot; it cannot produce or enter a beta aggregate |
+| Phase-2 recovery execution | Execution revision 1 (`1648094`) stopped before training when Hugging Face Datasets attempted a runtime lock in the read-only shared cache. Revision 2 is authorized only after exact marker/file/log hashes and absent trainer outputs pass at submission and job time; frozen assets remain read-only, only derived Datasets cache files are isolated per job, and the scientific recovery schedule/identity are unchanged |
 
 The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
 manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement

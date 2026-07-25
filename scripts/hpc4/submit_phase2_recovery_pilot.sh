@@ -69,13 +69,17 @@ hf_cache="$(realpath -e -- "${PRORM_HF_CACHE}")"
 overlay_relative="configs/common_beta_recovery_pilot.yaml"
 base_relative="configs/common_beta_pilot_base.yaml"
 registry_relative="configs/phase2_recovery_parent_failures.json"
+infrastructure_registry_relative="configs/phase2_recovery_infrastructure_failure.json"
 identity_relative="configs/identities.json"
 job_relative="scripts/hpc4/phase2_recovery_pilot.sbatch"
 validator_relative="scripts/hpc4/validate_phase2_recovery_parent.py"
+infrastructure_validator_relative="scripts/hpc4/validate_phase2_recovery_infrastructure_failure.py"
 runner_relative="scripts/hpc4/run_phase2_recovery_train.py"
 for relative in \
-  "${overlay_relative}" "${base_relative}" "${registry_relative}" "${identity_relative}" "${job_relative}" \
-  "${validator_relative}" "${runner_relative}" src/smart_reward/phase2_recovery.py; do
+  "${overlay_relative}" "${base_relative}" "${registry_relative}" \
+  "${infrastructure_registry_relative}" "${identity_relative}" "${job_relative}" \
+  "${validator_relative}" "${infrastructure_validator_relative}" \
+  "${runner_relative}" src/smart_reward/phase2_recovery.py; do
   git -C "${repo_root}" ls-files --error-unmatch -- "${relative}" >/dev/null \
     || die "required recovery file is not committed: ${relative}"
 done
@@ -110,13 +114,15 @@ design_sha="9602b0f00a73880545fd57ce1886ec65d7901385cce2b919fd72f3efec4592d4"
 parent_design="0c8820b67b8ca85c23cd5c31b8d25001018b31a7271f6a861d88cfae2f85d7ca"
 registry_sha="7be4ee90b1f494d32f96214f407a57cbee54be86a77dacc1206d2acd527857dc"
 diagnostic_sha="bd7c3d80c26500ee273b14bb1ea8bc3428f71fdb319a49c792bf4de567e2c6a9"
+infrastructure_registry_sha="e09eefa403f72044192c58f19e06b1e89b939c1d35ddba5081b13693e995cafd"
 image_sha="d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb"
 inventory_sha="86c7c0fcab9cc0de612c6a5af05778e8b34617822b2e33474df8ed840eef82fd"
 overlay_file_sha="a6a924dae429ceb0df11cea128542cae16fb42a2e69a0d2120acb0e4f8f1d80f"
 base_file_sha="e32cf5ad2a7bb2f6fa27180aa2fa6e05e2b457cfe032bab1c33f86646af1beb1"
 for binding in \
   "${overlay_relative}:${overlay_file_sha}" "${base_relative}:${base_file_sha}" \
-  "${registry_relative}:${registry_sha}"; do
+  "${registry_relative}:${registry_sha}" \
+  "${infrastructure_registry_relative}:${infrastructure_registry_sha}"; do
   relative="${binding%%:*}"
   expected="${binding#*:}"
   observed_worktree="$(sha256sum -- "${repo_root}/${relative}" | awk '{print $1}')"
@@ -162,9 +168,15 @@ python3 "${repo_root}/${validator_relative}" \
   --expected-parent-design-sha256 "${parent_design}" \
   --expected-base-config-hash "${base_hash}" --verify-sources >/dev/null \
   || die "parent failure/artifact/diagnostic verification failed"
+python3 "${repo_root}/${infrastructure_validator_relative}" \
+  "${repo_root}/${infrastructure_registry_relative}" \
+  --project-root "${project_root}" \
+  --expected-registry-sha256 "${infrastructure_registry_sha}" >/dev/null \
+  || die "execution-1 pre-trainer infrastructure failure verification failed"
 
+execution_revision="2"
 for seed in 20260801 20260802 20260803; do
-  seed_root="${project_root}/runs/phase2-recovery-pilot/${design_sha}/seed-${seed}"
+  seed_root="${project_root}/runs/phase2-recovery-pilot/${design_sha}/execution-${execution_revision}/seed-${seed}"
   [[ ! -e "${seed_root}" && ! -L "${seed_root}" ]] \
     || die "one-shot recovery already has a terminal namespace for seed ${seed}"
 done
@@ -200,7 +212,7 @@ done
 export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_GIT_COMMIT=${PRORM_GIT_COMMIT},PRORM_IMAGE=${PRORM_IMAGE},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${PRORM_HF_CACHE},PRORM_HF_INVENTORY=${PRORM_HF_INVENTORY},PRORM_HF_INVENTORY_SHA256=${PRORM_HF_INVENTORY_SHA256},PRORM_PROJECT_ROOT=${PRORM_PROJECT_ROOT},PRORM_SCRATCH_ROOT=${PRORM_SCRATCH_ROOT},PRORM_REPO_ROOT=${PRORM_REPO_ROOT},PRORM_PHASE2_RECOVERY_DESIGN_SHA256=${PRORM_PHASE2_RECOVERY_DESIGN_SHA256},PRORM_PHASE2_BASE_CONFIG_HASH=${PRORM_PHASE2_BASE_CONFIG_HASH},PRORM_PHASE2_PARENT_DESIGN_SHA256=${PRORM_PHASE2_PARENT_DESIGN_SHA256},PRORM_PHASE2_PARENT_REGISTRY_SHA256=${PRORM_PHASE2_PARENT_REGISTRY_SHA256},PRORM_PHASE2_PARENT_PRODUCER_GIT_COMMIT=${PRORM_PHASE2_PARENT_PRODUCER_GIT_COMMIT},PRORM_PHASE2_DIAGNOSTIC_GIT_COMMIT=${PRORM_PHASE2_DIAGNOSTIC_GIT_COMMIT}"
 ensure_real_subdirectory "${scratch_root}" "phase2-recovery-jobs"
 ensure_real_subdirectory \
-  "${project_root}" "runs/phase2-recovery-pilot/${design_sha}"
+  "${project_root}" "runs/phase2-recovery-pilot/${design_sha}/execution-${execution_revision}"
 log_dir="${project_root}/slurm-logs/phase2-recovery-pilot/${design_sha}"
 ensure_real_subdirectory \
   "${project_root}" "slurm-logs/phase2-recovery-pilot/${design_sha}"

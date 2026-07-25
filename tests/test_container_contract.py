@@ -78,12 +78,16 @@ def test_tracked_config_identities_match_exact_bytes_and_semantics() -> None:
     assert set(payload["configs"]) == {
         "configs/common_beta_pilot.yaml",
         "configs/common_beta_pilot_base.yaml",
+        "configs/common_beta_recovery_pilot.yaml",
         "configs/main.yaml",
         "configs/smoke.yaml",
     }
     for relative, entry in payload["configs"].items():
         path = ROOT / relative
-        if relative == "configs/common_beta_pilot.yaml":
+        if relative in {
+            "configs/common_beta_pilot.yaml",
+            "configs/common_beta_recovery_pilot.yaml",
+        }:
             bundle = load_phase2_config_bundle(path)
             config = bundle.config
             semantic_hash = bundle.design_identity

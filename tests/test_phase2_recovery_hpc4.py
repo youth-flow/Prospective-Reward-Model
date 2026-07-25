@@ -97,8 +97,20 @@ def test_recovery_hpc_control_plane_is_fail_closed_and_train_only() -> None:
     assert "materialization-relevant blobs changed" in submit
     assert "configs/identities.json" in submit
     assert "one-shot recovery already has a terminal namespace" in submit
+    assert 'execution_revision="2"' in submit
+    assert "execution-${execution_revision}/seed-${seed}" in submit
+    assert "validate_phase2_recovery_infrastructure_failure.py" in submit
+    assert "execution-1 pre-trainer infrastructure failure verification failed" in submit
     assert "--verify-sources" in submit
     assert "${artifact}:/parent-artifact:ro" in job
+    assert "${PRORM_HF_CACHE}:${PRORM_HF_CACHE}:ro" in job
+    assert 'execution_revision="2"' in job
+    assert "execution-${execution_revision}" in job
+    assert "--verification-datasets-cache" in job
+    assert "HF_DATASETS_CACHE=${verification_datasets_cache}" in job
+    assert "infrastructure-failure-verification.json" in job
+    assert "retry_reason=pretrainer_hf_datasets_runtime_lock" in job
+    assert "mkdir -m 700" in job
     assert "artifact-snapshot-before.json" in job
     assert "artifact-snapshot-after.json" in job
     assert "parent-run-snapshot-before.json" in job

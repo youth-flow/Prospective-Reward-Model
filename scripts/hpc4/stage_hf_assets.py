@@ -390,6 +390,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="forbid network access and verify the existing cache",
     )
+    parser.add_argument(
+        "--verification-datasets-cache",
+        help=(
+            "empty writable per-job Datasets cache used only by --verify-only; "
+            "the frozen Hub cache and inventory remain under cache_root"
+        ),
+    )
     return parser
 
 
@@ -437,10 +444,36 @@ def _execute(arguments: argparse.Namespace) -> dict[str, object]:
     digest = config_hash(config)
     cache_root = Path(arguments.cache_root).resolve()
     hub_cache = cache_root / "hub"
-    datasets_cache = cache_root / "datasets"
+    frozen_datasets_cache = cache_root / "datasets"
+    verification_datasets_cache = getattr(arguments, "verification_datasets_cache", None)
+    if verification_datasets_cache is not None:
+        if not arguments.verify_only:
+            raise ValueError("--verification-datasets-cache requires --verify-only")
+        declared_datasets_cache = Path(verification_datasets_cache)
+        if not declared_datasets_cache.is_absolute():
+            raise ValueError("verification Datasets cache must be absolute")
+        datasets_cache = declared_datasets_cache.resolve(strict=True)
+        if declared_datasets_cache != datasets_cache:
+            raise ValueError(
+                "verification Datasets cache must be canonical and contain no symlink component"
+            )
+        if not datasets_cache.is_dir():
+            raise NotADirectoryError(
+                f"verification Datasets cache is not a directory: {datasets_cache}"
+            )
+        try:
+            datasets_cache.relative_to(cache_root)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("verification Datasets cache must be outside the frozen cache")
+        if any(datasets_cache.iterdir()):
+            raise ValueError("verification Datasets cache must start empty")
+    else:
+        datasets_cache = frozen_datasets_cache
     inventory_path = _inventory_path(arguments, cache_root=cache_root, digest=digest)
     if arguments.verify_only:
-        if not hub_cache.is_dir() or not datasets_cache.is_dir():
+        if not hub_cache.is_dir() or not frozen_datasets_cache.is_dir():
             raise FileNotFoundError(
                 "verify-only requires existing hub and datasets cache directories"
             )

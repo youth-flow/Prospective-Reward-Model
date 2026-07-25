@@ -114,12 +114,13 @@ ensure_real_subdirectory() {
 seeds=(20260801 20260802 20260803)
 seed="${seeds[SLURM_ARRAY_TASK_ID]}"
 execution_id="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+execution_revision="2"
 ensure_real_subdirectory "${PRORM_SCRATCH_ROOT}" "phase2-recovery-jobs"
 ensure_real_subdirectory \
   "${PRORM_PROJECT_ROOT}" \
-  "runs/phase2-recovery-pilot/${PRORM_PHASE2_RECOVERY_DESIGN_SHA256}"
+  "runs/phase2-recovery-pilot/${PRORM_PHASE2_RECOVERY_DESIGN_SHA256}/execution-${execution_revision}"
 scratch_jobs_root="${PRORM_SCRATCH_ROOT}/phase2-recovery-jobs"
-campaign_root="${PRORM_PROJECT_ROOT}/runs/phase2-recovery-pilot/${PRORM_PHASE2_RECOVERY_DESIGN_SHA256}"
+campaign_root="${PRORM_PROJECT_ROOT}/runs/phase2-recovery-pilot/${PRORM_PHASE2_RECOVERY_DESIGN_SHA256}/execution-${execution_revision}"
 job_dir="${scratch_jobs_root}/${execution_id}"
 seed_root="${campaign_root}/seed-${seed}"
 project_run="${seed_root}/job-${execution_id}"
@@ -167,6 +168,8 @@ write_marker() {
     printf 'array_job_id=%s\n' "${SLURM_ARRAY_JOB_ID}"
     printf 'array_task_id=%s\n' "${SLURM_ARRAY_TASK_ID}"
     printf 'seed=%s\n' "${seed}"
+    printf 'execution_revision=%s\n' "${execution_revision}"
+    printf 'retry_reason=pretrainer_hf_datasets_runtime_lock\n'
     printf 'recovery_design_sha256=%s\n' "${PRORM_PHASE2_RECOVERY_DESIGN_SHA256}"
     printf 'base_config_hash=%s\n' "${PRORM_PHASE2_BASE_CONFIG_HASH}"
     printf 'recovery_git_commit=%s\n' "${PRORM_GIT_COMMIT}"
@@ -185,7 +188,8 @@ finalize() {
   set +e
   if [[ "${workload}" = 0 ]]; then
     for file in \
-      phase2-config-check.json base-config-check.json parent-verification-before.json \
+      phase2-config-check.json base-config-check.json \
+      infrastructure-failure-verification.json parent-verification-before.json \
       parent-verification-after.json artifact-snapshot-before.json \
       artifact-snapshot-after.json parent-run-snapshot-before.json \
       parent-run-snapshot-after.json hf-inventory-verification.json gpu-check.json \
@@ -197,7 +201,8 @@ finalize() {
       && ! -L "${job_dir}/recovery-failure-evidence.json" ]] || sync=1
   else
     for file in \
-      phase2-config-check.json base-config-check.json parent-verification-before.json \
+      phase2-config-check.json base-config-check.json \
+      infrastructure-failure-verification.json parent-verification-before.json \
       parent-verification-after.json artifact-snapshot-before.json \
       artifact-snapshot-after.json parent-run-snapshot-before.json \
       parent-run-snapshot-after.json hf-inventory-verification.json gpu-check.json \
@@ -242,11 +247,20 @@ overlay="${execution_repo}/configs/common_beta_recovery_pilot.yaml"
 base="${execution_repo}/configs/common_beta_pilot_base.yaml"
 registry="${execution_repo}/configs/phase2_recovery_parent_failures.json"
 validator="${execution_repo}/scripts/hpc4/validate_phase2_recovery_parent.py"
+infrastructure_registry="${execution_repo}/configs/phase2_recovery_infrastructure_failure.json"
+infrastructure_validator="${execution_repo}/scripts/hpc4/validate_phase2_recovery_infrastructure_failure.py"
 printf '%s  %s\n' \
   a6a924dae429ceb0df11cea128542cae16fb42a2e69a0d2120acb0e4f8f1d80f "${overlay}" \
   e32cf5ad2a7bb2f6fa27180aa2fa6e05e2b457cfe032bab1c33f86646af1beb1 "${base}" \
   "${PRORM_PHASE2_PARENT_REGISTRY_SHA256}" "${registry}" \
+  e09eefa403f72044192c58f19e06b1e89b939c1d35ddba5081b13693e995cafd \
+  "${infrastructure_registry}" \
   | sha256sum --check --status || die "detached config/registry bytes changed"
+python3 "${infrastructure_validator}" "${infrastructure_registry}" \
+  --project-root "${PRORM_PROJECT_ROOT}" \
+  --expected-registry-sha256 \
+  e09eefa403f72044192c58f19e06b1e89b939c1d35ddba5081b13693e995cafd \
+  --output "${job_dir}/infrastructure-failure-verification.json"
 python3 "${validator}" "${registry}" --project-root "${PRORM_PROJECT_ROOT}" \
   --expected-registry-sha256 "${PRORM_PHASE2_PARENT_REGISTRY_SHA256}" \
   --expected-parent-design-sha256 "${PRORM_PHASE2_PARENT_DESIGN_SHA256}" \
@@ -324,6 +338,13 @@ PY
 }
 snapshot_parent_run "${source_run}" "${job_dir}/parent-run-snapshot-before.json"
 
+verification_datasets_cache="${job_dir}/hf-datasets-cache"
+mkdir -m 700 -- "${verification_datasets_cache}" \
+  || die "could not create per-job verification Datasets cache"
+[[ -d "${verification_datasets_cache}" && ! -L "${verification_datasets_cache}" \
+  && "$(realpath -e -- "${verification_datasets_cache}")" = "${verification_datasets_cache}" ]] \
+  || die "per-job verification Datasets cache is unsafe"
+
 container=(
   apptainer exec --cleanenv --nv --no-mount home,cwd,bind-paths
   --pwd "${execution_repo}"
@@ -331,7 +352,7 @@ container=(
   --env "PYTHONPATH=${execution_repo}/src"
   --env "PYTHONNOUSERSITE=1" --env "PYTHONDONTWRITEBYTECODE=1"
   --env "HF_HOME=${PRORM_HF_CACHE}" --env "HF_HUB_CACHE=${PRORM_HF_CACHE}/hub"
-  --env "HF_DATASETS_CACHE=${PRORM_HF_CACHE}/datasets"
+  --env "HF_DATASETS_CACHE=${verification_datasets_cache}"
   --env "HF_HUB_OFFLINE=1" --env "TRANSFORMERS_OFFLINE=1"
   --env "HF_DATASETS_OFFLINE=1" --env "HF_HUB_DISABLE_TELEMETRY=1"
   --env "TOKENIZERS_PARALLELISM=false"
@@ -370,6 +391,7 @@ if (
 PY
 "${container[@]}" python "${execution_repo}/scripts/hpc4/stage_hf_assets.py" \
   "${base}" "${PRORM_HF_CACHE}" --verify-only --inventory "${PRORM_HF_INVENTORY}" \
+  --verification-datasets-cache "${verification_datasets_cache}" \
   | tee "${job_dir}/hf-inventory-verification.json"
 printf '%s  %s\n' "${PRORM_HF_INVENTORY_SHA256}" "${PRORM_HF_INVENTORY}" \
   | sha256sum --check --status || die "HF inventory changed during in-container verification"

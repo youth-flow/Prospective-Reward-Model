@@ -153,6 +153,7 @@ def test_verify_only_is_offline_deterministic_and_does_not_write_inventory(
         cache_root=str(cache),
         inventory=None,
         verify_only=False,
+        verification_datasets_cache=None,
     )
     created = staging._execute(arguments)
     inventory = cache / str(created["inventory"])
@@ -169,6 +170,124 @@ def test_verify_only_is_offline_deterministic_and_does_not_write_inventory(
     # resolution observes all three offline switches before it starts.
     assert offline_observations[0][0] is False
     assert all(observation == (True, "1", "1", "1") for observation in offline_observations[1:])
+
+
+def test_verify_only_can_use_empty_per_job_datasets_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging = _load_staging_module()
+    cache = tmp_path / "hf-cache"
+    work_cache = tmp_path / "job" / "datasets"
+    work_cache.mkdir(parents=True)
+    observed: list[Path] = []
+
+    def fake_stage(
+        assets: tuple[dict[str, str], ...],
+        *,
+        hub_cache: Path,
+        local_files_only: bool,
+    ) -> tuple[tuple[dict[str, str], Path], ...]:
+        result = []
+        for index, asset in enumerate(assets):
+            snapshot = hub_cache / f"repo-{index}" / "snapshots" / asset["revision"]
+            snapshot.mkdir(parents=True, exist_ok=True)
+            (snapshot / "asset.bin").write_bytes(f"asset-{index}".encode())
+            result.append((asset, snapshot))
+        return tuple(result)
+
+    def fake_offline(
+        *_: object,
+        datasets_cache: Path,
+        **__: object,
+    ) -> dict[str, object]:
+        observed.append(datasets_cache)
+        (datasets_cache / "runtime.lock").write_text("ephemeral", encoding="utf-8")
+        return {"models": [], "dataset": {"prompt_checks": []}}
+
+    monkeypatch.setattr(staging, "_stage_snapshots", fake_stage)
+    monkeypatch.setattr(staging, "_verify_offline_resolution", fake_offline)
+    monkeypatch.setattr(staging, "_package_versions", lambda: {"test": "1"})
+    arguments = argparse.Namespace(
+        config=str(Path(__file__).parents[1] / "configs" / "smoke.yaml"),
+        cache_root=str(cache),
+        inventory=None,
+        verify_only=False,
+        verification_datasets_cache=None,
+    )
+    created = staging._execute(arguments)
+    frozen_datasets_before = tuple((cache / "datasets").iterdir())
+
+    arguments.verify_only = True
+    arguments.verification_datasets_cache = str(work_cache)
+    verified = staging._execute(arguments)
+
+    assert verified["inventory_sha256"] == created["inventory_sha256"]
+    assert observed[-1] == work_cache.resolve()
+    assert (work_cache / "runtime.lock").read_text(encoding="utf-8") == "ephemeral"
+    assert tuple((cache / "datasets").iterdir()) == frozen_datasets_before
+
+
+def test_verification_datasets_cache_is_verify_only_and_must_start_empty(
+    tmp_path: Path,
+) -> None:
+    staging = _load_staging_module()
+    work_cache = tmp_path / "job" / "datasets"
+    work_cache.mkdir(parents=True)
+    arguments = argparse.Namespace(
+        config=str(Path(__file__).parents[1] / "configs" / "smoke.yaml"),
+        cache_root=str(tmp_path / "hf-cache"),
+        inventory=None,
+        verify_only=False,
+        verification_datasets_cache=str(work_cache),
+    )
+    with pytest.raises(ValueError, match="requires --verify-only"):
+        staging._execute(arguments)
+
+    arguments.verify_only = True
+    (work_cache / "unexpected").write_text("bytes", encoding="utf-8")
+    with pytest.raises(ValueError, match="must start empty"):
+        staging._execute(arguments)
+
+
+def test_verification_datasets_cache_must_be_absolute_canonical_and_outside_frozen_root(
+    tmp_path: Path,
+) -> None:
+    staging = _load_staging_module()
+    cache = tmp_path / "hf-cache"
+    (cache / "hub").mkdir(parents=True)
+    (cache / "datasets").mkdir()
+    inventory = cache / "inventories" / "placeholder.json"
+    inventory.parent.mkdir()
+    inventory.write_text("{}\n", encoding="utf-8")
+    arguments = argparse.Namespace(
+        config=str(Path(__file__).parents[1] / "configs" / "smoke.yaml"),
+        cache_root=str(cache),
+        inventory=str(inventory),
+        verify_only=True,
+        verification_datasets_cache="relative-cache",
+    )
+    with pytest.raises(ValueError, match="must be absolute"):
+        staging._execute(arguments)
+
+    inside = cache / "runtime"
+    inside.mkdir()
+    arguments.verification_datasets_cache = str(inside)
+    with pytest.raises(ValueError, match="outside the frozen cache"):
+        staging._execute(arguments)
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("host does not permit directory symlink creation")
+    through_symlink = linked_parent / "datasets"
+    (real_parent / "datasets").mkdir()
+    arguments.verification_datasets_cache = str(through_symlink)
+    with pytest.raises(ValueError, match="canonical and contain no symlink"):
+        staging._execute(arguments)
 
 
 def test_offline_verification_uses_formal_prompt_preparation_and_local_only_dataset(
