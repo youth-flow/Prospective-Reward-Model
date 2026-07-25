@@ -1,5 +1,11 @@
 # Phase 2 design decisions
 
+> **Current route:** this document preserves the complete future formal
+> design, including exact-30. The experiment currently being executed is the
+> non-formal fixed-five budgeted route documented in
+> [phase2_budgeted_end_to_end.md](phase2_budgeted_end_to_end.md). Nothing in a
+> five-seed exploratory result activates the exact-30 protocol.
+
 This document records the decisions made after auditing the completed Phase 1
 campaign. It is intentionally separate from the frozen Phase 1 result. Nothing
 in this document changes the authoritative Phase 1

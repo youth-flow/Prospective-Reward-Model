@@ -1,4 +1,4 @@
-"""Strict configuration contract for common-beta pilot and confirmatory designs.
+"""Strict configuration contract for common-beta Phase-2 designs.
 
 The completed Phase-1 campaign and the common-beta campaign answer different
 questions.  This module therefore does not extend the Phase-1 schema with
@@ -44,13 +44,22 @@ PHASE1_MAIN_SEEDS = frozenset({20260722, 20260723, 20260724, 20260725, 20260726}
 PHASE2_PILOT_CONFIG = "configs/common_beta_pilot.yaml"
 PHASE2_PILOT_BASE_CONFIG = "configs/common_beta_pilot_base.yaml"
 PHASE2_RECOVERY_PILOT_CONFIG = "configs/common_beta_recovery_pilot.yaml"
+PHASE2_BUDGETED_END_TO_END_CONFIG = "configs/common_beta_post_recovery_budgeted_end_to_end.yaml"
+PHASE2_BUDGETED_END_TO_END_BASE_CONFIG = (
+    "configs/common_beta_post_recovery_budgeted_end_to_end_base.yaml"
+)
 PHASE2_PILOT_SEEDS = frozenset({20260801, 20260802, 20260803})
 _PHASE2_RECOVERY_PILOT_SEEDS = (20260801, 20260802, 20260803)
+PHASE2_BUDGETED_END_TO_END_STAGE = "budgeted_end_to_end"
+PHASE2_BUDGETED_END_TO_END_SEEDS = tuple(range(20261001, 20261006))
+PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE = "budgeted_end_to_end_exploratory_only"
 PHASE2_CONFIRMATORY_SEEDS = tuple(range(20260901, 20260931))
 PHASE2_CONFIRMATORY_NUM_SEEDS = len(PHASE2_CONFIRMATORY_SEEDS)
 # Backward-compatible import name.  The contract is exact, not a lower bound.
 PHASE2_MIN_CONFIRMATORY_SEEDS = PHASE2_CONFIRMATORY_NUM_SEEDS
-PHASE2_CONFIRMATORY_EXCLUDED_SEEDS = PHASE1_MAIN_SEEDS | PHASE2_PILOT_SEEDS
+PHASE2_CONFIRMATORY_EXCLUDED_SEEDS = (
+    PHASE1_MAIN_SEEDS | PHASE2_PILOT_SEEDS | frozenset(PHASE2_BUDGETED_END_TO_END_SEEDS)
+)
 PHASE2_FROZEN_ORACLE_B = -4.500244140625
 PHASE2_FROZEN_ORACLE_TAU = 2.7715682983398438
 PHASE2_FIXED_LORA_A_INITIALIZATION_SEED = 946081152281754541
@@ -92,7 +101,7 @@ _PROMPT_DATASET = "allenai/multipref"
 _PROMPT_REVISION = "12910233a0238a997ebe425656e9dfed7b0ff031"
 _POLICY_ARMS = ("zero_b", "bt_mle", "prorm_plus", "oracle_step")
 _COMMON_BETA_ARMS = ("bt_mle", "prorm_plus", "oracle_step")
-_DESIGN_STAGES = ("pilot", "confirmatory")
+_DESIGN_STAGES = ("pilot", PHASE2_BUDGETED_END_TO_END_STAGE, "confirmatory")
 _PILOT_PHASES = ("calibration", "freeze")
 _HORIZON_SEQUENCE = (256, 512, 1024)
 _RECOVERY_MAXIMUM_STEPS = 12760
@@ -369,7 +378,24 @@ def _validate_design(value: object) -> tuple[str, str | None, str, str]:
             raise ConfigError("pilot design.formal_eligibility must be false")
         if evidence_role != "pilot_design_selection_only":
             raise ConfigError("pilot design.evidence_role must equal 'pilot_design_selection_only'")
-    else:
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        if pilot_phase_value is not None:
+            raise ConfigError("budgeted_end_to_end design.pilot_phase must be null")
+        pilot_phase = None
+        if "budgeted-end-to-end" not in name.lower():
+            raise ConfigError(
+                "a budgeted_end_to_end design.name must contain 'budgeted-end-to-end'"
+            )
+        if "confirmatory" in name.lower():
+            raise ConfigError("a budgeted_end_to_end design.name must not claim to be confirmatory")
+        if formal_eligibility:
+            raise ConfigError("budgeted_end_to_end design.formal_eligibility must be false")
+        if evidence_role != PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE:
+            raise ConfigError(
+                "budgeted_end_to_end design.evidence_role must equal "
+                f"{PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE!r}"
+            )
+    elif stage == "confirmatory":
         if pilot_phase_value is not None:
             raise ConfigError("confirmatory design.pilot_phase must be null")
         pilot_phase = None
@@ -387,6 +413,14 @@ def _validate_design(value: object) -> tuple[str, str | None, str, str]:
     source_config = _declared_config_path(design["source_config"], "design.source_config")
     if source_config == PHASE1_MAIN_CONFIG:
         raise ConfigError("design.source_config must not reuse the Phase-1 main config")
+    if (
+        stage == PHASE2_BUDGETED_END_TO_END_STAGE
+        and source_config != PHASE2_BUDGETED_END_TO_END_BASE_CONFIG
+    ):
+        raise ConfigError(
+            "budgeted_end_to_end design.source_config must equal "
+            f"{PHASE2_BUDGETED_END_TO_END_BASE_CONFIG!r}"
+        )
     source_digest = _string(design["source_config_hash"], "design.source_config_hash")
     if _HEX_DIGEST_PATTERN.fullmatch(source_digest) is None:
         raise ConfigError("design.source_config_hash must be 64 lowercase hexadecimal characters")
@@ -448,7 +482,26 @@ def _validate_run(value: object, *, stage: str) -> tuple[int, int]:
                 "pilot run.seeds must be exactly the permanently excluded seeds "
                 f"{sorted(PHASE2_PILOT_SEEDS)!r}"
             )
-    else:
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        if confirmatory or formal_eligibility or not excluded:
+            raise ConfigError(
+                "budgeted_end_to_end runs require confirmatory=false, "
+                "formal_eligibility=false, and "
+                "excluded_from_confirmatory_evidence=true"
+            )
+        if tuple(seeds) != PHASE2_BUDGETED_END_TO_END_SEEDS:
+            raise ConfigError(
+                "budgeted_end_to_end run.seeds must equal the exact ordered "
+                f"exploratory seed list {list(PHASE2_BUDGETED_END_TO_END_SEEDS)!r}"
+            )
+        disallowed = PHASE1_MAIN_SEEDS | PHASE2_PILOT_SEEDS | frozenset(PHASE2_CONFIRMATORY_SEEDS)
+        overlap = sorted(set(seeds) & disallowed)
+        if overlap:
+            raise ConfigError(
+                "budgeted_end_to_end run.seeds must exclude all Phase-1, pilot, "
+                f"and confirmatory seeds; overlap={overlap!r}"
+            )
+    elif stage == "confirmatory":
         if not confirmatory or not formal_eligibility or excluded:
             raise ConfigError(
                 "confirmatory runs require confirmatory=true, formal_eligibility=true, "
@@ -1266,9 +1319,12 @@ def _validate_reward_model(
         "reward_model.identifiability.relative_rank_tolerance",
         1.0e-10,
     )
-    expected_rank_role = (
-        "pilot_measure_only" if stage == "pilot" else "confirmatory_frozen_identifiability_contract"
-    )
+    if stage == "pilot":
+        expected_rank_role = "pilot_measure_only"
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        expected_rank_role = "budgeted_end_to_end_exploratory_frozen_identifiability_audit"
+    elif stage == "confirmatory":
+        expected_rank_role = "confirmatory_frozen_identifiability_contract"
     _locked_string(
         identifiability["role"],
         "reward_model.identifiability.role",
@@ -1282,6 +1338,11 @@ def _validate_reward_model(
         raise ConfigError(
             "pilot reward-model rank is measure-only and cannot require full column rank"
         )
+    if stage == PHASE2_BUDGETED_END_TO_END_STAGE and require_full_rank:
+        raise ConfigError(
+            "budgeted_end_to_end reward-model rank is measure-only and cannot "
+            "require full column rank"
+        )
     _locked_string(
         identifiability["algorithmic_tie_break"],
         "reward_model.identifiability.algorithmic_tie_break",
@@ -1292,11 +1353,12 @@ def _validate_reward_model(
         "reward_model.identifiability.minimum_norm_claim",
         False,
     )
-    expected_freeze = (
-        "decide_gate_from_train_only_pilot_then_issue_new_identity"
-        if stage == "pilot"
-        else "satisfied_by_current_confirmatory_identity"
-    )
+    if stage == "pilot":
+        expected_freeze = "decide_gate_from_train_only_pilot_then_issue_new_identity"
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        expected_freeze = "satisfied_by_accepted_freeze_budgeted_end_to_end_identity"
+    elif stage == "confirmatory":
+        expected_freeze = "satisfied_by_current_confirmatory_identity"
     _locked_string(
         identifiability["confirmatory_freeze_requirement"],
         "reward_model.identifiability.confirmatory_freeze_requirement",
@@ -1306,6 +1368,29 @@ def _validate_reward_model(
         _validate_recovery_optimizer_protocol(
             reward["optimizer_protocol"],
             adopted_schedule_authorization_sha256=(adopted_schedule_authorization_sha256),
+        )
+
+
+def _validate_frozen_beta_source(
+    frozen_global_beta: object,
+    beta_source_aggregate_sha256: object,
+    *,
+    stage_context: str,
+) -> None:
+    _number(
+        frozen_global_beta,
+        "objective.common_beta.frozen_global_beta",
+        minimum=0.0,
+        minimum_inclusive=False,
+    )
+    digest = _string(
+        beta_source_aggregate_sha256,
+        "objective.common_beta.beta_source_aggregate_sha256",
+    )
+    if _HEX_DIGEST_PATTERN.fullmatch(digest) is None:
+        raise ConfigError(
+            f"{stage_context} objective.common_beta.beta_source_aggregate_sha256 "
+            "must be a 64-character lowercase SHA256 digest"
         )
 
 
@@ -1349,7 +1434,13 @@ def _validate_common_beta(
             "frozen_calibration_aggregate_candidate_in_pilot_freeze_design_identity"
         )
         expected_rule = "pilot_fixed_global_beta_target_free_safety_rehearsal"
-    else:
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        expected_calibration_split = "excluded_pilot"
+        expected_calibration_source = (
+            "accepted_freeze_global_beta_in_budgeted_end_to_end_design_identity"
+        )
+        expected_rule = "single_accepted_freeze_global_beta_scalar"
+    elif stage == "confirmatory":
         expected_calibration_split = "excluded_pilot"
         expected_calibration_source = "frozen_pilot_global_beta_in_confirmatory_design_identity"
         expected_rule = "single_pilot_frozen_global_beta_scalar"
@@ -1380,22 +1471,24 @@ def _validate_common_beta(
             raise ConfigError(
                 "pilot calibration objective.common_beta.beta_source_aggregate_sha256 must be null"
             )
-    else:
-        _number(
+    elif stage == "pilot" and pilot_phase == "freeze":
+        _validate_frozen_beta_source(
             frozen_global_beta,
-            "objective.common_beta.frozen_global_beta",
-            minimum=0.0,
-            minimum_inclusive=False,
-        )
-        digest = _string(
             beta_source_aggregate_sha256,
-            "objective.common_beta.beta_source_aggregate_sha256",
+            stage_context="pilot freeze",
         )
-        if _HEX_DIGEST_PATTERN.fullmatch(digest) is None:
-            raise ConfigError(
-                "objective.common_beta.beta_source_aggregate_sha256 must be a "
-                "64-character lowercase SHA256 digest"
-            )
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        _validate_frozen_beta_source(
+            frozen_global_beta,
+            beta_source_aggregate_sha256,
+            stage_context=PHASE2_BUDGETED_END_TO_END_STAGE,
+        )
+    elif stage == "confirmatory":
+        _validate_frozen_beta_source(
+            frozen_global_beta,
+            beta_source_aggregate_sha256,
+            stage_context="confirmatory",
+        )
     primary = _locked_number(
         common["primary_k_cal"],
         "objective.common_beta.primary_k_cal",
@@ -1417,7 +1510,7 @@ def _validate_common_beta(
                 "pilot calibration objective.common_beta."
                 "sensitivity_frozen_global_beta_multipliers must be null"
             )
-    elif stage == "pilot":
+    elif stage == "pilot" and pilot_phase == "freeze":
         if common["sensitivity_k_cal"] is not None:
             raise ConfigError(
                 "pilot freeze objective.common_beta.sensitivity_k_cal must be null; "
@@ -1429,7 +1522,17 @@ def _validate_common_beta(
                 "sensitivity_frozen_global_beta_multipliers must be null; "
                 "a failed safety rehearsal requires a new identity at beta*=2"
             )
-    else:
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        if common["sensitivity_k_cal"] is not None:
+            raise ConfigError(
+                "budgeted_end_to_end objective.common_beta.sensitivity_k_cal must be null"
+            )
+        if common["sensitivity_frozen_global_beta_multipliers"] is not None:
+            raise ConfigError(
+                "budgeted_end_to_end objective.common_beta."
+                "sensitivity_frozen_global_beta_multipliers must be null"
+            )
+    elif stage == "confirmatory":
         if common["sensitivity_k_cal"] is not None:
             raise ConfigError(
                 "confirmatory objective.common_beta.sensitivity_k_cal must be null; "
@@ -1443,12 +1546,19 @@ def _validate_common_beta(
     if stage == "pilot" and pilot_phase == "calibration":
         expected_primary_role = "pilot_global_beta_calibration_candidate"
         expected_sensitivity_role = "required_separate_global_beta_candidate_sensitivity"
-    elif stage == "pilot":
+        sensitivity_executed_separately = True
+    elif stage == "pilot" and pilot_phase == "freeze":
         expected_primary_role = "pilot_frozen_global_beta_safety_rehearsal"
         expected_sensitivity_role = "new_pilot_freeze_design_identity_double_beta_grid"
-    else:
+        sensitivity_executed_separately = True
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        expected_primary_role = "budgeted_end_to_end_exploratory_primary"
+        expected_sensitivity_role = "not_executed_in_budgeted_end_to_end"
+        sensitivity_executed_separately = False
+    elif stage == "confirmatory":
         expected_primary_role = "confirmatory_primary"
         expected_sensitivity_role = "required_separate_frozen_global_beta_multiplier_sensitivity"
+        sensitivity_executed_separately = True
     _locked_string(
         common["primary_execution_role"],
         "objective.common_beta.primary_execution_role",
@@ -1462,7 +1572,7 @@ def _validate_common_beta(
     _locked_boolean(
         common["sensitivity_executed_separately"],
         "objective.common_beta.sensitivity_executed_separately",
-        True,
+        sensitivity_executed_separately,
     )
     _locked_boolean(
         common["sensitivity_eligible_for_primary_claim"],
@@ -1544,14 +1654,18 @@ def _validate_full_tangent(
         "objective.full_tangent.ridge.sensitivity_multipliers",
         (0.1, 1.0, 10.0),
     )
-    expected_primary_role = (
-        "pilot_candidate_primary" if stage == "pilot" else "confirmatory_primary"
-    )
-    expected_sensitivity_role = (
-        "required_separate_pilot_sensitivity"
-        if stage == "pilot"
-        else "required_separate_confirmatory_sensitivity"
-    )
+    if stage == "pilot":
+        expected_primary_role = "pilot_candidate_primary"
+        expected_sensitivity_role = "required_separate_pilot_sensitivity"
+        sensitivity_executed_separately = True
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        expected_primary_role = "budgeted_end_to_end_exploratory_primary"
+        expected_sensitivity_role = "not_executed_in_budgeted_end_to_end"
+        sensitivity_executed_separately = False
+    elif stage == "confirmatory":
+        expected_primary_role = "confirmatory_primary"
+        expected_sensitivity_role = "required_separate_confirmatory_sensitivity"
+        sensitivity_executed_separately = True
     _locked_string(
         ridge["primary_execution_role"],
         "objective.full_tangent.ridge.primary_execution_role",
@@ -1565,7 +1679,7 @@ def _validate_full_tangent(
     _locked_boolean(
         ridge["sensitivity_executed_separately"],
         "objective.full_tangent.ridge.sensitivity_executed_separately",
-        True,
+        sensitivity_executed_separately,
     )
     _locked_boolean(
         ridge["sensitivity_eligible_for_primary_claim"],
@@ -2137,10 +2251,13 @@ def _validate_evaluation(
     )
     if stage == "pilot" and pilot_phase == "calibration":
         expected_application = "pilot_calibration_target_free_selection"
-    elif stage == "pilot":
+    elif stage == "pilot" and pilot_phase == "freeze":
         expected_application = "pilot_freeze_target_free_safety_selection"
-    else:
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        expected_application = "budgeted_end_to_end_exploratory_summary_only"
+    elif stage == "confirmatory":
         expected_application = "confirmatory_evidence_decision"
+    supports_formal_claim = stage == "confirmatory"
     _locked_string(
         decisions["application"],
         "evaluation.decision_gates.application",
@@ -2149,7 +2266,7 @@ def _validate_evaluation(
     _locked_boolean(
         decisions["supports_formal_claim"],
         "evaluation.decision_gates.supports_formal_claim",
-        stage == "confirmatory",
+        supports_formal_claim,
     )
     _locked_string_sequence(
         decisions["require_all"],
@@ -2258,7 +2375,7 @@ def _validate_evaluation(
             "evaluation.max_length.post_pilot_requirement",
             "issue_new_pilot_freeze_design_identity",
         )
-    elif stage == "pilot":
+    elif stage == "pilot" and pilot_phase == "freeze":
         digest = _string(
             parent_aggregate,
             "evaluation.max_length.parent_pilot_aggregate_sha256",
@@ -2292,7 +2409,42 @@ def _validate_evaluation(
             "evaluation.max_length.post_pilot_requirement",
             "freeze_confirmatory_identity_if_passed_else_double_beta_new_identity",
         )
-    else:
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        digest = _string(
+            parent_aggregate,
+            "evaluation.max_length.parent_pilot_aggregate_sha256",
+        )
+        if _HEX_DIGEST_PATTERN.fullmatch(digest) is None:
+            raise ConfigError(
+                "budgeted_end_to_end execution requires its accepted freeze "
+                "aggregate SHA256 as horizon parent"
+            )
+        _locked_string(
+            max_length["role"],
+            "evaluation.max_length.role",
+            "budgeted_end_to_end_pre_oracle_safety_gate",
+        )
+        _locked_boolean(
+            max_length["measure_only"],
+            "evaluation.max_length.measure_only",
+            False,
+        )
+        _locked_boolean(
+            max_length["formal_gate"],
+            "evaluation.max_length.formal_gate",
+            False,
+        )
+        _locked_number(
+            max_length["formal_threshold"],
+            "evaluation.max_length.formal_threshold",
+            0.05,
+        )
+        _locked_string(
+            max_length["post_pilot_requirement"],
+            "evaluation.max_length.post_pilot_requirement",
+            "satisfied_by_accepted_freeze_budgeted_end_to_end_identity",
+        )
+    elif stage == "confirmatory":
         digest = _string(
             parent_aggregate,
             "evaluation.max_length.parent_pilot_aggregate_sha256",
@@ -2715,14 +2867,24 @@ def _validate_post_recovery_experiment_scope(root: Mapping[str, object]) -> str:
         pilot_phase = _string(design.get("pilot_phase"), "design.pilot_phase")
         if pilot_phase not in _PILOT_PHASES:
             raise ConfigError(f"design.pilot_phase must be one of {_PILOT_PHASES!r}")
-    elif design.get("pilot_phase") is not None:
-        raise ConfigError("post-recovery confirmatory design.pilot_phase must be null")
+    elif stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        if design.get("pilot_phase") is not None:
+            raise ConfigError("post-recovery budgeted_end_to_end design.pilot_phase must be null")
+    elif stage == "confirmatory":
+        if design.get("pilot_phase") is not None:
+            raise ConfigError("post-recovery confirmatory design.pilot_phase must be null")
 
     run = _mapping(root["run"], "run")
     run_seeds = tuple(_unique_integers(run.get("seeds"), "run.seeds"))
     if stage == "pilot" and run_seeds != _PHASE2_RECOVERY_PILOT_SEEDS:
         raise ConfigError(
             "post-recovery pilot run.seeds must equal [20260801, 20260802, 20260803] in that order"
+        )
+    if stage == PHASE2_BUDGETED_END_TO_END_STAGE and run_seeds != PHASE2_BUDGETED_END_TO_END_SEEDS:
+        raise ConfigError(
+            "post-recovery budgeted_end_to_end run.seeds must equal the exact "
+            "ordered exploratory seed list "
+            f"{list(PHASE2_BUDGETED_END_TO_END_SEEDS)!r} in that order"
         )
     reference = validate_post_recovery_authorization_reference(root["recovery_success_reference"])
     return _string(
@@ -2910,6 +3072,13 @@ def validate_phase2_config(
     if post_recovery_protocol:
         adopted_schedule_authorization_sha256 = _validate_post_recovery_experiment_scope(root)
     stage, pilot_phase, _, _ = _validate_design(root["design"])
+    if stage == PHASE2_BUDGETED_END_TO_END_STAGE and not post_recovery_protocol:
+        raise ConfigError(
+            f"{stage} design requires schema_version "
+            f"{PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION!r} so the accepted "
+            "recovery authorization and frozen 12760-step learning-rate decay "
+            "protocol cannot be removed by a schema downgrade"
+        )
     train_prompts, _ = _validate_run(root["run"], stage=stage)
     num_candidates = _validate_data(root["data"])
     max_response_tokens = _validate_policy(root["policy"], stage=stage)
@@ -2937,7 +3106,22 @@ def validate_phase2_config(
         pilot_phase=pilot_phase,
         max_response_tokens=max_response_tokens,
     )
-    if stage == "confirmatory":
+    if stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+        objective = _mapping(root["objective"], "objective")
+        common_beta = _mapping(objective["common_beta"], "objective.common_beta")
+        evaluation = _mapping(root["evaluation"], "evaluation")
+        max_length = _mapping(evaluation["max_length"], "evaluation.max_length")
+        if (
+            max_length["parent_pilot_aggregate_sha256"]
+            != common_beta["beta_source_aggregate_sha256"]
+        ):
+            raise ConfigError(
+                "a budgeted_end_to_end design must bind the accepted freeze "
+                "aggregate as both "
+                "evaluation.max_length.parent_pilot_aggregate_sha256 and "
+                "objective.common_beta.beta_source_aggregate_sha256"
+            )
+    elif stage == "confirmatory":
         objective = _mapping(root["objective"], "objective")
         common_beta = _mapping(objective["common_beta"], "objective.common_beta")
         evaluation = _mapping(root["evaluation"], "evaluation")
@@ -3084,6 +3268,11 @@ __all__ = [
     "PHASE1_MAIN_CONFIG",
     "PHASE1_MAIN_CONFIG_HASH",
     "PHASE1_MAIN_SEEDS",
+    "PHASE2_BUDGETED_END_TO_END_BASE_CONFIG",
+    "PHASE2_BUDGETED_END_TO_END_CONFIG",
+    "PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE",
+    "PHASE2_BUDGETED_END_TO_END_SEEDS",
+    "PHASE2_BUDGETED_END_TO_END_STAGE",
     "PHASE2_CONFIRMATORY_EXCLUDED_SEEDS",
     "PHASE2_FIXED_LORA_A_INITIALIZATION_SEED",
     "PHASE2_FIXED_LORA_A_SHA256",

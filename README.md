@@ -3,6 +3,33 @@
 [![CI](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml/badge.svg)](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml)
 [![HPC4 image](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/build-hpc4-image.yml/badge.svg)](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/build-hpc4-image.yml)
 
+## 当前执行路线（先读）
+
+当前实际采用的是 **Phase 2 budgeted end-to-end fixed-five exploratory**，不是
+exact-30 正式实验：
+
+```text
+recovery 3 seeds（工程修复证据，永久排除）
+  -> fresh post-recovery calibration 3 seeds（target-free）
+  -> accepted freeze（唯一全局 beta + response horizon）
+  -> fresh fixed-five E2E seeds 20261001..20261005
+  -> seed-level strict verification
+  -> fixed-five descriptive aggregate
+```
+
+这条路线中的数据、候选、重复标签、reward heads、optimizer state 和 policy rollouts
+均按阶段重新生成；recovery 或 pilot head 不会被带入 E2E。五-seed aggregate 只报告
+`ProRM+ - BT-MLE` 的描述性效果、异质性和 paired-seed descriptive interval，
+明确禁止 p-value、显著性标签和正式 claim。exact-30 只保留为未来、需要重新冻结和
+预注册的协议，不能由本轮结果事后激活。
+
+完整理论—工程—HPC4 契约见
+[Phase 2 预算版端到端实验](docs/phase2_budgeted_end_to_end.md)。
+历史 [Phase 1 结果](docs/phase1_results.md)、完整
+[Phase 2 正式设计](docs/phase2_design_decisions.md) 与
+[post-recovery runbook](docs/phase2_post_recovery_hpc4.md) 继续保留，但不应被误读为
+当前正在执行 exact-30。实时队列状态只以 HPC4 的 Slurm 与不可变运行证据为准。
+
 Preference likelihood asks whether a reward model explains past labels. **Prospective Reward Modeling
 (ProRM)** instead asks what the downstream policy optimizer will do with that reward model. The method
 therefore trains for the reward error that changes the next policy update, rather than for every pointwise
@@ -56,7 +83,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Item | Status |
 |---|---|
 | Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented in the working tree; the next HPC4 submission still requires a commit-bound release audit |
-| Automated verification | Historical test and HPC4 `bash -n` records remain provenance for the snapshots that produced them, not certification of a later worktree. The exact commit used next must pass the full Python/static suite, HPC4 shell syntax checks, and a fresh non-confirmatory CUDA rehearsal before exact-30 launch |
+| Automated verification | Historical test and HPC4 `bash -n` records remain provenance for the snapshots that produced them, not certification of a later worktree. Every budgeted identity must bind one clean commit and pass the Python/static suite, shell checks, input/materialization checks and per-seed output verifier before descriptive aggregation |
 | Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
@@ -68,7 +95,8 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Phase-1 five-seed accepted experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
 | Phase-1 formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
-| Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed aggregation implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
+| Current post-Phase-1 route | Recovery 3（排除）→ fresh calibration/freeze（排除）→ accepted global `beta`/horizon → fixed-five `budgeted_end_to_end` exploratory E2E；exact-30 不是当前执行目标 |
+| Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed normalization/description core implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
 | First Phase-2 calibration pilot | All three excluded pilot seeds fail-closed at the BT first-order gate under constant-`1e-3` AdamW; a train-only diagnostic established a deterministic decay path that passes without held-out access. The one-shot recovery has a separate identity and can only authorize a new full calibration pilot; it cannot produce or enter a beta aggregate |
 | Phase-2 recovery execution | Execution revision 1 (`1648094`) stopped before training when Hugging Face Datasets attempted a runtime lock in the read-only shared cache. Revision 2 is authorized only after exact marker/file/log hashes and absent trainer outputs pass at submission and job time; frozen assets remain read-only, only derived Datasets cache files are isolated per job, and the scientific recovery schedule/identity are unchanged |
 
@@ -919,9 +947,12 @@ uses the accepted calibration aggregate as both `--beta-source-aggregate` and
 failed freeze as its beta source while retaining the accepted calibration as
 its horizon parent. Exact commands are in [docs/hpc4.md](docs/hpc4.md).
 
-The historical commands above end here. In the current design, retries belong
-only to outcome-blind pilot design selection. The formal
-campaign has a different, stricter contract: the exact ordered seeds
+The historical commands above end here. The exact-30 machinery described
+below is a **future formal protocol only**. It is inactive in the current
+budgeted fixed-five route, and the observed five-seed result must not be used
+to decide whether to activate it. If a later study independently preregisters
+and refreezes that protocol, retries belong only to outcome-blind pilot design
+selection. Its formal campaign has a different, stricter contract: the exact ordered seeds
 `20260901` through `20260930`, exactly `attempt-1` for every seed, and an
 immutable `campaign-plan.json` committed before the first Slurm submission.
 There is no formal retry, requeue, replacement seed, or optional stopping.
@@ -941,7 +972,10 @@ Before a new submit, both `squeue` and historical `sacct` are checked under the
 deterministic wave name; any unregistered historical identity fails closed and
 is never replaced.
 
-### Formal Phase 2 execution
+### Future exact-30 Phase 2 execution — inactive
+
+Do not run the commands in this subsection for the present study. They are
+retained to preserve and test the separately versioned future protocol.
 
 Do not copy an identity from this README. First commit the accepted
 confirmatory overlay/base identities and accepted freeze aggregate, then use
@@ -1007,6 +1041,7 @@ schemas, and monitoring commands are in [docs/hpc4.md](docs/hpc4.md).
 | Three-edge closed-form population ordering reversal | [docs/closed_form_example.md](docs/closed_form_example.md) |
 | Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
 | Formal five-seed results and scientific conclusion | [docs/phase1_results.md](docs/phase1_results.md) |
+| **Current Phase 2 fixed-five budgeted route, methods, endpoints and claim boundary** | [docs/phase2_budgeted_end_to_end.md](docs/phase2_budgeted_end_to_end.md) |
 | Phase 2 pilot boundary, global-beta decision and formal gates | [docs/phase2_design_decisions.md](docs/phase2_design_decisions.md) |
 | First Phase-2 failure, optimizer diagnosis and one-shot recovery boundary | [docs/phase2_recovery_protocol.md](docs/phase2_recovery_protocol.md) |
 | Recovery terminal evidence and success-authorization boundary | [docs/phase2_recovery_authorization.md](docs/phase2_recovery_authorization.md) |
@@ -1037,6 +1072,7 @@ Smart-Reward-Model/             # retained repository name
 │   ├── phase2_post_recovery_control.py # crash-safe post-recovery control plane
 │   ├── phase2_post_recovery_aggregate.py # calibration/freeze aggregation
 │   ├── phase2_post_recovery_output.py # post-recovery output verification
+│   ├── phase2_exploratory_aggregate.py # fixed-five descriptive-only aggregation
 │   ├── phase2_campaign.py      # exact-30 terminal-slot finalization
 │   ├── phase2_sensitivity.py   # frozen ridge/beta sensitivity grid
 │   ├── phase2_mechanism.py     # exact-target and low-dimensional qualifiers
@@ -1045,7 +1081,7 @@ Smart-Reward-Model/             # retained repository name
 └── tests/
 ```
 
-## 9. Claim boundary and execution order
+## 9. Current claim boundary and execution order
 
 1. Preserve the completed Phase 1 aggregate and its `not_passed` conclusion.
 2. Freeze and verify the Phase 2 implementation, image, base inventory, and
@@ -1063,22 +1099,22 @@ Smart-Reward-Model/             # retained repository name
    seed/arm. Start at the maximum calibration candidate; failures may only
    issue a new identity at the next `beta*=2` grid point, byte-bound to the
    immediately preceding failed freeze aggregate.
-6. Bind the accepted freeze aggregate SHA-256, global `beta_0`, and all
-   numerical/KL/horizon gates into a new confirmatory identity.
-7. Audit the implemented confirmatory GPU wrapper, terminalizers, immutable
-   campaign registry, resolver, and CPU finalizer before formal allocation.
-8. Precommit the immutable exact-30 campaign plan, then submit its eight fixed
-   Slurm waves in order for paired seeds `20260901`–`20260930`. Each seed has
-   exactly one predeclared attempt (`attempt-1`): there is no formal retry,
-   replacement seed, or outcome-dependent stopping. Advance only after all
-   tasks in prior waves have terminal bundles, irrespective of their outcome.
-   Every slot must end in one atomically published success or terminal-failure
-   bundle. One failed seed produces `not_passed_due_to_seed_failure` and
-   suppresses the primary CI. A complete valid campaign may still return the
-   scientifically meaningful status `not_passed`.
-9. Only afterward run the frozen ridge/beta sensitivity grid, mechanism
-   qualifiers, capacity/sample-size, all-six-pair, and OOD/human-label
-   robustness experiments as secondary evidence.
+6. Bind the accepted freeze aggregate SHA-256, unique global `beta_0`, response
+   horizon, optimizer schedule, implementation, image and data inventory into
+   one new `budgeted_end_to_end` identity.
+7. Audit and commit the fixed-five materializer, exactly-once held-array
+   submitter, GPU wrapper, per-seed verifier, terminal-evidence capture and
+   descriptive publication layer before allocating the E2E jobs.
+8. Submit exactly seeds `20261001`–`20261005` as one `0-4%2` array. There is no
+   adaptive seed selection, outcome-dependent stopping or substitution.
+9. Require all five canonical run directories and exact Slurm
+   `COMPLETED/0:0/0:0` evidence, then publish only the five preregistered
+   `ProRM+ - BT-MLE` endpoints with mean/SD/min/median/max and the fixed paired
+   descriptive bootstrap interval. No p-value, significance label, efficacy
+   gate or formal population claim is permitted.
+10. Preserve exact-30 and the broader sensitivity/robustness matrix only as
+    future, separately authorized studies. The fixed-five outcome cannot
+    trigger them.
 
 With fixed finite labels, CoVal identifies only a truncated logit series. It must be reported as
 **candidate-restricted truncated ProRM+ robustness** and cannot inherit the exact unbiasedness or human-

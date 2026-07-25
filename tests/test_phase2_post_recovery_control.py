@@ -5,6 +5,7 @@ import importlib.util
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,64 @@ def _load_recovery_test_helpers():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_authorization_validator_cli():
+    path = ROOT / "scripts" / "hpc4" / "validate_phase2_recovery_authorization.py"
+    spec = importlib.util.spec_from_file_location("_authorization_validator_cli", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _binding_bundle(
+    *,
+    stage: str,
+    pilot_phase: str | None,
+    seeds: list[int],
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        config={
+            "schema_version": control.POST_RECOVERY_CONFIG_SCHEMA,
+            "design": {
+                "stage": stage,
+                "pilot_phase": pilot_phase,
+                "name": f"common-beta-post-recovery-{stage}",
+            },
+            "run": {"seeds": seeds},
+            "recovery_success_reference": {},
+            "reward_model": {
+                "optimizer_protocol": {
+                    "schema_version": "deterministic-adamw-lr-decay/v1",
+                    "role": "frozen_post_recovery_phase2_optimizer",
+                    "source_recovery_authorization_sha256": "a" * 64,
+                    "learning_rate_schedule": {
+                        "schedule_sha256": control.OPTIMIZER_SCHEDULE_SHA256,
+                    },
+                }
+            },
+        },
+        design_identity="b" * 64,
+        base_config={},
+    )
+
+
+def _patch_binding_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    bundle: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(
+        control,
+        "verify_recovery_authorization_file",
+        lambda *args, **kwargs: {"authorized_next_action": "full_calibration"},
+    )
+    monkeypatch.setattr(control, "load_phase2_config_bundle", lambda path: bundle)
+    monkeypatch.setattr(
+        control,
+        "validate_post_recovery_authorization_reference",
+        lambda *args, **kwargs: {"artifact_sha256": "a" * 64},
+    )
 
 
 def test_terminal_capture_preserves_exact_raw_bytes_and_verifies(
@@ -329,3 +388,164 @@ def test_real_recovery_authorization_verifier_rejects_byte_tampering(
             output,
             expected_sha256=digest,
         )
+
+
+@pytest.mark.parametrize(
+    ("stage", "pilot_phase", "seeds"),
+    [
+        ("pilot", "calibration", list(control.ORDERED_SEEDS)),
+        (
+            control.PHASE2_BUDGETED_END_TO_END_STAGE,
+            None,
+            list(control.PHASE2_BUDGETED_END_TO_END_SEEDS),
+        ),
+        ("confirmatory", None, list(range(20260901, 20260931))),
+    ],
+)
+def test_recovery_authorization_binding_preserves_stage_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    pilot_phase: str | None,
+    seeds: list[int],
+) -> None:
+    bundle = _binding_bundle(stage=stage, pilot_phase=pilot_phase, seeds=seeds)
+    _patch_binding_dependencies(monkeypatch, bundle)
+
+    binding = control.verify_recovery_authorization_config_binding(
+        "authorization.json",
+        "overlay.yaml",
+        expected_sha256="a" * 64,
+        expected_stage=stage,
+        expected_pilot_phase=pilot_phase,
+    )
+
+    assert binding["stage"] == stage
+    assert binding["pilot_phase"] == pilot_phase
+    assert binding["authorization_sha256"] == "a" * 64
+    assert binding["phase2_design_sha256"] == "b" * 64
+
+
+@pytest.mark.parametrize(
+    ("pilot_phase", "seeds"),
+    [
+        ("freeze", list(control.PHASE2_BUDGETED_END_TO_END_SEEDS)),
+        (None, list(reversed(control.PHASE2_BUDGETED_END_TO_END_SEEDS))),
+        (None, list(control.PHASE2_BUDGETED_END_TO_END_SEEDS[:-1])),
+    ],
+)
+def test_budgeted_recovery_authorization_binding_rejects_wrong_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    pilot_phase: str | None,
+    seeds: list[int],
+) -> None:
+    bundle = _binding_bundle(
+        stage=control.PHASE2_BUDGETED_END_TO_END_STAGE,
+        pilot_phase=pilot_phase,
+        seeds=seeds,
+    )
+    _patch_binding_dependencies(monkeypatch, bundle)
+
+    with pytest.raises(ValueError, match="locked post-recovery design"):
+        control.verify_recovery_authorization_config_binding(
+            "authorization.json",
+            "overlay.yaml",
+            expected_sha256="a" * 64,
+            expected_stage=control.PHASE2_BUDGETED_END_TO_END_STAGE,
+        )
+
+
+def test_recovery_authorization_binding_rejects_unknown_expected_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _binding_bundle(
+        stage="pilot",
+        pilot_phase="calibration",
+        seeds=list(control.ORDERED_SEEDS),
+    )
+    _patch_binding_dependencies(monkeypatch, bundle)
+
+    with pytest.raises(
+        ValueError,
+        match="pilot, budgeted_end_to_end, or confirmatory",
+    ):
+        control.verify_recovery_authorization_config_binding(
+            "authorization.json",
+            "overlay.yaml",
+            expected_sha256="a" * 64,
+            expected_stage="exploratory",
+        )
+
+
+def test_authorization_validator_cli_defaults_to_pilot_and_accepts_budgeted() -> None:
+    cli = _load_authorization_validator_cli()
+
+    default = cli.build_parser().parse_args(
+        ["authorization.json", "overlay.yaml", "--expected-sha256", "a" * 64]
+    )
+    budgeted = cli.build_parser().parse_args(
+        [
+            "authorization.json",
+            "overlay.yaml",
+            "--expected-sha256",
+            "a" * 64,
+            "--expected-stage",
+            "budgeted_end_to_end",
+        ]
+    )
+
+    assert default.expected_stage == "pilot"
+    assert budgeted.expected_stage == "budgeted_end_to_end"
+
+
+def test_authorization_validator_cli_forwards_budgeted_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = _load_authorization_validator_cli()
+    captured: dict[str, object] = {}
+
+    def fake_binding(
+        authorization: Path,
+        overlay: Path,
+        *,
+        expected_sha256: str,
+        expected_stage: str,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "authorization": authorization,
+                "overlay": overlay,
+                "expected_sha256": expected_sha256,
+                "expected_stage": expected_stage,
+            }
+        )
+        return {
+            "authorization": {"authorized_next_action": "full_calibration"},
+            "authorization_sha256": expected_sha256,
+            "phase2_design_sha256": "b" * 64,
+            "base_config_hash": "c" * 64,
+            "optimizer_schedule_sha256": control.OPTIMIZER_SCHEDULE_SHA256,
+        }
+
+    monkeypatch.setattr(cli, "verify_recovery_authorization_config_binding", fake_binding)
+
+    assert (
+        cli.main(
+            [
+                "authorization.json",
+                "overlay.yaml",
+                "--expected-sha256",
+                "a" * 64,
+                "--expected-stage",
+                "budgeted_end_to_end",
+            ]
+        )
+        == 0
+    )
+    assert captured == {
+        "authorization": Path("authorization.json"),
+        "overlay": Path("overlay.yaml"),
+        "expected_sha256": "a" * 64,
+        "expected_stage": "budgeted_end_to_end",
+    }
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"

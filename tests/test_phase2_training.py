@@ -17,6 +17,9 @@ from smart_reward.config import load_config
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.experiment import TrainingTensorData
 from smart_reward.phase2_config import (
+    PHASE2_BUDGETED_END_TO_END_SEEDS,
+    PHASE2_BUDGETED_END_TO_END_STAGE,
+    PHASE2_CONFIRMATORY_SEEDS,
     PHASE2_POST_RECOVERY_CALIBRATION_SCHEMA_VERSION,
     PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
     PHASE2_RECOVERY_PILOT_CONFIG,
@@ -202,6 +205,52 @@ def test_settings_compile_from_overlay_bundle_and_explicit_mapping(config_bundle
     assert from_bundle.convergence.check_interval == 20
     assert from_bundle.convergence.consecutive_checks == 3
     assert len(from_bundle.sha256) == 64
+
+
+def test_budgeted_training_stage_changes_provenance_not_numerical_algorithm(
+    compiled_settings: Phase2TrainingSettings,
+) -> None:
+    budgeted = replace(
+        compiled_settings,
+        phase2_config_hash="e" * 64,
+        stage=PHASE2_BUDGETED_END_TO_END_STAGE,
+        formal_eligibility=False,
+        seeds=PHASE2_BUDGETED_END_TO_END_SEEDS,
+        identifiability_role=("budgeted_end_to_end_exploratory_frozen_identifiability_audit"),
+    )
+
+    assert budgeted.stage == PHASE2_BUDGETED_END_TO_END_STAGE
+    assert budgeted.formal_eligibility is False
+    assert budgeted.seeds == tuple(range(20261001, 20261006))
+    assert budgeted.outer_steps == compiled_settings.outer_steps
+    assert budgeted.learning_rate == compiled_settings.learning_rate
+    assert budgeted.optimizer == compiled_settings.optimizer
+    assert budgeted.weight_decay == compiled_settings.weight_decay
+    assert budgeted.microbatch_size == compiled_settings.microbatch_size
+    assert budgeted.max_grad_norm == compiled_settings.max_grad_norm
+    assert budgeted.training_beta == compiled_settings.training_beta
+    assert budgeted.relative_damping == compiled_settings.relative_damping
+    assert budgeted.pcg_dtype == compiled_settings.pcg_dtype
+    assert budgeted.pcg_max_iterations == compiled_settings.pcg_max_iterations
+    assert budgeted.pcg_tolerance == compiled_settings.pcg_tolerance
+    assert budgeted.convergence == compiled_settings.convergence
+    assert budgeted.num_label_replicates == compiled_settings.num_label_replicates
+    assert budgeted.annotation_gamma == compiled_settings.annotation_gamma
+
+    with pytest.raises(ValueError, match="exact ordered seed list"):
+        replace(budgeted, seeds=tuple(reversed(PHASE2_BUDGETED_END_TO_END_SEEDS)))
+    with pytest.raises(ValueError, match="cannot be formally eligible"):
+        replace(budgeted, formal_eligibility=True)
+    with pytest.raises(ValueError, match="independent exploratory"):
+        replace(budgeted, identifiability_role="confirmatory_frozen_identifiability_contract")
+    with pytest.raises(ValueError, match="exact preregistered"):
+        replace(
+            compiled_settings,
+            stage="confirmatory",
+            formal_eligibility=True,
+            seeds=PHASE2_CONFIRMATORY_SEEDS[:-1],
+            identifiability_role="confirmatory_frozen_identifiability_contract",
+        )
 
 
 def test_recovery_settings_compile_hash_bound_schedule_for_every_controller() -> None:

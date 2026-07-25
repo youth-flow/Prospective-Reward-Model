@@ -11,6 +11,7 @@ import pytest
 import torch
 
 import smart_reward.phase1 as phase1
+import smart_reward.phase2_rollout as phase2_rollout_module
 from smart_reward.config import config_hash
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.data import CandidateNode
@@ -22,10 +23,13 @@ from smart_reward.phase2_heldout import (
     DeferredHeldoutSplit,
 )
 from smart_reward.phase2_rollout import (
+    BUDGETED_COMMON_BETA_RULE,
     CONFIRMATORY_COMMON_BETA_RULE,
     KL_HISTORY_SOURCE,
     KL_ORIENTATION,
     PHASE2_ARM_ORDER,
+    PHASE2_BUDGETED_RESULT_SCHEMA,
+    PHASE2_BUDGETED_ROLLOUT_SCHEMA,
     PHASE2_PILOT_DIAGNOSTIC_SCHEMA,
     PHASE2_PILOT_RESULT_SCHEMA,
     PILOT_FREEZE_COMMON_BETA_RULE,
@@ -406,6 +410,7 @@ class _FakeBackend:
         train_oracle_scale: float = 1.0,
         kl_values_by_arm: dict[str, Sequence[float]] | None = None,
         reached_max_length_by_arm: dict[str, frozenset[int]] | None = None,
+        expected_seed: int = 20260722,
     ) -> None:
         self.events: list[str] = []
         self.deployments: list[Phase2ArmDeployment] = []
@@ -425,6 +430,7 @@ class _FakeBackend:
         self.mismatched_crn = mismatched_crn
         self.heldout_target_scale = heldout_target_scale
         self.train_oracle_scale = train_oracle_scale
+        self.expected_seed = expected_seed
 
     @contextmanager
     def oracle_session(
@@ -453,7 +459,7 @@ class _FakeBackend:
         expected_layout: ParameterLayout,
         expected_chat_template_sha256: str,
     ) -> Iterator[_FakePolicySession]:
-        assert seed == 20260722
+        assert seed == self.expected_seed
         assert expected_a_sha256 == "b" * 64
         assert expected_layout.dimension == 2
         assert expected_chat_template_sha256 == "c" * 64
@@ -481,7 +487,7 @@ class _FakeHeadTrainer:
         seed: int,
     ) -> Phase2HeadTrainingResult:
         assert self.backend.resident is None
-        assert seed == 20260722
+        assert seed == self.backend.expected_seed
         assert train_oracle_rewards.shape == (
             train.num_prompts,
             train.num_candidates,
@@ -547,6 +553,25 @@ def _freeze_design() -> Phase2Design:
         beta_source_aggregate_sha256="a" * 64,
         parent_pilot_aggregate_sha256="a" * 64,
         k_cal_sensitivity_values=None,
+    )
+
+
+def _budgeted_design() -> Phase2Design:
+    return replace(
+        Phase2Design(),
+        stage="budgeted_end_to_end",
+        formal_eligibility=False,
+        pilot_phase=None,
+        common_beta_rule=BUDGETED_COMMON_BETA_RULE,
+        common_beta_calibration_split="excluded_pilot",
+        common_beta_source=("accepted_freeze_global_beta_in_budgeted_end_to_end_design_identity"),
+        frozen_global_beta=2.5,
+        beta_source_aggregate_sha256="f" * 64,
+        parent_pilot_aggregate_sha256="f" * 64,
+        k_cal_sensitivity_values=None,
+        frozen_global_beta_sensitivity_multipliers=None,
+        max_length_formal_gate=False,
+        max_length_formal_threshold=0.05,
     )
 
 
@@ -1166,6 +1191,200 @@ def test_heldout_targets_cannot_change_heads_beta_or_policy_deployments(
     assert backend_b.events.index("oracle_score:heldout") > backend_b.events.index(
         "rollout:oracle_step"
     )
+
+
+def test_budgeted_end_to_end_reuses_confirmatory_numerical_event_sequence_but_not_claim_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budgeted_dir = tmp_path / "budgeted"
+    confirmatory_dir = tmp_path / "confirmatory"
+    budgeted_dir.mkdir()
+    confirmatory_dir.mkdir()
+    budgeted_inputs = replace(_inputs(budgeted_dir), seed=20261001)
+    confirmatory_inputs = _inputs(confirmatory_dir)
+    budgeted_backend = _FakeBackend(expected_seed=20261001)
+    confirmatory_backend = _FakeBackend()
+    stage_traces: dict[str, list[str]] = {
+        "budgeted_end_to_end": [],
+        "confirmatory": [],
+    }
+
+    def traced(name: str, function: object) -> object:
+        def wrapper(*args: object, **kwargs: object) -> object:
+            design = kwargs["design"]
+            assert isinstance(design, Phase2Design)
+            stage_traces[design.stage].append(name)
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    for name in (
+        "_freeze_heldout_evaluation_state",
+        "_rollout_policy_arms",
+        "assess_phase2_pre_oracle_safety",
+        "_score_final_rollouts",
+    ):
+        original = getattr(phase2_rollout_module, name)
+        monkeypatch.setattr(phase2_rollout_module, name, traced(name, original))
+
+    budgeted = run_common_beta_rollouts(
+        budgeted_inputs,
+        _FakeHeadTrainer(budgeted_backend),
+        budgeted_backend,
+        output_json=budgeted_dir / "result.json",
+        design=_budgeted_design(),
+    )
+    confirmatory = run_common_beta_rollouts(
+        confirmatory_inputs,
+        _FakeHeadTrainer(confirmatory_backend),
+        confirmatory_backend,
+        output_json=confirmatory_dir / "result.json",
+        design=_confirmatory_design(),
+    )
+
+    assert (
+        budgeted_backend.events
+        == confirmatory_backend.events
+        == [
+            "oracle_open:train",
+            "oracle_score:train",
+            "oracle_close:train",
+            "train_heads:r4",
+            "policy_open",
+            "rollout:zero_b",
+            f"rollout:{BT_MLE}",
+            f"rollout:{PRORM_PLUS}",
+            "rollout:oracle_step",
+            "policy_close",
+            "oracle_open:test",
+            "oracle_score:test",
+            "oracle_score:heldout",
+            "oracle_close:test",
+        ]
+    )
+    expected_trace = [
+        "_freeze_heldout_evaluation_state",
+        "_rollout_policy_arms",
+        "assess_phase2_pre_oracle_safety",
+        "_score_final_rollouts",
+    ]
+    assert stage_traces["budgeted_end_to_end"] == expected_trace
+    assert stage_traces["confirmatory"] == expected_trace
+    assert budgeted["schema_version"] == PHASE2_BUDGETED_RESULT_SCHEMA
+    assert confirmatory["schema_version"] != PHASE2_BUDGETED_RESULT_SCHEMA
+    assert budgeted["design_stage"] == "budgeted_end_to_end"
+    assert budgeted["formal_eligibility"] is False
+    assert budgeted["formal_claim_eligible"] is False
+    assert budgeted["supports_formal_claim"] is False
+    assert budgeted["per_seed_supports_formal_claim"] is False
+    assert budgeted["excluded_from_confirmatory_evidence"] is True
+    assert budgeted["confirmatory_authorization_created"] is False
+    assert budgeted["numerical_event_sequence_matches_confirmatory"] is True
+    assert "common_beta_calibration" not in budgeted
+    beta_evidence = budgeted["common_beta_frozen_evidence"]
+    assert beta_evidence["schema_version"] == "common-beta-frozen-global-budgeted/v1"
+    assert beta_evidence["beta_common"] == 2.5
+    assert beta_evidence["frozen_global_beta"] == 2.5
+    assert beta_evidence["accepted_freeze_beta_reused_without_recalibration"] is True
+    assert beta_evidence["beta_selected_from_current_seed_curvature"] is False
+    assert beta_evidence["current_seed_can_change_beta"] is False
+    assert budgeted["phase2_runtime_contract"]["sensitivity_scope"] == {
+        "pilot_k_cal_candidates": None,
+        "frozen_global_beta_multipliers": None,
+        "sensitivity_step_rule": ("deploy_config_frozen_beta_without_seed_curvature_calibration"),
+        "ridge_multipliers_configured": [0.1, 1.0, 10.0],
+        "executed_by_this_runner_invocation": False,
+        "result_role": "budgeted_end_to_end_exploratory_primary",
+    }
+
+    gate = budgeted["pre_oracle_safety_gate"]
+    assert gate["schema_version"] == "phase2-pre-oracle-safety-gate/v2"
+    assert gate["measure_only"] is False
+    assert gate["formal_gate"] is False
+    assert gate["enforced_before_final_oracle"] is True
+    assert gate["supports_formal_claim"] is False
+    assert gate["passed"] is True
+    assert budgeted["arms"][PRORM_PLUS]["on_policy_kl_tail"]["formal_gate_applied"] is False
+
+    heldout = budgeted["heldout_fixed_beta"]
+    assert heldout["schema_version"] == "phase2-heldout-fixed-beta/v2"
+    assert heldout["formal_claim_eligible"] is False
+    for split_name in ("validation", "test"):
+        split = heldout["splits"][split_name]
+        assert set(split["preference_fit"]) == {BT_MLE, PRORM_PLUS}
+        for learner in (BT_MLE, PRORM_PLUS):
+            assert set(split["preference_fit"][learner]) == {
+                "oracle_pairwise_cross_entropy",
+                "oracle_probability_mae",
+                "pairwise_order_accuracy",
+            }
+        assert split["heldout_pcg_evidence"]["all_solves_converged"] is True
+        assert split["heldout_pcg_evidence"]["all_solves_cold_start"] is True
+    assert confirmatory["heldout_fixed_beta"]["schema_version"] == ("phase2-heldout-fixed-beta/v1")
+    assert "preference_fit" not in confirmatory["heldout_fixed_beta"]["splits"]["test"]
+
+    rollout_rows = [
+        json.loads(line)
+        for line in (budgeted_dir / "result.rollouts.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert rollout_rows
+    assert all(row["schema_version"] == PHASE2_BUDGETED_ROLLOUT_SCHEMA for row in rollout_rows)
+    assert all(row["formal_claim_eligible"] is False for row in rollout_rows)
+    assert all(row["supports_formal_claim"] is False for row in rollout_rows)
+
+
+def test_budgeted_end_to_end_safety_is_nonformal_but_fail_closed_before_oracle(
+    tmp_path: Path,
+) -> None:
+    inputs = replace(_inputs(tmp_path), seed=20261001)
+    backend = _FakeBackend(
+        expected_seed=20261001,
+        kl_by_arm={
+            "zero_b": 0.0,
+            BT_MLE: 0.001,
+            PRORM_PLUS: 0.021,
+            "oracle_step": 0.003,
+        },
+    )
+    destination = tmp_path / "unsafe-budgeted.json"
+
+    with pytest.raises(Phase2PreOracleSafetyError) as error:
+        run_common_beta_rollouts(
+            inputs,
+            _FakeHeadTrainer(backend),
+            backend,
+            output_json=destination,
+            design=_budgeted_design(),
+        )
+
+    serialized_gate = error.value.pre_oracle_safety.to_dict()
+    assert serialized_gate["measure_only"] is False
+    assert serialized_gate["formal_gate"] is False
+    assert serialized_gate["enforced_before_final_oracle"] is True
+    assert serialized_gate["supports_formal_claim"] is False
+    assert serialized_gate["passed"] is False
+    assert backend.oracle_session_count == 1
+    assert "oracle_open:test" not in backend.events
+    assert not destination.exists()
+    assert not (tmp_path / "unsafe-budgeted.rollouts.jsonl").exists()
+
+
+def test_budgeted_end_to_end_rejects_nonfixed_seed_before_backend_access(
+    tmp_path: Path,
+) -> None:
+    backend = _FakeBackend()
+    with pytest.raises(ValueError, match="fixed exploratory seed list"):
+        run_common_beta_rollouts(
+            _inputs(tmp_path),
+            _FakeHeadTrainer(backend),
+            backend,
+            output_json=tmp_path / "wrong-budgeted-seed.json",
+            design=_budgeted_design(),
+        )
+    assert backend.events == []
 
 
 def test_confirmatory_seed_curvature_cannot_change_the_frozen_global_beta(

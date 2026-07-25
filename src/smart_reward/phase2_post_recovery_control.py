@@ -23,6 +23,8 @@ from pathlib import Path, PurePosixPath
 
 from .config import config_hash
 from .phase2_config import (
+    PHASE2_BUDGETED_END_TO_END_SEEDS,
+    PHASE2_BUDGETED_END_TO_END_STAGE,
     PHASE2_POST_RECOVERY_SCHEMA_VERSION,
     load_phase2_config_bundle,
     validate_post_recovery_authorization_reference,
@@ -909,15 +911,24 @@ def verify_recovery_authorization_config_binding(
     design = design_value
     stage = design.get("stage")
     pilot_phase = design.get("pilot_phase")
-    if expected_stage not in {"pilot", "confirmatory"}:
-        raise ValueError("expected_stage must be pilot or confirmatory")
+    if expected_stage not in {
+        "pilot",
+        PHASE2_BUDGETED_END_TO_END_STAGE,
+        "confirmatory",
+    }:
+        raise ValueError("expected_stage must be pilot, budgeted_end_to_end, or confirmatory")
     if (
         config["schema_version"] != POST_RECOVERY_CONFIG_SCHEMA
         or stage != expected_stage
         or (expected_stage == "pilot" and pilot_phase not in POST_RECOVERY_PILOT_PHASES)
+        or (expected_stage == PHASE2_BUDGETED_END_TO_END_STAGE and pilot_phase is not None)
         or (expected_stage == "confirmatory" and pilot_phase is not None)
         or "post-recovery" not in str(design.get("name", "")).lower()
         or (expected_stage == "pilot" and tuple(config["run"]["seeds"]) != ORDERED_SEEDS)
+        or (
+            expected_stage == PHASE2_BUDGETED_END_TO_END_STAGE
+            and tuple(config["run"]["seeds"]) != PHASE2_BUDGETED_END_TO_END_SEEDS
+        )
         or (expected_pilot_phase is not None and pilot_phase != expected_pilot_phase)
     ):
         raise ValueError("overlay is not the expected locked post-recovery design")

@@ -48,6 +48,9 @@ from .objective import (
 )
 from .optimization_audit import evaluate_saved_head_optimization
 from .phase2_config import (
+    PHASE1_MAIN_SEEDS,
+    PHASE2_BUDGETED_END_TO_END_SEEDS,
+    PHASE2_BUDGETED_END_TO_END_STAGE,
     PHASE2_CONFIRMATORY_EXCLUDED_SEEDS,
     PHASE2_CONFIRMATORY_SEEDS,
     PHASE2_PILOT_SEEDS,
@@ -473,7 +476,7 @@ class Phase2TrainingSettings:
 
     phase2_config_hash: str
     source_config_hash: str
-    stage: Literal["pilot", "confirmatory"]
+    stage: Literal["pilot", "budgeted_end_to_end", "confirmatory"]
     formal_eligibility: bool
     seeds: tuple[int, ...]
     outer_steps: int
@@ -514,8 +517,12 @@ class Phase2TrainingSettings:
     def __post_init__(self) -> None:
         _validate_digest(self.phase2_config_hash, name="phase2_config_hash")
         _validate_digest(self.source_config_hash, name="source_config_hash")
-        if self.stage not in {"pilot", "confirmatory"}:
-            raise ValueError("stage must be 'pilot' or 'confirmatory'")
+        if self.stage not in {
+            "pilot",
+            PHASE2_BUDGETED_END_TO_END_STAGE,
+            "confirmatory",
+        }:
+            raise ValueError("stage must be 'pilot', 'budgeted_end_to_end', or 'confirmatory'")
         if not isinstance(self.formal_eligibility, bool):
             raise TypeError("formal_eligibility must be bool")
         if not isinstance(self.seeds, tuple) or len(set(self.seeds)) != len(self.seeds):
@@ -529,7 +536,26 @@ class Phase2TrainingSettings:
                 )
             if self.formal_eligibility:
                 raise ValueError("pilot training settings cannot be formally eligible")
-        else:
+        elif self.stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+            if self.seeds != PHASE2_BUDGETED_END_TO_END_SEEDS:
+                raise ValueError(
+                    "budgeted_end_to_end training settings require the exact ordered "
+                    f"seed list {list(PHASE2_BUDGETED_END_TO_END_SEEDS)!r}"
+                )
+            disallowed = (
+                PHASE1_MAIN_SEEDS | PHASE2_PILOT_SEEDS | frozenset(PHASE2_CONFIRMATORY_SEEDS)
+            )
+            overlap = set(self.seeds).intersection(disallowed)
+            if overlap:
+                raise ValueError(
+                    "budgeted_end_to_end seeds overlap Phase-1, pilot, or "
+                    f"confirmatory seeds: {sorted(overlap)!r}"
+                )
+            if self.formal_eligibility:
+                raise ValueError(
+                    "budgeted_end_to_end training settings cannot be formally eligible"
+                )
+        elif self.stage == "confirmatory":
             if self.seeds != PHASE2_CONFIRMATORY_SEEDS:
                 raise ValueError(
                     "confirmatory training settings require the exact preregistered "
@@ -662,6 +688,24 @@ class Phase2TrainingSettings:
                 raise ValueError("pilot rank evidence must be measure-only")
             if self.identifiability_require_full_column_rank:
                 raise ValueError("pilot rank evidence cannot be a full-rank acceptance gate")
+        elif self.stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+            if (
+                self.identifiability_role
+                != "budgeted_end_to_end_exploratory_frozen_identifiability_audit"
+            ):
+                raise ValueError(
+                    "budgeted_end_to_end rank evidence must use its independent "
+                    "exploratory measure-only role"
+                )
+            if self.identifiability_require_full_column_rank:
+                raise ValueError(
+                    "budgeted_end_to_end rank evidence cannot be a formal full-rank acceptance gate"
+                )
+        elif self.stage == "confirmatory":
+            if self.identifiability_role != ("confirmatory_frozen_identifiability_contract"):
+                raise ValueError(
+                    "confirmatory rank evidence must use the frozen identifiability contract"
+                )
 
     def to_dict(self) -> dict[str, object]:
         return {

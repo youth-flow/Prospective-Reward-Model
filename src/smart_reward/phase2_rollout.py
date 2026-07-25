@@ -7,7 +7,8 @@ Instead it implements the prospective-reward estimand literally:
 1. rescore only the saved training candidates with the pinned oracle chat
    template and the frozen Phase-1 robust transform;
 2. form the train-oracle natural direction, deriving a per-seed beta candidate
-   only in the pilot while confirmatory runs bind the pre-frozen global beta;
+   only in pilot calibration while fixed-beta E2E runs bind the accepted
+   pre-frozen global beta;
 3. deploy zero-B, BT-MLE, ProRM+, and the train-oracle direction without any
    learner-specific normalization;
 4. estimate per-sequence ``KL(pi_updated || pi_0)`` on each updated policy's
@@ -61,7 +62,14 @@ from .phase1_rollout import (
     _stage_json,
     _stage_jsonl,
 )
+from .phase2_config import (
+    PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE,
+    PHASE2_BUDGETED_END_TO_END_SEEDS,
+    PHASE2_BUDGETED_END_TO_END_STAGE,
+)
 from .phase2_heldout import (
+    PHASE2_HELDOUT_SCHEMA,
+    PHASE2_HELDOUT_SCHEMA_V2,
     DeferredHeldoutInputs,
     FrozenHeldoutEvaluationState,
     heldout_evaluation_sha256,
@@ -79,6 +87,8 @@ from .seeding import SeedBundle
 
 PHASE2_RESULT_SCHEMA = "common-beta-finite-policy/v2"
 PHASE2_ROLLOUT_SCHEMA = "common-beta-trajectory/v2"
+PHASE2_BUDGETED_RESULT_SCHEMA = "common-beta-budgeted-end-to-end/v1"
+PHASE2_BUDGETED_ROLLOUT_SCHEMA = "common-beta-budgeted-trajectory/v1"
 PHASE2_PILOT_RESULT_SCHEMA = "common-beta-pilot-diagnostics/v2"
 PHASE2_PILOT_DIAGNOSTIC_SCHEMA = "common-beta-pilot-diagnostic-row/v2"
 PHASE2_DESIGN_SCHEMA = "common-beta-design/v4"
@@ -90,6 +100,7 @@ PILOT_COMMON_BETA_RULE = (
 )
 PILOT_FREEZE_COMMON_BETA_RULE = "pilot_fixed_global_beta_target_free_safety_rehearsal"
 CONFIRMATORY_COMMON_BETA_RULE = "single_pilot_frozen_global_beta_scalar"
+BUDGETED_COMMON_BETA_RULE = "single_accepted_freeze_global_beta_scalar"
 MEAN_POLICY_TO_REFERENCE_KL_CAP = 0.02
 PROMPT_MEAN_P95_KL_CAP = 0.02
 PROMPT_MEAN_P99_KL_CAP = 0.05
@@ -154,7 +165,7 @@ def _tensor_sha256(value: torch.Tensor) -> str:
 class Phase2Design:
     """Frozen Phase-2 choices, independent of the source artifact config."""
 
-    stage: Literal["pilot", "confirmatory"] = "pilot"
+    stage: Literal["pilot", "budgeted_end_to_end", "confirmatory"] = "pilot"
     formal_eligibility: bool = False
     pilot_phase: Literal["calibration", "freeze"] | None = "calibration"
     common_beta_rule: str = PILOT_COMMON_BETA_RULE
@@ -187,19 +198,25 @@ class Phase2Design:
     max_length_formal_threshold: float = REACHED_MAX_LENGTH_RATE_CAP
 
     def __post_init__(self) -> None:
-        if self.stage not in {"pilot", "confirmatory"}:
-            raise ValueError("stage must be 'pilot' or 'confirmatory'")
+        if self.stage not in {
+            "pilot",
+            PHASE2_BUDGETED_END_TO_END_STAGE,
+            "confirmatory",
+        }:
+            raise ValueError("stage must be 'pilot', 'budgeted_end_to_end', or 'confirmatory'")
         if not isinstance(self.formal_eligibility, bool):
             raise TypeError("formal_eligibility must be bool")
         if self.stage == "pilot" and self.formal_eligibility:
             raise ValueError("a pilot runtime cannot be formally eligible")
+        if self.stage == PHASE2_BUDGETED_END_TO_END_STAGE and self.formal_eligibility:
+            raise ValueError("a budgeted_end_to_end runtime cannot be formally eligible")
         if self.stage == "confirmatory" and not self.formal_eligibility:
             raise ValueError("a confirmatory runtime must be formally eligible")
         if self.stage == "pilot":
             if self.pilot_phase not in {"calibration", "freeze"}:
                 raise ValueError("pilot pilot_phase must be 'calibration' or 'freeze'")
         elif self.pilot_phase is not None:
-            raise ValueError("confirmatory pilot_phase must be None")
+            raise ValueError("non-pilot pilot_phase must be None")
         if self.pilot_phase == "calibration":
             expected_common_beta_rule = PILOT_COMMON_BETA_RULE
             expected_calibration_split = "train"
@@ -209,6 +226,12 @@ class Phase2Design:
             expected_calibration_split = "excluded_pilot_calibration"
             expected_common_beta_source = (
                 "frozen_calibration_aggregate_candidate_in_pilot_freeze_design_identity"
+            )
+        elif self.stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+            expected_common_beta_rule = BUDGETED_COMMON_BETA_RULE
+            expected_calibration_split = "excluded_pilot"
+            expected_common_beta_source = (
+                "accepted_freeze_global_beta_in_budgeted_end_to_end_design_identity"
             )
         else:
             expected_common_beta_rule = CONFIRMATORY_COMMON_BETA_RULE
@@ -317,7 +340,7 @@ class Phase2Design:
             self.parent_pilot_aggregate_sha256 != self.beta_source_aggregate_sha256
         ):
             raise ValueError(
-                "confirmatory designs must bind the accepted freeze aggregate as "
+                "fixed-beta end-to-end designs must bind the accepted freeze aggregate as "
                 "both horizon parent and beta source"
             )
         _positive_integer(
@@ -340,6 +363,13 @@ class Phase2Design:
                 raise ValueError("pilot freeze K_cal sensitivities must be None")
             if self.frozen_global_beta_sensitivity_multipliers is not None:
                 raise ValueError("pilot freeze frozen-global-beta sensitivities must be None")
+        elif self.stage == PHASE2_BUDGETED_END_TO_END_STAGE:
+            if self.k_cal_sensitivity_values is not None:
+                raise ValueError("budgeted_end_to_end K_cal sensitivities must be None")
+            if self.frozen_global_beta_sensitivity_multipliers is not None:
+                raise ValueError(
+                    "budgeted_end_to_end frozen-global-beta sensitivities must be None"
+                )
         else:
             if self.k_cal_sensitivity_values is not None:
                 raise ValueError("confirmatory K_cal sensitivities must be None")
@@ -360,9 +390,9 @@ class Phase2Design:
                 "max_length_formal_threshold must equal the preregistered threshold "
                 f"{REACHED_MAX_LENGTH_RATE_CAP}"
             )
-        if self.stage == "pilot":
+        if self.stage != "confirmatory":
             if self.max_length_formal_gate:
-                raise ValueError("pilot max-length evidence must be measure-only")
+                raise ValueError("non-confirmatory max-length evidence cannot be formal")
         else:
             if not self.max_length_formal_gate:
                 raise ValueError("confirmatory runtime must enforce a max-length gate")
@@ -417,7 +447,10 @@ class Phase2Design:
                     if self.pilot_phase == "calibration"
                     else (
                         "deploy_config_frozen_beta_without_seed_curvature_calibration"
-                        if self.pilot_phase == "freeze"
+                        if (
+                            self.pilot_phase == "freeze"
+                            or self.stage == PHASE2_BUDGETED_END_TO_END_STAGE
+                        )
                         else (
                             "multiply_config_frozen_global_beta_without_seed_curvature_calibration"
                         )
@@ -425,7 +458,11 @@ class Phase2Design:
                 ),
                 "ridge_multipliers_configured": list(self.ridge_sensitivity_multipliers),
                 "executed_by_this_runner_invocation": False,
-                "result_role": "primary_only",
+                "result_role": (
+                    "budgeted_end_to_end_exploratory_primary"
+                    if self.stage == PHASE2_BUDGETED_END_TO_END_STAGE
+                    else "primary_only"
+                ),
             },
             "arm_order": list(PHASE2_ARM_ORDER),
             "kl_orientation": KL_ORIENTATION,
@@ -1101,7 +1138,7 @@ class Phase2RuntimeBackend(Protocol):
 
 
 class Phase2KLSafetyError(RuntimeError):
-    """Raised before final oracle scoring when a confirmatory update exceeds the cap."""
+    """Raised before final oracle scoring when an enforced update exceeds the cap."""
 
     def __init__(self, safety: MeasuredKLSafety) -> None:
         self.safety = safety
@@ -1115,7 +1152,7 @@ class Phase2KLSafetyError(RuntimeError):
 class Phase2PreOracleSafetyGate:
     """Outcome-blind finite-policy gate evaluated before any final oracle."""
 
-    design_stage: Literal["pilot", "confirmatory"]
+    design_stage: Literal["pilot", "budgeted_end_to_end", "confirmatory"]
     pilot_phase: Literal["calibration", "freeze"] | None
     mean_kl_safety: MeasuredKLSafety
     thresholds: tuple[tuple[str, float], ...]
@@ -1130,8 +1167,13 @@ class Phase2PreOracleSafetyGate:
         return not self.violations
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": "phase2-pre-oracle-safety-gate/v1",
+        budgeted = self.design_stage == PHASE2_BUDGETED_END_TO_END_STAGE
+        result = {
+            "schema_version": (
+                "phase2-pre-oracle-safety-gate/v2"
+                if budgeted
+                else "phase2-pre-oracle-safety-gate/v1"
+            ),
             "design_stage": self.design_stage,
             "pilot_phase": self.pilot_phase,
             "measure_only": self.design_stage == "pilot",
@@ -1149,10 +1191,15 @@ class Phase2PreOracleSafetyGate:
                 else "fail_before_final_oracle_and_heldout"
             ),
         }
+        if budgeted:
+            result["enforced_before_final_oracle"] = True
+            result["supports_formal_claim"] = False
+            result["evidence_role"] = PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE
+        return result
 
 
 class Phase2PreOracleSafetyError(Phase2KLSafetyError):
-    """Fail a confirmatory seed before revealing any final-oracle outcome."""
+    """Fail an enforced E2E seed before revealing any final-oracle outcome."""
 
     def __init__(self, gate: Phase2PreOracleSafetyGate) -> None:
         self.pre_oracle_safety = gate
@@ -1583,6 +1630,11 @@ def _score_final_rollouts(
             pcg_dtype=design.pcg_dtype,
             pcg_max_iterations=design.pcg_max_iterations,
             pcg_tolerance=design.pcg_tolerance,
+            result_schema_version=(
+                PHASE2_HELDOUT_SCHEMA_V2
+                if design.stage == PHASE2_BUDGETED_END_TO_END_STAGE
+                else PHASE2_HELDOUT_SCHEMA
+            ),
         )
     per_arm = len(inputs.test_prompts) * design.rollout_candidates_per_prompt
     per_arm_rewards = {
@@ -2028,20 +2080,28 @@ def _assemble_pilot_outputs(
     return records, payload
 
 
-def _confirmatory_common_beta_evidence(
+def _frozen_common_beta_evidence(
     calibration: CommonBetaCalibration,
     design: Phase2Design,
 ) -> dict[str, object]:
-    """Serialize proof that a confirmatory seed used the config-frozen beta."""
+    """Serialize proof that an E2E seed bound rather than recalibrated beta."""
 
-    if design.stage != "confirmatory" or not design.formal_eligibility:
-        raise ValueError("frozen-global-beta evidence requires a confirmatory design")
+    if design.stage not in {
+        PHASE2_BUDGETED_END_TO_END_STAGE,
+        "confirmatory",
+    }:
+        raise ValueError("frozen-global-beta evidence requires an end-to-end design")
+    if design.formal_eligibility is not (design.stage == "confirmatory"):
+        raise ValueError("end-to-end formal eligibility does not match its design stage")
     beta = _positive_float(calibration.beta_common, name="calibration.beta_common")
     frozen = _positive_float(design.frozen_global_beta, name="design.frozen_global_beta")
     if beta != frozen:
-        raise RuntimeError("confirmatory deployment beta differs from the frozen design scalar")
-    return {
-        "schema_version": "common-beta-frozen-global/v1",
+        raise RuntimeError("end-to-end deployment beta differs from the frozen design scalar")
+    budgeted = design.stage == PHASE2_BUDGETED_END_TO_END_STAGE
+    result = {
+        "schema_version": (
+            "common-beta-frozen-global-budgeted/v1" if budgeted else "common-beta-frozen-global/v1"
+        ),
         "rule": design.common_beta_rule,
         "beta_selection_split": design.common_beta_calibration_split,
         "beta_source": design.common_beta_source,
@@ -2058,6 +2118,17 @@ def _confirmatory_common_beta_evidence(
         "learner_specific_rescaling": False,
         "post_evaluation_retuning": False,
     }
+    if budgeted:
+        result.update(
+            {
+                "evidence_role": PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE,
+                "formal_eligibility": False,
+                "supports_formal_claim": False,
+                "accepted_freeze_beta_reused_without_recalibration": True,
+                "current_seed_can_change_beta": False,
+            }
+        )
+    return result
 
 
 def _assemble_outputs(
@@ -2078,8 +2149,14 @@ def _assemble_outputs(
     pre_oracle_safety: Phase2PreOracleSafetyGate,
     current_process_identity: Mapping[str, object],
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    if design.stage != "confirmatory" or not design.formal_eligibility:
-        raise ValueError("finite-policy endpoint outputs require a confirmatory design")
+    if design.stage not in {
+        PHASE2_BUDGETED_END_TO_END_STAGE,
+        "confirmatory",
+    }:
+        raise ValueError("finite-policy endpoint outputs require an end-to-end design")
+    budgeted = design.stage == PHASE2_BUDGETED_END_TO_END_STAGE
+    if design.formal_eligibility is not (not budgeted):
+        raise ValueError("end-to-end output formal eligibility does not match its stage")
     rows = len(inputs.test_prompts)
     columns = design.rollout_candidates_per_prompt
     shape = (rows, columns)
@@ -2128,7 +2205,7 @@ def _assemble_outputs(
             "mean_on_policy_kl_pi_updated_to_pi0": float(arm_kl.mean().item()),
             "on_policy_kl_tail": _kl_tail_summary(
                 arm_kl,
-                formal_gate_applied=True,
+                formal_gate_applied=not budgeted,
             ),
             "utility": utility.to_dict(),
         }
@@ -2138,20 +2215,29 @@ def _assemble_outputs(
             arm_rewards.reshape(-1).tolist(),
             strict=True,
         ):
-            output_records.append(
-                {
-                    **trajectory.to_unscored_dict(beta_common=calibration.beta_common),
-                    "kl_orientation": KL_ORIENTATION,
-                    "kl_history_source": KL_HISTORY_SOURCE,
-                    "on_policy_kl_pi_updated_to_pi0": float(kl_value),
-                    "transformed_oracle_reward": float(reward_value),
-                    "target_utility": float(reward_value - calibration.beta_common * kl_value),
-                    "raw_oracle_logit_serialized": False,
-                }
-            )
+            record = {
+                **trajectory.to_unscored_dict(beta_common=calibration.beta_common),
+                "kl_orientation": KL_ORIENTATION,
+                "kl_history_source": KL_HISTORY_SOURCE,
+                "on_policy_kl_pi_updated_to_pi0": float(kl_value),
+                "transformed_oracle_reward": float(reward_value),
+                "target_utility": float(reward_value - calibration.beta_common * kl_value),
+                "raw_oracle_logit_serialized": False,
+            }
+            if budgeted:
+                record.update(
+                    {
+                        "schema_version": PHASE2_BUDGETED_ROLLOUT_SCHEMA,
+                        "design_stage": PHASE2_BUDGETED_END_TO_END_STAGE,
+                        "evidence_role": PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE,
+                        "formal_claim_eligible": False,
+                        "supports_formal_claim": False,
+                    }
+                )
+            output_records.append(record)
 
     payload: dict[str, object] = {
-        "schema_version": PHASE2_RESULT_SCHEMA,
+        "schema_version": (PHASE2_BUDGETED_RESULT_SCHEMA if budgeted else PHASE2_RESULT_SCHEMA),
         "design_stage": design.stage,
         "formal_eligibility": design.formal_eligibility,
         "per_seed_supports_formal_claim": False,
@@ -2189,10 +2275,6 @@ def _assemble_outputs(
             "old_phase1_comparison_heads_reused": False,
             "test_data_accessed": False,
         },
-        "common_beta_calibration": _confirmatory_common_beta_evidence(
-            calibration,
-            design,
-        ),
         "train_oracle_direction": directions["oracle_step"].to_dict(),
         "measured_kl_safety": safety.to_dict(),
         "pre_oracle_safety_gate": pre_oracle_safety.to_dict(),
@@ -2228,6 +2310,28 @@ def _assemble_outputs(
         "learner_specific_line_search": False,
         "rollouts_sha256": None,
     }
+    frozen_beta_evidence = _frozen_common_beta_evidence(calibration, design)
+    if budgeted:
+        payload.update(
+            {
+                "evidence_role": PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE,
+                "formal_claim_eligible": False,
+                "supports_formal_claim": False,
+                "excluded_from_confirmatory_evidence": True,
+                "confirmatory_authorization_created": False,
+                "common_beta_frozen_evidence": frozen_beta_evidence,
+                "numerical_event_sequence": [
+                    "freeze_heldout_evaluation_state",
+                    "policy_rollouts_and_on_policy_kl",
+                    "enforced_nonformal_pre_oracle_safety",
+                    "final_operational_oracle_rollout_scoring",
+                    "deferred_heldout_oracle_scoring_and_metrics",
+                ],
+                "numerical_event_sequence_matches_confirmatory": True,
+            }
+        )
+    else:
+        payload["common_beta_calibration"] = frozen_beta_evidence
     return output_records, payload
 
 
@@ -2249,6 +2353,11 @@ def run_common_beta_rollouts(
         raise TypeError("design must be Phase2Design")
     if design.rollout_candidates_per_prompt != inputs.train.num_candidates:
         raise ValueError("Phase-2 rollout candidate count must match the source candidate geometry")
+    if (
+        design.stage == PHASE2_BUDGETED_END_TO_END_STAGE
+        and inputs.seed not in PHASE2_BUDGETED_END_TO_END_SEEDS
+    ):
+        raise ValueError("budgeted_end_to_end seed must belong to the fixed exploratory seed list")
 
     destination = Path(output_json)
     sidecar_path = destination.with_name(
@@ -2314,7 +2423,7 @@ def run_common_beta_rollouts(
             deployments,
             design=design,
         )
-        if design.stage == "confirmatory"
+        if design.stage != "pilot"
         else None
     )
     rollouts, safety = _rollout_policy_arms(
@@ -2329,7 +2438,7 @@ def run_common_beta_rollouts(
     )
     if safety.to_dict() != pre_oracle_safety.mean_kl_safety.to_dict():
         raise RuntimeError("mean-KL safety changed during unified pre-oracle assessment")
-    if design.stage == "confirmatory" and not pre_oracle_safety.passed:
+    if design.stage != "pilot" and not pre_oracle_safety.passed:
         raise Phase2PreOracleSafetyError(pre_oracle_safety)
     if design.stage == "pilot":
         records, payload = _assemble_pilot_outputs(
@@ -2349,9 +2458,9 @@ def run_common_beta_rollouts(
         sidecar_hash_field = "diagnostics_sha256"
     else:
         if frozen_heldout_state is None:
-            raise RuntimeError("confirmatory run did not freeze held-out evaluation state")
+            raise RuntimeError("end-to-end run did not freeze held-out evaluation state")
         # Fail-closed KL safety is evaluated above.  The held-out oracle is
-        # loaded only for a frozen, safe confirmatory set of trajectories.
+        # loaded only for a frozen, safe end-to-end set of trajectories.
         inputs.heldout.verify_integrity()
         final_rewards, heldout = _score_final_rollouts(
             inputs,
@@ -2406,10 +2515,13 @@ def run_common_beta_rollouts(
 
 
 __all__ = [
+    "BUDGETED_COMMON_BETA_RULE",
     "CONFIRMATORY_COMMON_BETA_RULE",
     "KL_HISTORY_SOURCE",
     "KL_ORIENTATION",
     "PHASE2_ARM_ORDER",
+    "PHASE2_BUDGETED_RESULT_SCHEMA",
+    "PHASE2_BUDGETED_ROLLOUT_SCHEMA",
     "PHASE2_DESIGN_SCHEMA",
     "PHASE2_PILOT_DIAGNOSTIC_SCHEMA",
     "PHASE2_PILOT_RESULT_SCHEMA",

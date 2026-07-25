@@ -18,6 +18,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("authorization", type=Path)
     parser.add_argument("overlay", type=Path)
     parser.add_argument("--expected-sha256", required=True)
+    parser.add_argument(
+        "--expected-stage",
+        choices=("pilot", "budgeted_end_to_end", "confirmatory"),
+        default="pilot",
+    )
     return parser
 
 
@@ -27,6 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments.authorization,
         arguments.overlay,
         expected_sha256=arguments.expected_sha256,
+        expected_stage=arguments.expected_stage,
     )
     print(
         json.dumps(

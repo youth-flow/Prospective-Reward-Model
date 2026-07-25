@@ -28,15 +28,18 @@ from numbers import Real
 from typing import Protocol
 
 import torch
+import torch.nn.functional as F
 
 from .contracts import BT_MLE, CANONICAL_LEARNERS, PRORM_PLUS
 from .data import CandidateNode
 from .experiment import EvaluationTensorData
-from .linear import FisherSolveDType, resolve_fisher_solve_dtype
-from .metrics import local_regret, natural_direction_metrics
+from .linear import DampedEmpiricalFisher, FisherSolveDType, resolve_fisher_solve_dtype
+from .metrics import local_regret, natural_direction_metrics, policy_reward_moment
 from .oracle import RobustOracleTransform
+from .pcg import PCGResult, pcg
 
 PHASE2_HELDOUT_SCHEMA = "phase2-heldout-fixed-beta/v1"
+PHASE2_HELDOUT_SCHEMA_V2 = "phase2-heldout-fixed-beta/v2"
 PHASE2_HELDOUT_STATE_SCHEMA = "phase2-heldout-frozen-state/v1"
 PHASE2_HELDOUT_INPUT_SCHEMA = "phase2-deferred-heldout-input/v1"
 HELDOUT_SPLIT_ORDER = ("validation", "test")
@@ -423,7 +426,134 @@ def _nullable(value: torch.Tensor) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _evaluate_split(
+def _pcg_result_evidence(result: PCGResult) -> dict[str, object]:
+    return {
+        "iterations": result.iterations,
+        "residual_norm": result.residual_norm,
+        "relative_residual": result.relative_residual,
+        "converged": result.converged,
+        "reason": result.reason,
+        "cold_start": True,
+        "true_residual_reported": True,
+    }
+
+
+def _verify_pcg_result_evidence(
+    value: object,
+    *,
+    name: str,
+    max_iterations: int,
+    tolerance: float,
+) -> None:
+    expected_fields = {
+        "iterations",
+        "residual_norm",
+        "relative_residual",
+        "converged",
+        "reason",
+        "cold_start",
+        "true_residual_reported",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_fields:
+        raise ValueError(f"{name} fields are invalid")
+    iterations = value["iterations"]
+    if (
+        isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 0
+        or iterations > max_iterations
+    ):
+        raise ValueError(f"{name} iterations are invalid")
+    residual_norm = value["residual_norm"]
+    relative_residual = value["relative_residual"]
+    if any(
+        isinstance(item, bool)
+        or not isinstance(item, Real)
+        or not math.isfinite(float(item))
+        or float(item) < 0.0
+        for item in (residual_norm, relative_residual)
+    ):
+        raise ValueError(f"{name} residual evidence is invalid")
+    if (
+        value["converged"] is not True
+        or value["reason"] not in {"converged", "zero_rhs"}
+        or value["cold_start"] is not True
+        or value["true_residual_reported"] is not True
+        or float(relative_residual) > tolerance
+    ):
+        raise ValueError(f"{name} does not prove PCG convergence")
+
+
+def _solve_heldout_moment(
+    fisher: DampedEmpiricalFisher,
+    moment: torch.Tensor,
+    *,
+    role: str,
+    pcg_max_iterations: int,
+    pcg_tolerance: float,
+) -> PCGResult:
+    result = pcg(
+        fisher.matvec,
+        moment,
+        tolerance=pcg_tolerance,
+        max_iterations=pcg_max_iterations,
+    )
+    if not result.converged:
+        raise RuntimeError(
+            f"held-out {role} PCG did not converge: "
+            f"relative residual={result.relative_residual:.3e} after "
+            f"{result.iterations} iterations"
+        )
+    return result
+
+
+def _preference_fit(
+    predicted_rewards: torch.Tensor,
+    target_rewards: torch.Tensor,
+) -> dict[str, object]:
+    """Measure operational-oracle fit with prompt-equal pair aggregation."""
+
+    if predicted_rewards.shape != target_rewards.shape or predicted_rewards.ndim != 2:
+        raise ValueError("preference-fit rewards must share a prompt-by-candidate shape")
+    num_prompts, num_candidates = predicted_rewards.shape
+    candidate_pairs = torch.combinations(
+        torch.arange(num_candidates, device=predicted_rewards.device),
+        r=2,
+    )
+    if candidate_pairs.numel() == 0:
+        raise ValueError("preference fit requires at least two candidates per prompt")
+    predicted_margins = (
+        predicted_rewards[:, candidate_pairs[:, 0]] - predicted_rewards[:, candidate_pairs[:, 1]]
+    )
+    target_margins = (
+        target_rewards[:, candidate_pairs[:, 0]] - target_rewards[:, candidate_pairs[:, 1]]
+    )
+    oracle_probabilities = torch.sigmoid(target_margins)
+    predicted_probabilities = torch.sigmoid(predicted_margins)
+    per_pair_cross_entropy = F.binary_cross_entropy_with_logits(
+        predicted_margins,
+        oracle_probabilities,
+        reduction="none",
+    )
+    per_pair_probability_mae = torch.abs(predicted_probabilities - oracle_probabilities)
+
+    prompt_cross_entropy = per_pair_cross_entropy.mean(dim=1)
+    prompt_probability_mae = per_pair_probability_mae.mean(dim=1)
+    correct = (torch.sign(predicted_margins) == torch.sign(target_margins)).to(
+        predicted_rewards.dtype
+    )
+    oracle_ties = target_margins == 0.0
+    predicted_ties = predicted_margins == 0.0
+    correct[oracle_ties | predicted_ties] = 0.5
+    prompt_accuracy = correct.mean(dim=1)
+    return {
+        "oracle_pairwise_cross_entropy": float(prompt_cross_entropy.mean().item()),
+        "oracle_probability_mae": float(prompt_probability_mae.mean().item()),
+        "pairwise_order_accuracy": float(prompt_accuracy.mean().item()),
+    }
+
+
+def _evaluate_split_v1(
     split: DeferredHeldoutSplit,
     target_rewards: torch.Tensor,
     state: FrozenHeldoutEvaluationState,
@@ -433,6 +563,8 @@ def _evaluate_split(
     pcg_max_iterations: int,
     pcg_tolerance: float,
 ) -> dict[str, object]:
+    """Preserve the already-frozen formal v1 numerical implementation exactly."""
+
     expected_shape = (split.num_prompts, split.num_candidates)
     if target_rewards.shape != expected_shape:
         raise ValueError(
@@ -451,6 +583,9 @@ def _evaluate_split(
     )
     learners: dict[str, dict[str, object]] = {}
     for learner in CANONICAL_LEARNERS:
+        # Formal v1 intentionally computes reward-model predictions in the
+        # serialized feature dtype before its solver promotes inputs.  Changing
+        # this order changes the locked estimand numerically.
         head = torch.tensor(
             state.heads[learner],
             dtype=split.reward_features.dtype,
@@ -525,6 +660,179 @@ def _evaluate_split(
     }
 
 
+def _evaluate_split_v2(
+    split: DeferredHeldoutSplit,
+    target_rewards: torch.Tensor,
+    state: FrozenHeldoutEvaluationState,
+    *,
+    relative_damping: float,
+    pcg_dtype: FisherSolveDType,
+    pcg_max_iterations: int,
+    pcg_tolerance: float,
+) -> dict[str, object]:
+    expected_shape = (split.num_prompts, split.num_candidates)
+    if target_rewards.shape != expected_shape:
+        raise ValueError(
+            f"{split.split} transformed oracle targets must have shape {expected_shape!r}"
+        )
+    targets = target_rewards.detach().to(
+        device=split.policy_scores.device,
+        dtype=split.policy_scores.dtype,
+    )
+    if targets.requires_grad or not bool(torch.isfinite(targets).all()):
+        raise ValueError(f"{split.split} transformed oracle targets must be finite and detached")
+    damping = _absolute_damping(
+        split.policy_scores,
+        relative_damping=relative_damping,
+        pcg_dtype=pcg_dtype,
+    )
+    solve_dtype = resolve_fisher_solve_dtype(pcg_dtype)
+    policy_scores = split.policy_scores.to(dtype=solve_dtype)
+    solve_targets = targets.to(dtype=solve_dtype)
+    flat_scores = policy_scores.reshape(-1, split.policy_dimension)
+    undamped_fisher = DampedEmpiricalFisher(flat_scores, damping=0.0)
+    damped_fisher = DampedEmpiricalFisher(flat_scores, damping=damping)
+    target_moment = policy_reward_moment(policy_scores, solve_targets)
+    target_solve = _solve_heldout_moment(
+        damped_fisher,
+        target_moment,
+        role=f"{split.split} target direction",
+        pcg_max_iterations=pcg_max_iterations,
+        pcg_tolerance=pcg_tolerance,
+    )
+    learners: dict[str, dict[str, object]] = {}
+    learner_pcg: dict[str, dict[str, object]] = {}
+    preference_fit: dict[str, dict[str, object]] = {}
+    for learner in CANONICAL_LEARNERS:
+        head = torch.tensor(
+            state.heads[learner],
+            dtype=solve_dtype,
+            device=split.reward_features.device,
+        )
+        if head.shape != (split.reward_dimension,):
+            raise ValueError(
+                f"frozen head {learner!r} has shape {tuple(head.shape)!r}; "
+                f"expected ({split.reward_dimension},)"
+            )
+        predicted = split.reward_features.to(dtype=solve_dtype) @ head
+        predicted_moment = policy_reward_moment(policy_scores, predicted)
+        error_moment = policy_reward_moment(
+            policy_scores,
+            predicted - solve_targets,
+        )
+        predicted_solve = _solve_heldout_moment(
+            damped_fisher,
+            predicted_moment,
+            role=f"{split.split} {learner} predicted direction",
+            pcg_max_iterations=pcg_max_iterations,
+            pcg_tolerance=pcg_tolerance,
+        )
+        error_solve = _solve_heldout_moment(
+            damped_fisher,
+            error_moment,
+            role=f"{split.split} {learner} reward-error direction",
+            pcg_max_iterations=pcg_max_iterations,
+            pcg_tolerance=pcg_tolerance,
+        )
+        regret = 0.5 * torch.dot(error_moment, error_solve.solution) / state.beta_common
+        regret_tolerance = (
+            32.0 * torch.finfo(regret.dtype).eps * max(1.0, abs(float(regret.item())))
+        )
+        if float(regret.item()) < -regret_tolerance:
+            raise FloatingPointError(
+                "held-out local regret is negative; the Fisher solve is numerically invalid"
+            )
+        regret = regret.clamp_min(0.0)
+
+        difference = predicted_solve.solution - target_solve.solution
+        fisher_difference = undamped_fisher.matvec(difference)
+        squared_error = torch.dot(difference, fisher_difference).clamp_min(0.0)
+        fisher_predicted = undamped_fisher.matvec(predicted_solve.solution)
+        fisher_target = undamped_fisher.matvec(target_solve.solution)
+        predicted_squared_norm = torch.dot(
+            predicted_solve.solution,
+            fisher_predicted,
+        ).clamp_min(0.0)
+        target_squared_norm = torch.dot(
+            target_solve.solution,
+            fisher_target,
+        ).clamp_min(0.0)
+        predicted_norm = torch.sqrt(predicted_squared_norm)
+        target_norm = torch.sqrt(target_squared_norm)
+        cosine_denominator = predicted_norm * target_norm
+        if float(cosine_denominator.item()) == 0.0:
+            cosine = torch.full(
+                (),
+                float("nan"),
+                dtype=solve_dtype,
+                device=predicted.device,
+            )
+        else:
+            cosine = (
+                torch.dot(predicted_solve.solution, fisher_target) / cosine_denominator
+            ).clamp(min=-1.0, max=1.0)
+        learners[learner] = {
+            "head_sha256": _head_sha256(state.heads[learner]),
+            "local_regret_at_frozen_global_beta": float(regret.item()),
+            "native_beta1_squared_fisher_direction_error": float(squared_error.item()),
+            "native_beta1_fisher_cosine": _nullable(cosine),
+            "native_beta1_predicted_fisher_norm": float(predicted_norm.item()),
+            "native_beta1_target_fisher_norm": float(target_norm.item()),
+            "direction_vectors_serialized": False,
+        }
+        preference_fit[learner] = _preference_fit(predicted, solve_targets)
+        learner_pcg[learner] = {
+            "predicted_direction": _pcg_result_evidence(predicted_solve),
+            "reward_error_direction": _pcg_result_evidence(error_solve),
+        }
+
+    bt = learners[BT_MLE]
+    prorm = learners[PRORM_PLUS]
+
+    def difference(field_name: str) -> float | None:
+        left = prorm[field_name]
+        right = bt[field_name]
+        if left is None or right is None:
+            return None
+        return float(left) - float(right)
+
+    return {
+        "input_identity": split.identity_payload(),
+        "input_identity_sha256": split.identity_sha256,
+        "transformed_oracle_rewards_sha256": _tensor_sha256(targets),
+        "raw_oracle_logits_serialized": False,
+        "node_fisher_estimator": "mean_all_saved_split_nodes",
+        "moment_estimator": "per_prompt_unbiased_candidate_covariance",
+        "relative_damping": float(relative_damping),
+        "absolute_damping": damping,
+        "fixed_beta": state.beta_common,
+        "fixed_beta_source": "pilot_selected_global_beta_frozen_in_confirmatory_design",
+        "learners": learners,
+        "preference_fit": preference_fit,
+        "heldout_pcg_evidence": {
+            "schema_version": "heldout-pcg-evidence/v1",
+            "operator": "node_empirical_fisher_plus_split_specific_isotropic_damping",
+            "pcg_dtype": str(pcg_dtype),
+            "pcg_max_iterations": pcg_max_iterations,
+            "pcg_tolerance": float(pcg_tolerance),
+            "preconditioner": "none",
+            "residual_recompute_interval": 20,
+            "all_solves_cold_start": True,
+            "all_solves_converged": True,
+            "target_direction_shared_across_learners": True,
+            "target_direction": _pcg_result_evidence(target_solve),
+            "learners": learner_pcg,
+        },
+        "prorm_plus_minus_bt_mle": {
+            "local_regret_at_frozen_global_beta": difference("local_regret_at_frozen_global_beta"),
+            "native_beta1_squared_fisher_direction_error": difference(
+                "native_beta1_squared_fisher_direction_error"
+            ),
+            "native_beta1_fisher_cosine": difference("native_beta1_fisher_cosine"),
+        },
+    }
+
+
 def score_and_evaluate_deferred_heldout(
     oracle: HeldoutOracleScorer,
     deferred: DeferredHeldoutInputs,
@@ -537,6 +845,7 @@ def score_and_evaluate_deferred_heldout(
     pcg_dtype: FisherSolveDType,
     pcg_max_iterations: int,
     pcg_tolerance: float,
+    result_schema_version: str = PHASE2_HELDOUT_SCHEMA,
 ) -> dict[str, object]:
     """Reveal fresh held-out targets and immediately reduce them to metrics.
 
@@ -557,6 +866,18 @@ def score_and_evaluate_deferred_heldout(
     resolve_fisher_solve_dtype(pcg_dtype)
     _positive_integer(pcg_max_iterations, name="pcg_max_iterations")
     _finite_positive(pcg_tolerance, name="pcg_tolerance")
+    if result_schema_version not in {
+        PHASE2_HELDOUT_SCHEMA,
+        PHASE2_HELDOUT_SCHEMA_V2,
+    }:
+        raise ValueError("result_schema_version must be a supported held-out schema")
+    if (
+        result_schema_version == PHASE2_HELDOUT_SCHEMA_V2
+        and deferred.validation.num_candidates != 4
+    ):
+        raise ValueError(
+            "held-out v2 preference fit requires exactly four candidates and six pairs per prompt"
+        )
     deferred.verify_integrity()
 
     splits = (deferred.validation, deferred.test)
@@ -586,7 +907,12 @@ def score_and_evaluate_deferred_heldout(
             split.num_prompts,
             split.num_candidates,
         )
-        split_results[split.split] = _evaluate_split(
+        evaluator = (
+            _evaluate_split_v1
+            if result_schema_version == PHASE2_HELDOUT_SCHEMA
+            else _evaluate_split_v2
+        )
+        split_results[split.split] = evaluator(
             split,
             targets,
             state,
@@ -599,10 +925,20 @@ def score_and_evaluate_deferred_heldout(
     if offset != len(ordered_candidates):
         raise RuntimeError("held-out oracle rescore partition did not consume every node")
 
+    if result_schema_version == PHASE2_HELDOUT_SCHEMA_V2:
+        for split_result in split_results.values():
+            if not isinstance(split_result, dict):
+                raise RuntimeError("internal held-out split result is not mutable")
+            split_result["fixed_beta_source"] = (
+                "accepted_freeze_global_beta_frozen_in_budgeted_end_to_end_design"
+            )
+
     payload: dict[str, object] = {
-        "schema_version": PHASE2_HELDOUT_SCHEMA,
+        "schema_version": result_schema_version,
         "estimand": "frozen_global_common_beta_local_regret",
-        "formal_gate_split": "test",
+        "formal_gate_split": (
+            None if result_schema_version == PHASE2_HELDOUT_SCHEMA_V2 else "test"
+        ),
         "descriptive_split": "validation",
         "split_order": list(HELDOUT_SPLIT_ORDER),
         "beta_common": state.beta_common,
@@ -622,6 +958,14 @@ def score_and_evaluate_deferred_heldout(
             "pcg_tolerance": float(pcg_tolerance),
             "relative_damping": float(relative_damping),
             "split_specific_node_fisher_and_damping": True,
+            **(
+                {
+                    "explicit_pcg_evidence_serialized_per_split": True,
+                    "all_direction_and_regret_solves_audited": True,
+                }
+                if result_schema_version == PHASE2_HELDOUT_SCHEMA_V2
+                else {}
+            ),
         },
         "splits": split_results,
         "information_boundary": {
@@ -634,6 +978,18 @@ def score_and_evaluate_deferred_heldout(
         "raw_oracle_logits_serialized": False,
         "heldout_direction_vectors_serialized": False,
     }
+    if result_schema_version == PHASE2_HELDOUT_SCHEMA_V2:
+        payload["evaluation_evidence_role"] = "budgeted_end_to_end_exploratory_heldout_evidence"
+        payload["formal_claim_eligible"] = False
+        payload["primary_descriptive_split"] = "test"
+        payload["operational_oracle_preference_fit"] = {
+            "schema_version": "operational-oracle-preference-fit-contract/v1",
+            "pair_definition": "all_unordered_candidate_pairs_within_prompt",
+            "expected_pairs_per_prompt_for_four_candidates": 6,
+            "aggregation": "mean_pairs_within_prompt_then_mean_prompts",
+            "cross_entropy_and_probability_mae_include_oracle_ties": True,
+            "oracle_or_predicted_tie_accuracy_credit": 0.5,
+        }
     # Fail now if a future edit adds a non-JSON value or NaN.
     _canonical_sha256(payload)
     return payload
@@ -674,11 +1030,23 @@ def verify_heldout_evaluation_payload(
         "raw_oracle_logits_serialized",
         "heldout_direction_vectors_serialized",
     }
+    schema_version = payload.get("schema_version")
+    if schema_version == PHASE2_HELDOUT_SCHEMA_V2:
+        required |= {
+            "evaluation_evidence_role",
+            "formal_claim_eligible",
+            "operational_oracle_preference_fit",
+            "primary_descriptive_split",
+        }
     if set(payload) != required:
         raise ValueError("held-out evaluation payload fields do not match the strict schema")
-    if payload["schema_version"] != PHASE2_HELDOUT_SCHEMA:
+    if schema_version not in {
+        PHASE2_HELDOUT_SCHEMA,
+        PHASE2_HELDOUT_SCHEMA_V2,
+    }:
         raise ValueError("held-out evaluation schema version is invalid")
-    if payload["formal_gate_split"] != "test" or payload["split_order"] != [
+    expected_formal_gate_split = None if schema_version == PHASE2_HELDOUT_SCHEMA_V2 else "test"
+    if payload["formal_gate_split"] != expected_formal_gate_split or payload["split_order"] != [
         "validation",
         "test",
     ]:
@@ -703,6 +1071,132 @@ def verify_heldout_evaluation_payload(
         or payload["heldout_direction_vectors_serialized"] is not False
     ):
         raise ValueError("held-out evaluation serialized a forbidden raw quantity")
+    if schema_version == PHASE2_HELDOUT_SCHEMA_V2:
+        if (
+            payload["formal_claim_eligible"] is not False
+            or payload["primary_descriptive_split"] != "test"
+            or payload["evaluation_evidence_role"]
+            != "budgeted_end_to_end_exploratory_heldout_evidence"
+        ):
+            raise ValueError("held-out v2 evidence must remain formally ineligible")
+        fit_contract = payload["operational_oracle_preference_fit"]
+        if not isinstance(fit_contract, Mapping) or fit_contract != {
+            "schema_version": "operational-oracle-preference-fit-contract/v1",
+            "pair_definition": "all_unordered_candidate_pairs_within_prompt",
+            "expected_pairs_per_prompt_for_four_candidates": 6,
+            "aggregation": "mean_pairs_within_prompt_then_mean_prompts",
+            "cross_entropy_and_probability_mae_include_oracle_ties": True,
+            "oracle_or_predicted_tie_accuracy_credit": 0.5,
+        }:
+            raise ValueError("held-out v2 preference-fit contract is invalid")
+        for split_name in HELDOUT_SPLIT_ORDER:
+            split = splits[split_name]
+            if not isinstance(split, Mapping):
+                raise ValueError("held-out v2 split must be a mapping")
+            pcg_evidence = split.get("heldout_pcg_evidence")
+            expected_pcg_evidence_fields = {
+                "schema_version",
+                "operator",
+                "pcg_dtype",
+                "pcg_max_iterations",
+                "pcg_tolerance",
+                "preconditioner",
+                "residual_recompute_interval",
+                "all_solves_cold_start",
+                "all_solves_converged",
+                "target_direction_shared_across_learners",
+                "target_direction",
+                "learners",
+            }
+            if (
+                not isinstance(pcg_evidence, Mapping)
+                or set(pcg_evidence) != expected_pcg_evidence_fields
+                or pcg_evidence.get("schema_version") != "heldout-pcg-evidence/v1"
+                or pcg_evidence.get("operator")
+                != "node_empirical_fisher_plus_split_specific_isotropic_damping"
+                or pcg_evidence.get("pcg_dtype") != "float64"
+                or pcg_evidence.get("preconditioner") != "none"
+                or pcg_evidence.get("residual_recompute_interval") != 20
+                or pcg_evidence.get("all_solves_converged") is not True
+                or pcg_evidence.get("all_solves_cold_start") is not True
+                or pcg_evidence.get("target_direction_shared_across_learners") is not True
+            ):
+                raise ValueError("held-out v2 PCG evidence is incomplete")
+            evidence_max_iterations = pcg_evidence["pcg_max_iterations"]
+            evidence_tolerance = pcg_evidence["pcg_tolerance"]
+            if (
+                isinstance(evidence_max_iterations, bool)
+                or not isinstance(evidence_max_iterations, int)
+                or evidence_max_iterations < 1
+                or isinstance(evidence_tolerance, bool)
+                or not isinstance(evidence_tolerance, Real)
+                or not math.isfinite(float(evidence_tolerance))
+                or float(evidence_tolerance) <= 0.0
+            ):
+                raise ValueError("held-out v2 PCG solver contract is invalid")
+            _verify_pcg_result_evidence(
+                pcg_evidence.get("target_direction"),
+                name=f"{split_name}.target_direction",
+                max_iterations=evidence_max_iterations,
+                tolerance=float(evidence_tolerance),
+            )
+            learner_pcg = pcg_evidence.get("learners")
+            if not isinstance(learner_pcg, Mapping) or set(learner_pcg) != set(CANONICAL_LEARNERS):
+                raise ValueError("held-out v2 learner PCG evidence is incomplete")
+            for learner in CANONICAL_LEARNERS:
+                records = learner_pcg[learner]
+                if not isinstance(records, Mapping) or set(records) != {
+                    "predicted_direction",
+                    "reward_error_direction",
+                }:
+                    raise ValueError("held-out v2 learner PCG solve roles are invalid")
+                for role, record in records.items():
+                    _verify_pcg_result_evidence(
+                        record,
+                        name=f"{split_name}.{learner}.{role}",
+                        max_iterations=evidence_max_iterations,
+                        tolerance=float(evidence_tolerance),
+                    )
+            learners = split.get("learners")
+            if not isinstance(learners, Mapping):
+                raise ValueError("held-out v2 learners must be a mapping")
+            for learner in CANONICAL_LEARNERS:
+                preference_fit = split.get("preference_fit")
+                if (
+                    not isinstance(preference_fit, Mapping)
+                    or set(preference_fit) != set(CANONICAL_LEARNERS)
+                    or not isinstance(preference_fit.get(learner), Mapping)
+                ):
+                    raise ValueError("held-out v2 operational-oracle preference fit is incomplete")
+                learner_fit = preference_fit[learner]
+                if set(learner_fit) != {
+                    "oracle_pairwise_cross_entropy",
+                    "oracle_probability_mae",
+                    "pairwise_order_accuracy",
+                }:
+                    raise ValueError(
+                        "held-out v2 operational-oracle preference-fit fields are invalid"
+                    )
+                cross_entropy = learner_fit["oracle_pairwise_cross_entropy"]
+                probability_mae = learner_fit["oracle_probability_mae"]
+                accuracy = learner_fit["pairwise_order_accuracy"]
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, Real)
+                    or not math.isfinite(float(value))
+                    for value in (cross_entropy, probability_mae, accuracy)
+                ):
+                    raise ValueError(
+                        "held-out v2 operational-oracle preference-fit values are invalid"
+                    )
+                if (
+                    float(cross_entropy) < 0.0
+                    or not 0.0 <= float(probability_mae) <= 1.0
+                    or not 0.0 <= float(accuracy) <= 1.0
+                ):
+                    raise ValueError(
+                        "held-out v2 operational-oracle preference-fit values are out of range"
+                    )
     if heldout_evaluation_sha256(payload) != expected:
         raise ValueError("held-out evaluation payload SHA256 mismatch")
 
@@ -711,6 +1205,7 @@ __all__ = [
     "HELDOUT_SPLIT_ORDER",
     "PHASE2_HELDOUT_INPUT_SCHEMA",
     "PHASE2_HELDOUT_SCHEMA",
+    "PHASE2_HELDOUT_SCHEMA_V2",
     "PHASE2_HELDOUT_STATE_SCHEMA",
     "DeferredHeldoutInputs",
     "DeferredHeldoutSplit",

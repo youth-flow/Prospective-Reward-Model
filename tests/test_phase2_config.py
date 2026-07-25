@@ -11,6 +11,11 @@ from smart_reward.config import ConfigError, config_hash, load_config
 from smart_reward.phase2_config import (
     PHASE1_MAIN_CONFIG_HASH,
     PHASE1_MAIN_SEEDS,
+    PHASE2_BUDGETED_END_TO_END_BASE_CONFIG,
+    PHASE2_BUDGETED_END_TO_END_CONFIG,
+    PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE,
+    PHASE2_BUDGETED_END_TO_END_SEEDS,
+    PHASE2_BUDGETED_END_TO_END_STAGE,
     PHASE2_CONFIRMATORY_EXCLUDED_SEEDS,
     PHASE2_CONFIRMATORY_NUM_SEEDS,
     PHASE2_CONFIRMATORY_SEEDS,
@@ -268,6 +273,88 @@ def _future_confirmatory(
             "formal_threshold": 0.05,
             "parent_pilot_aggregate_sha256": "a" * 64,
             "post_pilot_requirement": ("satisfied_by_new_confirmatory_design_identity"),
+        }
+    )
+    overlay["design"]["source_config_hash"] = config_hash(base)
+    return overlay, base
+
+
+def _budgeted_end_to_end(
+    post_recovery_pilot: dict[str, Any],
+    *,
+    accepted_freeze_sha256: str = "d" * 64,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    overlay = copy.deepcopy(post_recovery_pilot)
+    base = load_config(BASE_PATH)
+    seeds = list(PHASE2_BUDGETED_END_TO_END_SEEDS)
+
+    overlay["design"].update(
+        {
+            "name": "common-beta-post-recovery-budgeted-end-to-end-v1",
+            "stage": PHASE2_BUDGETED_END_TO_END_STAGE,
+            "pilot_phase": None,
+            "formal_eligibility": False,
+            "evidence_role": PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE,
+            "source_config": PHASE2_BUDGETED_END_TO_END_BASE_CONFIG,
+        }
+    )
+    overlay["run"].update(
+        {
+            "seeds": seeds,
+            "confirmatory": False,
+            "formal_eligibility": False,
+            "excluded_from_confirmatory_evidence": True,
+        }
+    )
+    base["run"]["name"] = "budgeted-end-to-end-materialization"
+    base["run"]["seeds"] = seeds
+    overlay["reward_model"]["identifiability"].update(
+        {
+            "role": ("budgeted_end_to_end_exploratory_frozen_identifiability_audit"),
+            "confirmatory_freeze_requirement": (
+                "satisfied_by_accepted_freeze_budgeted_end_to_end_identity"
+            ),
+        }
+    )
+    common_beta = overlay["objective"]["common_beta"]
+    common_beta.update(
+        {
+            "rule": "single_accepted_freeze_global_beta_scalar",
+            "calibration_split": "excluded_pilot",
+            "calibration_source": (
+                "accepted_freeze_global_beta_in_budgeted_end_to_end_design_identity"
+            ),
+            "frozen_global_beta": 2.5,
+            "beta_source_aggregate_sha256": accepted_freeze_sha256,
+            "sensitivity_k_cal": None,
+            "sensitivity_frozen_global_beta_multipliers": None,
+            "primary_execution_role": "budgeted_end_to_end_exploratory_primary",
+            "sensitivity_execution_role": "not_executed_in_budgeted_end_to_end",
+            "sensitivity_executed_separately": False,
+        }
+    )
+    ridge = overlay["objective"]["full_tangent"]["ridge"]
+    ridge.update(
+        {
+            "primary_execution_role": "budgeted_end_to_end_exploratory_primary",
+            "sensitivity_execution_role": "not_executed_in_budgeted_end_to_end",
+            "sensitivity_executed_separately": False,
+        }
+    )
+    overlay["evaluation"]["decision_gates"].update(
+        {
+            "application": "budgeted_end_to_end_exploratory_summary_only",
+            "supports_formal_claim": False,
+        }
+    )
+    overlay["evaluation"]["max_length"].update(
+        {
+            "role": "budgeted_end_to_end_pre_oracle_safety_gate",
+            "measure_only": False,
+            "formal_gate": False,
+            "formal_threshold": 0.05,
+            "parent_pilot_aggregate_sha256": accepted_freeze_sha256,
+            "post_pilot_requirement": ("satisfied_by_accepted_freeze_budgeted_end_to_end_identity"),
         }
     )
     overlay["design"]["source_config_hash"] = config_hash(base)
@@ -569,7 +656,7 @@ def test_decay_protocol_modes_cannot_cross_recovery_and_adopted_schemas(
         validate_phase2_config(recovery_with_adopted_protocol)
 
 
-def test_post_recovery_lineage_keeps_decay_for_freeze_retry_and_confirmatory(
+def test_post_recovery_lineage_keeps_decay_for_budgeted_and_confirmatory(
     pilot_config: dict[str, Any],
 ) -> None:
     calibration = _post_recovery_calibration_pilot(pilot_config)
@@ -587,10 +674,17 @@ def test_post_recovery_lineage_keeps_decay_for_freeze_retry_and_confirmatory(
     confirmatory["design"]["name"] = "common-beta-post-recovery-confirmatory-v1"
     confirmatory_validated = validate_phase2_config(confirmatory, base_config=base)
 
+    budgeted, budgeted_base = _budgeted_end_to_end(calibration)
+    budgeted_validated = validate_phase2_config(
+        budgeted,
+        base_config=budgeted_base,
+    )
+
     for validated in (
         calibration_validated,
         freeze_validated,
         retry_validated,
+        budgeted_validated,
         confirmatory_validated,
     ):
         protocol = validated["reward_model"]["optimizer_protocol"]
@@ -605,6 +699,8 @@ def test_post_recovery_lineage_keeps_decay_for_freeze_retry_and_confirmatory(
 
     assert freeze_validated["design"]["pilot_phase"] == "freeze"
     assert retry_validated["objective"]["common_beta"]["frozen_global_beta"] == 5.0
+    assert budgeted_validated["design"]["stage"] == PHASE2_BUDGETED_END_TO_END_STAGE
+    assert budgeted_validated["run"]["seeds"] == list(PHASE2_BUDGETED_END_TO_END_SEEDS)
     assert confirmatory_validated["design"]["stage"] == "confirmatory"
     assert confirmatory_validated["run"]["seeds"] == list(PHASE2_CONFIRMATORY_SEEDS)
 
@@ -829,7 +925,9 @@ def test_pilot_is_permanently_ineligible_and_has_only_three_registered_seeds(
     }
     assert frozenset(pilot_config["run"]["seeds"]) == PHASE2_PILOT_SEEDS
     assert not PHASE2_PILOT_SEEDS & PHASE1_MAIN_SEEDS
-    assert PHASE2_CONFIRMATORY_EXCLUDED_SEEDS == (PHASE1_MAIN_SEEDS | PHASE2_PILOT_SEEDS)
+    assert (
+        PHASE1_MAIN_SEEDS | PHASE2_PILOT_SEEDS | frozenset(PHASE2_BUDGETED_END_TO_END_SEEDS)
+    ) == PHASE2_CONFIRMATORY_EXCLUDED_SEEDS
 
 
 def test_old_fake_confirmatory_candidate_files_are_absent() -> None:
@@ -1248,6 +1346,10 @@ def test_schema_accepts_a_future_confirmatory_stage_only_with_new_base_identity(
     overlay, base = _future_confirmatory(pilot_config)
 
     validated = validate_phase2_config(overlay, base_config=base)
+    assert validated["schema_version"] == PHASE2_SCHEMA_VERSION
+    assert "recovery_success_reference" not in validated
+    assert "optimizer_protocol" not in validated["reward_model"]
+    assert validated["reward_model"]["adaptive_convergence"]["maximum_steps"] == 5760
     assert validated["design"]["stage"] == "confirmatory"
     assert validated["run"]["confirmatory"] is True
     assert validated["objective"]["common_beta"]["frozen_global_beta"] == 2.5
@@ -1264,6 +1366,155 @@ def test_schema_accepts_a_future_confirmatory_stage_only_with_new_base_identity(
     assert len(validated["run"]["seeds"]) == PHASE2_CONFIRMATORY_NUM_SEEDS
     assert not set(validated["run"]["seeds"]) & PHASE2_CONFIRMATORY_EXCLUDED_SEEDS
     assert validated["design"]["source_config_hash"] == config_hash(base)
+
+
+def test_budgeted_end_to_end_is_fixed_five_seed_exploratory_evidence(
+    pilot_config: dict[str, Any],
+) -> None:
+    post_recovery = _post_recovery_calibration_pilot(pilot_config)
+    overlay, base = _budgeted_end_to_end(post_recovery)
+
+    validated = validate_phase2_config(overlay, base_config=base)
+    common = validated["objective"]["common_beta"]
+    ridge = validated["objective"]["full_tangent"]["ridge"]
+    identifiability = validated["reward_model"]["identifiability"]
+    decisions = validated["evaluation"]["decision_gates"]
+    max_length = validated["evaluation"]["max_length"]
+
+    assert validated["design"]["stage"] == PHASE2_BUDGETED_END_TO_END_STAGE
+    assert PHASE2_BUDGETED_END_TO_END_CONFIG == (
+        "configs/common_beta_post_recovery_budgeted_end_to_end.yaml"
+    )
+    assert validated["design"]["source_config"] == (PHASE2_BUDGETED_END_TO_END_BASE_CONFIG)
+    assert validated["design"]["evidence_role"] == (PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE)
+    assert validated["design"]["formal_eligibility"] is False
+    assert "budgeted-end-to-end" in validated["design"]["name"]
+    assert validated["run"] == {
+        "seeds": list(PHASE2_BUDGETED_END_TO_END_SEEDS),
+        "num_prompts": 2048,
+        "split_sizes": {"train": 1536, "validation": 256, "test": 256},
+        "confirmatory": False,
+        "formal_eligibility": False,
+        "excluded_from_confirmatory_evidence": True,
+    }
+    assert common["rule"] == "single_accepted_freeze_global_beta_scalar"
+    assert common["calibration_split"] == "excluded_pilot"
+    assert common["calibration_source"] == (
+        "accepted_freeze_global_beta_in_budgeted_end_to_end_design_identity"
+    )
+    assert common["beta_source_aggregate_sha256"] == "d" * 64
+    assert common["primary_execution_role"] == "budgeted_end_to_end_exploratory_primary"
+    assert common["sensitivity_execution_role"] == "not_executed_in_budgeted_end_to_end"
+    assert max_length["parent_pilot_aggregate_sha256"] == "d" * 64
+    assert common["sensitivity_k_cal"] is None
+    assert common["sensitivity_frozen_global_beta_multipliers"] is None
+    assert common["sensitivity_executed_separately"] is False
+    assert ridge["primary_execution_role"] == "budgeted_end_to_end_exploratory_primary"
+    assert ridge["sensitivity_execution_role"] == "not_executed_in_budgeted_end_to_end"
+    assert ridge["sensitivity_executed_separately"] is False
+    assert identifiability["role"] == (
+        "budgeted_end_to_end_exploratory_frozen_identifiability_audit"
+    )
+    assert identifiability["confirmatory_freeze_requirement"] == (
+        "satisfied_by_accepted_freeze_budgeted_end_to_end_identity"
+    )
+    assert decisions["application"] == "budgeted_end_to_end_exploratory_summary_only"
+    assert decisions["supports_formal_claim"] is False
+    assert max_length["role"] == "budgeted_end_to_end_pre_oracle_safety_gate"
+    assert max_length["formal_gate"] is False
+    assert max_length["measure_only"] is False
+    assert max_length["post_pilot_requirement"] == (
+        "satisfied_by_accepted_freeze_budgeted_end_to_end_identity"
+    )
+    assert set(PHASE2_BUDGETED_END_TO_END_SEEDS).isdisjoint(
+        PHASE1_MAIN_SEEDS | PHASE2_PILOT_SEEDS | frozenset(PHASE2_CONFIRMATORY_SEEDS)
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        (
+            lambda config: config["run"].update(
+                {"seeds": list(reversed(PHASE2_BUDGETED_END_TO_END_SEEDS))}
+            ),
+            "exact ordered exploratory seed list",
+        ),
+        (
+            lambda config: config["run"].update({"confirmatory": True}),
+            "budgeted_end_to_end runs require",
+        ),
+        (
+            lambda config: config["run"].update({"formal_eligibility": True}),
+            "budgeted_end_to_end runs require",
+        ),
+        (
+            lambda config: config["run"].update({"excluded_from_confirmatory_evidence": False}),
+            "budgeted_end_to_end runs require",
+        ),
+        (
+            lambda config: config["design"].update({"formal_eligibility": True}),
+            "budgeted_end_to_end design.formal_eligibility",
+        ),
+        (
+            lambda config: config["design"].update({"evidence_role": "confirmatory_evidence"}),
+            "budgeted_end_to_end design.evidence_role",
+        ),
+        (
+            lambda config: config["design"].update(
+                {"name": "common-beta-post-recovery-exploratory-v1"}
+            ),
+            "must contain 'budgeted-end-to-end'",
+        ),
+        (
+            lambda config: config["design"].update({"source_config": "configs/another_base.yaml"}),
+            "budgeted_end_to_end design.source_config",
+        ),
+        (
+            lambda config: config["objective"]["common_beta"].update(
+                {"sensitivity_frozen_global_beta_multipliers": [0.5, 2.0]}
+            ),
+            "budgeted_end_to_end objective.common_beta",
+        ),
+        (
+            lambda config: config["evaluation"]["max_length"].update(
+                {"parent_pilot_aggregate_sha256": "e" * 64}
+            ),
+            "must bind the accepted freeze aggregate",
+        ),
+    ],
+)
+def test_budgeted_end_to_end_contract_fails_closed(
+    pilot_config: dict[str, Any],
+    mutation: Any,
+    match: str,
+) -> None:
+    overlay, _ = _budgeted_end_to_end(_post_recovery_calibration_pilot(pilot_config))
+    mutation(overlay)
+    with pytest.raises(ConfigError, match=match):
+        validate_phase2_config(overlay)
+
+
+def test_budgeted_end_to_end_cannot_downgrade_away_post_recovery_authorization(
+    pilot_config: dict[str, Any],
+) -> None:
+    post_recovery = _post_recovery_calibration_pilot(pilot_config)
+    overlay, _ = _budgeted_end_to_end(post_recovery)
+    overlay["schema_version"] = PHASE2_SCHEMA_VERSION
+    del overlay["recovery_success_reference"]
+    del overlay["reward_model"]["optimizer_protocol"]
+    overlay["reward_model"]["adaptive_convergence"] = copy.deepcopy(
+        pilot_config["reward_model"]["adaptive_convergence"]
+    )
+    overlay["reward_model"]["identifiability"]["algorithmic_tie_break"] = pilot_config[
+        "reward_model"
+    ]["identifiability"]["algorithmic_tie_break"]
+
+    with pytest.raises(
+        ConfigError,
+        match="requires schema_version.*accepted recovery authorization",
+    ):
+        validate_phase2_config(overlay)
 
 
 def test_frozen_global_beta_is_part_of_the_confirmatory_design_identity(

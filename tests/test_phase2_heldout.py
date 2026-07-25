@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from smart_reward.contracts import BT_MLE, CANONICAL_LEARNERS, PRORM_PLUS
 from smart_reward.data import CandidateNode
@@ -14,9 +15,11 @@ from smart_reward.experiment import EvaluationTensorData
 from smart_reward.metrics import local_regret, natural_direction_metrics
 from smart_reward.oracle import RobustOracleTransform
 from smart_reward.phase2_heldout import (
+    PHASE2_HELDOUT_SCHEMA_V2,
     DeferredHeldoutInputs,
     DeferredHeldoutSplit,
     FrozenHeldoutEvaluationState,
+    _preference_fit,
     heldout_evaluation_sha256,
     score_and_evaluate_deferred_heldout,
     verify_heldout_evaluation_payload,
@@ -169,6 +172,7 @@ def _evaluate(
     *,
     beta: float = 2.0,
     malformed: str | None = None,
+    result_schema_version: str = "phase2-heldout-fixed-beta/v1",
 ) -> dict[str, object]:
     return score_and_evaluate_deferred_heldout(
         _Oracle(deferred, targets, malformed=malformed),
@@ -181,6 +185,7 @@ def _evaluate(
         pcg_dtype="float64",
         pcg_max_iterations=100,
         pcg_tolerance=1.0e-10,
+        result_schema_version=result_schema_version,
     )
 
 
@@ -259,6 +264,79 @@ def test_common_beta_arithmetic_matches_phase1_definition_and_split_damping() ->
     )
     assert observed["native_beta1_fisher_cosine"] == pytest.approx(
         expected_directions.fisher_cosine.item()
+    )
+
+
+def test_formal_v1_preserves_float32_reward_prediction_before_fp64_solve() -> None:
+    deferred, targets = _deferred()
+    heads = {
+        BT_MLE: (12345.678901234, -9876.543210987),
+        PRORM_PLUS: (-23456.789012345, 34567.890123456),
+    }
+    heads_sha = _canonical_sha256({learner: list(heads[learner]) for learner in CANONICAL_LEARNERS})
+    state = FrozenHeldoutEvaluationState(
+        source_config_hash="1" * 64,
+        phase2_design_sha256="2" * 64,
+        phase2_runtime_contract_sha256="3" * 64,
+        seed=20260801,
+        heads=heads,
+        heads_sha256=heads_sha,
+        training_design_sha256="2" * 64,
+        beta_common=2.0,
+        deployment_identity=_state().deployment_identity,
+    )
+    formal_v1 = score_and_evaluate_deferred_heldout(
+        _Oracle(deferred, targets),
+        deferred,
+        state,
+        transform=RobustOracleTransform(b=0.0, tau=1.0),
+        oracle_chat_template_sha256="8" * 64,
+        batch_size=3,
+        relative_damping=0.01,
+        pcg_dtype="float64",
+        pcg_max_iterations=100,
+        pcg_tolerance=1.0e-10,
+    )
+
+    split = deferred.test
+    predicted_v1 = split.reward_features @ torch.tensor(
+        heads[PRORM_PLUS],
+        dtype=split.reward_features.dtype,
+    )
+    flat_scores = split.policy_scores.to(torch.float64).reshape(-1, split.policy_dimension)
+    damping = 0.01 * float(flat_scores.square().mean(dim=0).mean().item())
+    expected = local_regret(
+        split.policy_scores,
+        predicted_v1,
+        targets["test"],
+        damping=damping,
+        beta=state.beta_common,
+        pcg_tolerance=1.0e-10,
+        pcg_max_iterations=100,
+        pcg_dtype="float64",
+    )
+
+    observed = formal_v1["splits"]["test"]["learners"][PRORM_PLUS][
+        "local_regret_at_frozen_global_beta"
+    ]
+    assert observed == float(expected.item())
+
+    budgeted_v2 = score_and_evaluate_deferred_heldout(
+        _Oracle(deferred, targets),
+        deferred,
+        state,
+        transform=RobustOracleTransform(b=0.0, tau=1.0),
+        oracle_chat_template_sha256="8" * 64,
+        batch_size=3,
+        relative_damping=0.01,
+        pcg_dtype="float64",
+        pcg_max_iterations=100,
+        pcg_tolerance=1.0e-10,
+        result_schema_version=PHASE2_HELDOUT_SCHEMA_V2,
+    )
+    assert (
+        budgeted_v2["splits"]["test"]["learners"][PRORM_PLUS]["local_regret_at_frozen_global_beta"]
+        != observed
     )
 
 
@@ -356,6 +434,100 @@ def test_result_hash_detects_metric_tampering_and_no_raw_vector_is_serialized() 
     tampered["splits"]["test"]["learners"][PRORM_PLUS]["local_regret_at_frozen_global_beta"] += 0.1
     with pytest.raises(ValueError, match="SHA256 mismatch"):
         verify_heldout_evaluation_payload(tampered, expected_sha256=digest)
+
+
+def test_v2_serializes_prompt_equal_operational_preference_fit_and_explicit_pcg() -> None:
+    deferred, targets = _deferred()
+    result = _evaluate(
+        deferred,
+        targets,
+        result_schema_version=PHASE2_HELDOUT_SCHEMA_V2,
+    )
+    digest = heldout_evaluation_sha256(result)
+    verify_heldout_evaluation_payload(result, expected_sha256=digest)
+
+    assert result["schema_version"] == PHASE2_HELDOUT_SCHEMA_V2
+    assert result["formal_claim_eligible"] is False
+    assert result["formal_gate_split"] is None
+    assert result["primary_descriptive_split"] == "test"
+    contract = result["operational_oracle_preference_fit"]
+    assert contract["expected_pairs_per_prompt_for_four_candidates"] == 6
+    assert contract["aggregation"] == "mean_pairs_within_prompt_then_mean_prompts"
+    assert contract["oracle_or_predicted_tie_accuracy_credit"] == 0.5
+
+    split = deferred.test
+    head = torch.tensor(_state().heads[PRORM_PLUS], dtype=torch.float64)
+    predicted = split.reward_features.to(torch.float64) @ head
+    target = targets["test"].to(torch.float64)
+    pairs = torch.combinations(torch.arange(split.num_candidates), r=2)
+    predicted_margins = predicted[:, pairs[:, 0]] - predicted[:, pairs[:, 1]]
+    target_margins = target[:, pairs[:, 0]] - target[:, pairs[:, 1]]
+    oracle_probabilities = torch.sigmoid(target_margins)
+    per_pair_ce = F.binary_cross_entropy_with_logits(
+        predicted_margins,
+        oracle_probabilities,
+        reduction="none",
+    )
+    per_pair_mae = torch.abs(torch.sigmoid(predicted_margins) - oracle_probabilities)
+    per_pair_accuracy = (torch.sign(predicted_margins) == torch.sign(target_margins)).to(
+        torch.float64
+    )
+    per_pair_accuracy[(predicted_margins == 0.0) | (target_margins == 0.0)] = 0.5
+
+    fit = result["splits"]["test"]["preference_fit"][PRORM_PLUS]
+    assert set(fit) == {
+        "oracle_pairwise_cross_entropy",
+        "oracle_probability_mae",
+        "pairwise_order_accuracy",
+    }
+    assert fit["oracle_pairwise_cross_entropy"] == pytest.approx(
+        per_pair_ce.mean(dim=1).mean().item()
+    )
+    assert fit["oracle_probability_mae"] == pytest.approx(per_pair_mae.mean(dim=1).mean().item())
+    assert fit["pairwise_order_accuracy"] == pytest.approx(
+        per_pair_accuracy.mean(dim=1).mean().item()
+    )
+
+    for split_name in ("validation", "test"):
+        pcg_evidence = result["splits"][split_name]["heldout_pcg_evidence"]
+        assert pcg_evidence["operator"] == (
+            "node_empirical_fisher_plus_split_specific_isotropic_damping"
+        )
+        assert pcg_evidence["pcg_dtype"] == "float64"
+        assert pcg_evidence["preconditioner"] == "none"
+        assert pcg_evidence["all_solves_cold_start"] is True
+        assert pcg_evidence["all_solves_converged"] is True
+        assert pcg_evidence["target_direction"]["converged"] is True
+        for learner in CANONICAL_LEARNERS:
+            assert set(pcg_evidence["learners"][learner]) == {
+                "predicted_direction",
+                "reward_error_direction",
+            }
+            assert all(
+                solve["converged"] is True for solve in pcg_evidence["learners"][learner].values()
+            )
+
+    tampered = copy.deepcopy(result)
+    tampered["splits"]["test"]["heldout_pcg_evidence"]["learners"][PRORM_PLUS][
+        "predicted_direction"
+    ]["converged"] = False
+    with pytest.raises(ValueError, match="does not prove PCG convergence"):
+        verify_heldout_evaluation_payload(
+            tampered,
+            expected_sha256=heldout_evaluation_sha256(tampered),
+        )
+
+
+def test_operational_preference_fit_awards_half_credit_to_pairwise_ties() -> None:
+    predicted = torch.zeros((2, 4), dtype=torch.float64)
+    target = torch.tensor(
+        [[3.0, 2.0, 1.0, 0.0], [0.0, 1.0, 2.0, 3.0]],
+        dtype=torch.float64,
+    )
+
+    fit = _preference_fit(predicted, target)
+
+    assert fit["pairwise_order_accuracy"] == 0.5
 
 
 def test_frozen_state_rejects_head_identity_tampering() -> None:
