@@ -10,14 +10,72 @@ artifact for offline review.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import sys
+import types
 from pathlib import Path
 
-from smart_reward.phase2_r3_gate0 import (
-    capture_live_r3_gate0_bundle,
-    inspect_r3_gate0_bundle,
-    verify_live_r3_gate0_bundle,
-)
+_SCRIPT_RELATIVE = Path("scripts/hpc4/capture_phase2_r3_gate0.py")
+_MODULE_RELATIVE = Path("src/smart_reward/phase2_r3_gate0.py")
+_MODULE_NAME = "smart_reward.phase2_r3_gate0"
+
+
+def _load_gate0_module() -> types.ModuleType:
+    """Load the exact colocated stdlib-only module without package startup."""
+
+    script = Path(__file__).absolute()
+    if script.is_symlink() or script.resolve(strict=True) != script:
+        raise RuntimeError("Gate-0 CLI must use its canonical non-symlink path")
+    repository = script.parents[2]
+    if script != repository / _SCRIPT_RELATIVE:
+        raise RuntimeError("Gate-0 CLI escaped its fixed repository-relative path")
+    git_metadata = repository / ".git"
+    if not git_metadata.exists() or git_metadata.is_symlink():
+        raise RuntimeError("Gate-0 CLI must run from a real Git checkout")
+    package_directory = repository / "src" / "smart_reward"
+    module_path = repository / _MODULE_RELATIVE
+    if (
+        package_directory.is_symlink()
+        or package_directory.resolve(strict=True) != package_directory
+        or not package_directory.is_dir()
+        or module_path.is_symlink()
+        or module_path.resolve(strict=True) != module_path
+        or not module_path.is_file()
+    ):
+        raise RuntimeError("Gate-0 module path is not canonical fixed repository source")
+    if "smart_reward" in sys.modules or _MODULE_NAME in sys.modules:
+        raise RuntimeError("refusing a preloaded smart_reward package or Gate-0 module")
+
+    package = types.ModuleType("smart_reward")
+    package.__package__ = "smart_reward"
+    package.__path__ = [str(package_directory)]
+    package.__spec__ = importlib.util.spec_from_loader(
+        "smart_reward",
+        loader=None,
+        is_package=True,
+    )
+    specification = importlib.util.spec_from_file_location(_MODULE_NAME, module_path)
+    if specification is None or specification.loader is None:
+        raise RuntimeError("could not construct the fixed Gate-0 module specification")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules["smart_reward"] = package
+    sys.modules[_MODULE_NAME] = module
+    try:
+        specification.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(_MODULE_NAME, None)
+        sys.modules.pop("smart_reward", None)
+        raise
+    if Path(module.__file__).resolve(strict=True) != module_path:
+        raise RuntimeError("loaded Gate-0 module did not retain its fixed source identity")
+    return module
+
+
+_gate0 = _load_gate0_module()
+capture_live_r3_gate0_bundle = _gate0.capture_live_r3_gate0_bundle
+inspect_r3_gate0_bundle = _gate0.inspect_r3_gate0_bundle
+verify_live_r3_gate0_bundle = _gate0.verify_live_r3_gate0_bundle
 
 
 def _capability_payload(value: object) -> dict[str, object]:

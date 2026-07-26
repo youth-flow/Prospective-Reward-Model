@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import inspect
 import os
+import shutil
+import subprocess
+import sys
+import textwrap
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
@@ -388,6 +392,74 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
     assert "${PRORM_R3_INPUT_ROOT}/phase2_recovery_parent_failures.json" in (gatep_environment)
     assert '    --project-root "${project_root}" \\' not in gatep_sbatch
     assert '    --source-test-receipt "${PRORM_R3_SOURCE_TEST_RECEIPT}" \\' not in (gatep_sbatch)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        Path("scripts/hpc4/capture_phase2_r3_gate0.py"),
+        Path("scripts/hpc4/capture_phase2_r3_gate1.py"),
+    ],
+)
+def test_capture_cli_help_bypasses_package_init_and_poisoned_pythonpath(
+    tmp_path: Path,
+    relative: Path,
+) -> None:
+    poison = tmp_path / "poison"
+    poison_package = poison / "smart_reward"
+    poison_package.mkdir(parents=True)
+    (poison_package / "__init__.py").write_text(
+        "raise RuntimeError('poisoned smart_reward package imported')\n",
+        encoding="utf-8",
+    )
+    launcher = textwrap.dedent(
+        """
+        import builtins
+        import runpy
+        import sys
+
+        real_import = builtins.__import__
+
+        def blocked(name, *args, **kwargs):
+            if name == "torch" or name.startswith("torch."):
+                raise RuntimeError("torch import is forbidden for capture CLI startup")
+            if name == "smart_reward" or name.startswith("smart_reward."):
+                raise RuntimeError("smart_reward package import is forbidden")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = blocked
+        script = sys.argv[1]
+        sys.argv = [script, "--help"]
+        runpy.run_path(script, run_name="__main__")
+        """
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.fspath(poison)
+    environment["PYTHONNOUSERSITE"] = "1"
+    completed = subprocess.run(
+        (sys.executable, "-S", "-c", launcher, os.fspath(ROOT / relative)),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
+    assert "poisoned smart_reward" not in completed.stderr
+
+    copied = tmp_path / "copied" / relative
+    copied.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / relative, copied)
+    rejected = subprocess.run(
+        (sys.executable, os.fspath(copied), "--help"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert rejected.returncode != 0
+    assert "real Git checkout" in rejected.stderr
 
 
 def test_gate0_production_dual_roots_are_fixed_disjoint_and_not_swappable(
