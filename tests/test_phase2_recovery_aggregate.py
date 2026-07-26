@@ -1453,6 +1453,8 @@ def test_live_receipt_is_required_hash_bound_and_not_terminal_authority(
     live_path = tmp_path.resolve() / aggregate._LIVE_CONTROL_RELATIVE
     live_path.chmod(0o640)
     live_path.write_bytes(live_path.read_bytes() + b"tampered\n")
+    if os.name == "posix":
+        live_path.chmod(0o440)
     with pytest.raises(ValueError, match="bytes changed"):
         _build(paths, scheduler)
 

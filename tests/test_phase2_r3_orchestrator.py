@@ -649,6 +649,8 @@ def test_internal_result_tampering_is_detected_even_with_existing_outcome(
         json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
+    if os.name == "posix":
+        path.chmod(0o440)
 
     with pytest.raises(ValueError, match="canonical JSON|self-hash"):
         orchestrator.run_r3_primary_task_segment(
@@ -688,6 +690,8 @@ def test_completion_receipt_and_journal_tampering_fail_closed(
     raw = receipt.read_bytes()
     receipt.chmod(0o640)
     receipt.write_bytes(raw.replace(b'"learner":"bt_mle"', b'"learner":"prorm_plus"'))
+    if os.name == "posix":
+        receipt.chmod(0o440)
     with pytest.raises((ValueError, FileExistsError)):
         orchestrator.run_r3_primary_task_segment(
             segment,
@@ -710,6 +714,8 @@ def test_completion_receipt_and_journal_tampering_fail_closed(
     event = other / "task-journal" / "event-00000001.json"
     event.chmod(0o640)
     event.write_bytes(event.read_bytes().replace(b"head_started", b"head_starteD"))
+    if os.name == "posix":
+        event.chmod(0o440)
     with pytest.raises(ValueError, match="self-hash"):
         orchestrator.run_r3_primary_task_segment(
             segment,
