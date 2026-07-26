@@ -792,6 +792,8 @@ def test_post_job_profile_finalizer_is_pure_data_and_uses_predeclared_intent(
 
     intent = terminal.publish_profile_allocation_intent(
         (tmp_path / "profile-allocation-intent.json").resolve(),
+        attempt_lineage_file_sha256="1" * 64,
+        attempt_lineage_sha256="2" * 64,
         cluster="hpc4",
         account="sigroup",
         partition="gpu-l20",
@@ -801,6 +803,9 @@ def test_post_job_profile_finalizer_is_pure_data_and_uses_predeclared_intent(
         memory_bytes=1024**3,
         requested_walltime_seconds=600,
     )
+    assert intent.attempt_lineage_file_sha256 == "1" * 64
+    assert intent.attempt_lineage_sha256 == "2" * 64
+    assert intent.to_dict()["schema_version"].endswith("/v2")
     science = support.science.__wrapped__()
     profile_run = support.profile_run.__wrapped__(
         science,
@@ -858,6 +863,15 @@ def test_post_job_profile_finalizer_is_pure_data_and_uses_predeclared_intent(
         bundle,
         intent,
         (tmp_path / "profile-runtime-receipt.json").resolve(),
+    )
+    receipt_payload = receipt.to_dict()
+    embedded_intent = receipt_payload["profile_allocation_intent"]["intent"]
+    assert embedded_intent["attempt_lineage_file_sha256"] == "1" * 64
+    assert embedded_intent["attempt_lineage_sha256"] == "2" * 64
+    assert receipt_payload["profile_allocation_intent"]["file_sha256"] == (intent.file_sha256)
+    assert (
+        receipt_payload["profile_allocation_intent"]["allocation_intent_sha256"]
+        == intent.allocation_intent_sha256
     )
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "4")
     with pytest.raises(ValueError, match="SLURM_CPUS_PER_TASK"):
@@ -920,6 +934,10 @@ def test_post_job_profile_finalizer_is_pure_data_and_uses_predeclared_intent(
     assert capability.artifact_ref().role == SUCCESSFUL_PROFILE_TERMINAL_ROLE
     assert capability.to_dict()["expected_slurm_resources"]["cpus_per_task"] == 2
     assert capability.to_dict()["resource_plan_sha256"] == (bundle.resource_plan_sha256)
+    assert capability.to_dict()["profile_allocation_intent_file_sha256"] == (intent.file_sha256)
+    assert capability.to_dict()["profile_allocation_intent_sha256"] == (
+        intent.allocation_intent_sha256
+    )
 
     drifted_raw = _raw_row()
     drifted_path = (tmp_path / "drifted-sacct.psv").resolve()

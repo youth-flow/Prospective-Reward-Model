@@ -60,6 +60,12 @@ authorization 要求的三个 `COMPLETED 0:0`，因此：
 - 捕获工具 Git blob、执行 commit、容器和 parent registries；
 - no-overwrite publication、文件 mode、inode/descriptor 检查和目录 `fsync`。
 
+发布后的 Gate-0 producer commit 是历史证据输入，而不是未来 verifier 的
+`HEAD` 约束。每次重开必须从 receipt 记录的 commit 重新读取固定路径的 Git
+blob，逐项核验 object ID、SHA256、长度与顺序，并要求该 producer commit 是当前
+clean Gate-1 source commit 的祖先；不得把历史 producer identity 与当前 `HEAD`
+做全等比较，也不得因后续实现修复而重写 Gate-0。
+
 该冻结包只能成为 R3 的 **failure parent**。它不授权复用 head、optimizer、
 step、RNG、PCG、beta 或任何效用结果。
 
@@ -434,6 +440,10 @@ segment 的真实终态。
 - 新 config validator 锁住第 4 节全部科学常量；
 - submitter、SBATCH、terminal capture 和 authorization validator 均 Git-bound；
 - clean commit、容器、inventory 和 shell/Python tests 通过。
+- source-test receipt 与 implementation closure 必须发布到
+  `gate1/<exact-clean-source-commit>/` 的 no-overwrite namespace；capability
+  同时绑定该路径中的 commit 与 source commit。旧 commit 的 Gate-1 证据只保留，
+  不得移动、覆盖或被新 commit 复用。
 
 失败：不得提交任何 R3 HPC4 作业。
 
@@ -541,10 +551,16 @@ Fixed-three：
   tests 已接入对应 R3 控制面；
 - 100-update BT→ProRM+ profile 保持固定工作量、原始 PCG stop reason、CUDA
   同步计时、memory 和匿名 checkpoint I/O probe，并且不会把训练状态带入 Gate R；
-- 第一次正式 Gate-1 job 未生成 source-test receipt 或 implementation closure；
-  后续在同一已提交快照上的 CPU/GPU 精确全量诊断均通过，但它们明确是
-  non-authorizing evidence，不能替代正式 Gate 1；
-- 当前修订仍须形成新的 clean、pushed commit，再重新通过正式 Gate 1；
+- commit `7491b17` 的正式 Gate-1 job `1657224` 已生成 source-test receipt 与
+  implementation closure；随后 Gate-P job `1657236` 在 profile 开始前 fail
+  closed，暴露出 Gate-0 verifier 错把历史 producer identity 与当前 `HEAD`
+  全等比较的实现矛盾，因此没有产生 Gate-P operational authorization；
+- job `1657236` 的 stderr、空 stdout、scheduler terminal state 与 partial
+  attempt inventory 必须形成 non-authorizing failure receipt，并由下一 profile
+  identity hash-bind；原 Gate-1 与失败 attempt 均不得覆盖、移动或删除；
+- 当前修复只改变 evidence generation/verification，不改变 R3 science config、
+  seeds、objectives、labels 或 gates；它仍须形成新的 clean、pushed commit，并在
+  commit-scoped namespace 重新通过正式 Gate 1；
   在此之前 Gate P、Gate R、Gate C 和 Gate F 均未获授权。
 
 因此当前状态是：
@@ -555,6 +571,7 @@ FRESH_CALIBRATION_AUTHORIZED = false
 FIXED_THREE_AUTHORIZED = false
 ```
 
-下一步只能先对新的 clean commit 运行并验证正式 Gate 1；通过后严格进入
-Gate P，不得跳过 profiling，也不得提前启动 Gate R、Gate C、fresh
-calibration 或 fixed-three。
+下一步只能先冻结 Gate-P predecessor failure receipt，再对新的 clean commit
+运行并验证正式 Gate 1；通过后创建 hash-bind predecessor 的新 Gate-P attempt。
+不得跳过 profiling，也不得提前启动 Gate R、Gate C、fresh calibration 或
+fixed-three。

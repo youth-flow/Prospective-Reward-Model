@@ -483,6 +483,17 @@ def test_completed_task_and_unsealed_failure_paths_never_run_or_resubmit(
     assert 'source_config="${input_root}/common_beta_pilot_base.yaml"' in submit
     assert "common_beta_recovery_pilot.yaml" not in submit
     assert 'parent_registry="${input_root}/phase2_recovery_parent_failures.json"' in submit
+    assert (
+        'gate1="${project_root}/runs/phase2-recovery-r3/gate1/'
+        '${commit}/r3-implementation-closure.json"'
+    ) in submit
+    assert (
+        'source_test_receipt="${project_root}/runs/phase2-recovery-r3/gate1/'
+        '${commit}/r3-source-test-receipt.json"'
+    ) in submit
+    assert submit.index('commit="$(git -C "${repo_root}" rev-parse HEAD)"') < submit.index(
+        "${commit}/r3-implementation-closure.json"
+    )
     assert 'export PRORM_R3_SCIENCE_CONFIG="${science_config}"' in submit
     assert 'export PRORM_R3_CONTINUATION_PLAN_SHA256="${continuation_plan_sha256}"' in submit
     assert "--format binding-lines" in submit

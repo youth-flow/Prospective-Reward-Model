@@ -9,8 +9,8 @@ readonly PROJECT_ROOT="/project/sigroup/smart-reward-model"
 readonly SBATCH_RELATIVE="scripts/hpc4/phase2_r3_gate1.sbatch"
 readonly SUBMIT_RELATIVE="scripts/hpc4/submit_phase2_r3_gate1.sh"
 readonly CAPTURE_RELATIVE="scripts/hpc4/capture_phase2_r3_gate1.py"
-readonly SOURCE_RECEIPT_RELATIVE="runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
-readonly GATE1_RELATIVE="runs/phase2-recovery-r3/gate1/r3-implementation-closure.json"
+readonly SOURCE_RECEIPT_FILENAME="r3-source-test-receipt.json"
+readonly GATE1_FILENAME="r3-implementation-closure.json"
 readonly FROZEN_IMAGE_SHA256="d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb"
 readonly SCRATCH_TOOLS="/scratch/yyangjo/r3-gate1-tools-ruff01522-pytest744"
 readonly RUFF_SHA256="64aae5e444938e33121c3b940dff9b3d8ef8fc2a88c477e7f3a4fae2584a8fe8"
@@ -111,8 +111,9 @@ printf '%s  %s\n' "${FROZEN_IMAGE_SHA256}" "${image}" \
   | sha256sum --check --status \
   || die "Gate-1 image SHA-256 mismatch"
 
-source_receipt="${project_root}/${SOURCE_RECEIPT_RELATIVE}"
-gate1_artifact="${project_root}/${GATE1_RELATIVE}"
+gate1_identity_root="${project_root}/runs/phase2-recovery-r3/gate1/${commit}"
+source_receipt="${gate1_identity_root}/${SOURCE_RECEIPT_FILENAME}"
+gate1_artifact="${gate1_identity_root}/${GATE1_FILENAME}"
 [[ ! -e "${source_receipt}" && ! -L "${source_receipt}" ]] \
   || die "source-test receipt already exists; Gate-1 is no-overwrite"
 [[ ! -e "${gate1_artifact}" && ! -L "${gate1_artifact}" ]] \
@@ -145,10 +146,12 @@ ensure_real_directory() {
 runs_root="${project_root}/runs"
 r3_root="${runs_root}/phase2-recovery-r3"
 gate1_root="${r3_root}/gate1"
-logs="${gate1_root}/logs"
+gate1_identity_root="${gate1_root}/${commit}"
+logs="${gate1_identity_root}/logs"
 ensure_real_directory "project runs root" "${runs_root}" "shared"
 ensure_real_directory "R3 output root" "${r3_root}" "r3"
 ensure_real_directory "Gate-1 output root" "${gate1_root}" "r3"
+ensure_real_directory "Gate-1 commit identity root" "${gate1_identity_root}" "r3"
 ensure_real_directory "Gate-1 log directory" "${logs}" "r3"
 
 export_spec="PATH=/usr/bin:/bin"
@@ -172,6 +175,8 @@ job_id="$(
   sbatch \
     --parsable \
     --export="${export_spec}" \
+    --output="${logs}/gate1-%j.out" \
+    --error="${logs}/gate1-%j.err" \
     "${sbatch_script}"
 )"
 [[ "${job_id}" =~ ^[1-9][0-9]*$ ]] || die "sbatch returned an invalid job ID"

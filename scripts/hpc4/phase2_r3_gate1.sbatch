@@ -10,8 +10,6 @@
 #SBATCH --mem=96G
 #SBATCH --time=0-12:00:00
 #SBATCH --job-name=prorm-r3-gate1
-#SBATCH --output=/project/sigroup/smart-reward-model/runs/phase2-recovery-r3/gate1/logs/gate1-%j.out
-#SBATCH --error=/project/sigroup/smart-reward-model/runs/phase2-recovery-r3/gate1/logs/gate1-%j.err
 #SBATCH --signal=B:TERM@300
 #SBATCH --no-requeue
 
@@ -23,8 +21,8 @@ readonly PROJECT_ROOT="/project/sigroup/smart-reward-model"
 readonly SBATCH_RELATIVE="scripts/hpc4/phase2_r3_gate1.sbatch"
 readonly SUBMIT_RELATIVE="scripts/hpc4/submit_phase2_r3_gate1.sh"
 readonly CAPTURE_RELATIVE="scripts/hpc4/capture_phase2_r3_gate1.py"
-readonly SOURCE_RECEIPT_RELATIVE="runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
-readonly GATE1_RELATIVE="runs/phase2-recovery-r3/gate1/r3-implementation-closure.json"
+readonly SOURCE_RECEIPT_FILENAME="r3-source-test-receipt.json"
+readonly GATE1_FILENAME="r3-implementation-closure.json"
 readonly FROZEN_IMAGE_SHA256="d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb"
 readonly SCRATCH_TOOLS="/scratch/yyangjo/r3-gate1-tools-ruff01522-pytest744"
 readonly SCRATCH_RUNTIME_ROOT="/scratch/yyangjo/r3-gate1-runtime"
@@ -154,8 +152,16 @@ printf '%s  %s\n' "${FROZEN_IMAGE_SHA256}" "${image}" \
   | sha256sum --check --status \
   || die "Gate-1 image SHA-256 mismatch"
 
-source_receipt="${project_root}/${SOURCE_RECEIPT_RELATIVE}"
-gate1_artifact="${project_root}/${GATE1_RELATIVE}"
+gate1_identity_root="${project_root}/runs/phase2-recovery-r3/gate1/${commit}"
+[[ -d "${gate1_identity_root}" && ! -L "${gate1_identity_root}" ]] \
+  || die "Gate-1 commit identity root is missing"
+[[ "$(realpath -e -- "${gate1_identity_root}")" == "${gate1_identity_root}" ]] \
+  || die "Gate-1 commit identity root is not canonical"
+[[ "$(stat -c '%a' -- "${gate1_identity_root}")" == "750" || \
+  "$(stat -c '%a' -- "${gate1_identity_root}")" == "2750" ]] \
+  || die "Gate-1 commit identity root must retain mode 0750"
+source_receipt="${gate1_identity_root}/${SOURCE_RECEIPT_FILENAME}"
+gate1_artifact="${gate1_identity_root}/${GATE1_FILENAME}"
 [[ ! -e "${source_receipt}" && ! -L "${source_receipt}" ]] \
   || die "source-test receipt already exists; Gate-1 is no-overwrite"
 [[ ! -e "${gate1_artifact}" && ! -L "${gate1_artifact}" ]] \

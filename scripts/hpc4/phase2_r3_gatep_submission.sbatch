@@ -17,6 +17,8 @@ required_environment=(
   PRORM_R3_SCRATCH_ROOT
   PRORM_R3_HF_CACHE
   PRORM_R3_GATEP_ATTEMPT_ROOT
+  PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT
+  PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT_FILE_SHA256
   PRORM_R3_SCIENCE_CONFIG
   PRORM_R3_SOURCE_CONFIG
   PRORM_R3_PARENT_REGISTRY
@@ -62,6 +64,7 @@ command -v cp >/dev/null 2>&1 || die "cp is unavailable"
 command -v git >/dev/null 2>&1 || die "git is unavailable"
 command -v ln >/dev/null 2>&1 || die "ln is unavailable"
 command -v mktemp >/dev/null 2>&1 || die "mktemp is unavailable"
+command -v mkdir >/dev/null 2>&1 || die "mkdir is unavailable"
 command -v realpath >/dev/null 2>&1 || die "realpath is unavailable"
 command -v rm >/dev/null 2>&1 || die "rm is unavailable"
 command -v sbatch >/dev/null 2>&1 || die "sbatch is unavailable"
@@ -78,9 +81,16 @@ requested_source_config="${PRORM_R3_SOURCE_CONFIG}"
 requested_parent_registry="${PRORM_R3_PARENT_REGISTRY}"
 scheduler_raw_evidence="$(realpath -e -- "${PRORM_R3_SCHEDULER_RAW_EVIDENCE}")"
 resource_raw_evidence="$(realpath -e -- "${PRORM_R3_RESOURCE_RAW_EVIDENCE}")"
+commit="$(git -C "${repo_root}" rev-parse HEAD)"
+[[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || die "invalid Git commit"
+[[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]] \
+  || die "production checkout is not clean"
 source_test_receipt="$(
   realpath -e -- \
-    "${project_root}/runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
+    "${project_root}/runs/phase2-recovery-r3/gate1/${commit}/r3-source-test-receipt.json"
+)"
+predecessor_failure_receipt="$(
+  realpath -e -- "${PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT}"
 )"
 
 [[ "${PRORM_R3_REPO_ROOT}" == "${repo_root}" ]] \
@@ -111,6 +121,11 @@ source_test_receipt="$(
   || die "scheduler evidence must be durable project evidence"
 [[ "${resource_raw_evidence}" == "${project_root}/"* ]] \
   || die "resource evidence must be durable project evidence"
+[[ "${predecessor_failure_receipt}" == \
+  "${project_root}/runs/phase2-recovery-r3/gatep/"*"/gatep-attempt-"*"/failure-evidence/gatep-failure-receipt.json" \
+  && -f "${predecessor_failure_receipt}" \
+  && ! -L "${predecessor_failure_receipt}" ]] \
+  || die "predecessor Gate-P failure receipt is outside its fixed namespace"
 [[ "${PRORM_R3_CLUSTER}" == "hpc4" ]] || die "unexpected cluster"
 [[ "${PRORM_R3_PARTITION}" == "gpu-l20" ]] || die "unexpected Gate-P partition"
 [[ "${PRORM_R3_PROFILE_WALLTIME_SECONDS}" =~ ^[1-9][0-9]*$ ]] \
@@ -119,11 +134,6 @@ source_test_receipt="$(
   || die "profile CPU count must be a positive integer"
 [[ "${PRORM_R3_PROFILE_MEMORY_MIB}" =~ ^[1-9][0-9]*$ ]] \
   || die "profile memory MiB must be a positive integer"
-
-commit="$(git -C "${repo_root}" rev-parse HEAD)"
-[[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || die "invalid Git commit"
-[[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]] \
-  || die "production checkout is not clean"
 
 # The materializer resolves the parent registry and source config inside the
 # persistent project root.  Publish byte-identical, no-overwrite copies from
@@ -225,6 +235,68 @@ printf '%s  %s\n' \
   "${PRORM_R3_RESOURCE_RAW_EVIDENCE_SHA256}" \
   "${resource_raw_evidence}" \
   | sha256sum --check --status || die "resource evidence SHA-256 mismatch"
+[[ "${PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT_FILE_SHA256}" =~ \
+  ^[0-9a-f]{64}$ ]] \
+  || die "predecessor Gate-P failure receipt SHA-256 is invalid"
+printf '%s  %s\n' \
+  "${PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT_FILE_SHA256}" \
+  "${predecessor_failure_receipt}" \
+  | sha256sum --check --status \
+  || die "predecessor Gate-P failure receipt SHA-256 mismatch"
+
+science_config_file_sha256="$(sha256sum -- "${science_config}" | cut -d' ' -f1)"
+[[ "${science_config_file_sha256}" =~ ^[0-9a-f]{64}$ ]] \
+  || die "science config file SHA-256 is invalid"
+failure_cli="${repo_root}/scripts/hpc4/capture_phase2_r3_gatep_failure.py"
+[[ -f "${failure_cli}" && ! -L "${failure_cli}" ]] \
+  || die "Gate-P failure-lineage CLI is unavailable"
+lineage_container=(
+  apptainer
+  exec
+  --cleanenv
+  --bind "${repo_root}:${repo_root}:ro"
+  --bind "${project_root}:${project_root}:rw"
+  --bind "${image}:${image}:ro"
+  --env "PYTHONPATH=${repo_root}/src"
+  "${image}"
+  python3
+  "${failure_cli}"
+)
+lineage_plan="$(
+  "${lineage_container[@]}" plan-next \
+    --project-root="${project_root}" \
+    --predecessor-receipt "${predecessor_failure_receipt}" \
+    --predecessor-receipt-file-sha256 \
+      "${PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT_FILE_SHA256}" \
+    --source-git-commit "${commit}" \
+    --gate0-file-sha256 "${PRORM_R3_GATE0_FILE_SHA256}" \
+    --gate1-file-sha256 "${PRORM_R3_GATE1_FILE_SHA256}" \
+    --source-test-receipt-file-sha256 \
+      "${PRORM_R3_SOURCE_TEST_RECEIPT_FILE_SHA256}" \
+    --science-config-file-sha256 "${science_config_file_sha256}" \
+    --container-file-sha256 "${PRORM_R3_IMAGE_SHA256}"
+)" || die "failed to validate the predecessor Gate-P failure receipt"
+mapfile -t lineage_plan_fields < <(
+  printf '%s\n' "${lineage_plan}" \
+    | apptainer exec \
+      --cleanenv \
+      --bind "${image}:${image}:ro" \
+      "${image}" \
+      python3 -c '
+import json,sys
+value=json.load(sys.stdin)
+for key in ("campaign_identity_sha256","attempt_name"):
+    print(value[key])
+'
+)
+[[ "${#lineage_plan_fields[@]}" -eq 2 ]] \
+  || die "Gate-P lineage plan field count is invalid"
+campaign_identity_sha256="${lineage_plan_fields[0]}"
+planned_attempt_name="${lineage_plan_fields[1]}"
+[[ "${campaign_identity_sha256}" =~ ^[0-9a-f]{64}$ \
+  && "${planned_attempt_name}" =~ ^gatep-attempt-[0-9]{3}$ \
+  && "${planned_attempt_name}" != "gatep-attempt-000" ]] \
+  || die "Gate-P lineage plan identity/index is invalid"
 
 attempt_root_text="${PRORM_R3_GATEP_ATTEMPT_ROOT}"
 case "${attempt_root_text}" in
@@ -233,15 +305,80 @@ case "${attempt_root_text}" in
 esac
 [[ "$(basename -- "${attempt_root_text}")" != "gatep-attempt-000" ]] \
   || die "Gate-P attempt index must be positive"
+[[ "$(basename -- "$(dirname -- "${attempt_root_text}")")" == \
+  "${campaign_identity_sha256}" \
+  && "$(basename -- "${attempt_root_text}")" == "${planned_attempt_name}" ]] \
+  || die "Gate-P attempt path does not match its predecessor-bound lineage plan"
 [[ ! -e "${attempt_root_text}" && ! -L "${attempt_root_text}" ]] \
   || die "Gate-P attempt root already exists"
-attempt_parent="$(realpath -e -- "$(dirname -- "${attempt_root_text}")")"
+gatep_root_text="${project_root}/runs/phase2-recovery-r3/gatep"
+[[ -d "${gatep_root_text}" && ! -L "${gatep_root_text}" ]] \
+  || die "Gate-P campaign root must be an existing real directory"
+gatep_root="$(realpath -e -- "${gatep_root_text}")"
+[[ "${gatep_root}" == "${gatep_root_text}" ]] \
+  || die "Gate-P campaign root must be canonical"
+attempt_parent_text="${gatep_root}/${campaign_identity_sha256}"
+[[ "$(dirname -- "${attempt_root_text}")" == "${attempt_parent_text}" ]] \
+  || die "Gate-P campaign parent differs from the validated campaign identity"
+if [[ -e "${attempt_parent_text}" || -L "${attempt_parent_text}" ]]; then
+  [[ -d "${attempt_parent_text}" && ! -L "${attempt_parent_text}" ]] \
+    || die "Gate-P campaign parent is not a real directory"
+else
+  mkdir -m 2750 -- "${attempt_parent_text}" \
+    || die "failed to create the validated Gate-P campaign parent"
+fi
+attempt_parent="$(realpath -e -- "${attempt_parent_text}")"
+[[ "${attempt_parent}" == "${attempt_parent_text}" \
+  && "$(stat -c '%a' -- "${attempt_parent}")" == "2750" ]] \
+  || die "Gate-P campaign parent identity/mode is invalid"
 attempt_root="${attempt_parent}/$(basename -- "${attempt_root_text}")"
 mkdir -- "${attempt_root}"
 attempt_root="$(realpath -e -- "${attempt_root}")"
 [[ "${attempt_root}" == "${attempt_root_text}" ]] \
   || die "Gate-P attempt root must be canonical"
 mkdir -- "${attempt_root}/logs"
+
+lineage_result="$(
+  "${lineage_container[@]}" publish-lineage \
+    --project-root="${project_root}" \
+    --attempt-root "${attempt_root}" \
+    --predecessor-receipt "${predecessor_failure_receipt}" \
+    --predecessor-receipt-file-sha256 \
+      "${PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT_FILE_SHA256}" \
+    --source-git-commit "${commit}" \
+    --gate0-file-sha256 "${PRORM_R3_GATE0_FILE_SHA256}" \
+    --gate1-file-sha256 "${PRORM_R3_GATE1_FILE_SHA256}" \
+    --source-test-receipt-file-sha256 \
+      "${PRORM_R3_SOURCE_TEST_RECEIPT_FILE_SHA256}" \
+    --science-config-file-sha256 "${science_config_file_sha256}" \
+    --container-file-sha256 "${PRORM_R3_IMAGE_SHA256}"
+)" || die "failed to publish Gate-P attempt lineage"
+mapfile -t lineage_fields < <(
+  printf '%s\n' "${lineage_result}" \
+    | apptainer exec \
+      --cleanenv \
+      --bind "${image}:${image}:ro" \
+      "${image}" \
+      python3 -c '
+import json,sys
+value=json.load(sys.stdin)
+for key in ("lineage_file_sha256","lineage_sha256"):
+    print(value[key])
+'
+)
+[[ "${#lineage_fields[@]}" -eq 2 ]] \
+  || die "Gate-P attempt lineage field count is invalid"
+attempt_lineage="${attempt_root}/gatep-attempt-lineage.json"
+attempt_lineage_file_sha256="${lineage_fields[0]}"
+attempt_lineage_sha256="${lineage_fields[1]}"
+[[ "${attempt_lineage_file_sha256}" =~ ^[0-9a-f]{64}$ \
+  && "${attempt_lineage_sha256}" =~ ^[0-9a-f]{64}$ \
+  && -f "${attempt_lineage}" \
+  && ! -L "${attempt_lineage}" ]] \
+  || die "published Gate-P attempt lineage is invalid"
+printf '%s  %s\n' "${attempt_lineage_file_sha256}" "${attempt_lineage}" \
+  | sha256sum --check --status \
+  || die "published Gate-P attempt lineage file SHA-256 mismatch"
 
 profile_intent="${attempt_root}/profile-allocation-intent.json"
 operational_bundle="${attempt_root}/gatep-operational-bundle.json"
@@ -271,6 +408,8 @@ apptainer exec \
   "${image}" \
   python3 "${terminal_cli}" profile-intent \
     --output "${profile_intent}" \
+    --attempt-lineage-file-sha256 "${attempt_lineage_file_sha256}" \
+    --attempt-lineage-sha256 "${attempt_lineage_sha256}" \
     --cluster "${PRORM_R3_CLUSTER}" \
     --account sigroup \
     --partition "${PRORM_R3_PARTITION}" \
@@ -285,6 +424,9 @@ profile_intent_sha256="$(sha256sum -- "${profile_intent}" | cut -d' ' -f1)"
   || die "invalid profile intent SHA-256"
 
 export PRORM_R3_GIT_COMMIT="${commit}"
+export PRORM_R3_GATEP_ATTEMPT_LINEAGE="${attempt_lineage}"
+export PRORM_R3_GATEP_ATTEMPT_LINEAGE_FILE_SHA256="${attempt_lineage_file_sha256}"
+export PRORM_R3_GATEP_ATTEMPT_LINEAGE_SHA256="${attempt_lineage_sha256}"
 export PRORM_R3_PROFILE_INTENT="${profile_intent}"
 export PRORM_R3_PROFILE_INTENT_FILE_SHA256="${profile_intent_sha256}"
 export PRORM_R3_OPERATIONAL_BUNDLE="${operational_bundle}"
@@ -302,6 +444,9 @@ printf -v slurm_walltime '%d-%02d:%02d:%02d' \
 export_names=("${required_environment[@]}")
 export_names+=(
   PRORM_R3_GIT_COMMIT
+  PRORM_R3_GATEP_ATTEMPT_LINEAGE
+  PRORM_R3_GATEP_ATTEMPT_LINEAGE_FILE_SHA256
+  PRORM_R3_GATEP_ATTEMPT_LINEAGE_SHA256
   PRORM_R3_PROFILE_INTENT
   PRORM_R3_PROFILE_INTENT_FILE_SHA256
   PRORM_R3_OPERATIONAL_BUNDLE

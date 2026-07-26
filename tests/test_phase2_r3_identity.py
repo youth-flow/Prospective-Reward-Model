@@ -215,7 +215,8 @@ def _sealed_gate1_capabilities() -> R3Gate1Capabilities:
         source_test_receipt_file_sha256=_digest("source-test-receipt-file"),
         verification_suite_sha256=_digest("suite"),
         live_reverification_sha256=_digest("live-reverification"),
-        production_relative=gate1_module._GATE1_RELATIVE.as_posix(),
+        source_git_commit="1" * 40,
+        production_relative=gate1_module._gate1_relative("1" * 40).as_posix(),
     )
     gate1 = gate1_module.R3Gate1Capability(
         **gate1_payload,

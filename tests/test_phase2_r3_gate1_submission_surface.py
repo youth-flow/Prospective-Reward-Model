@@ -53,6 +53,8 @@ def test_gate1_submit_passes_the_tracked_file_and_never_uses_wrap_or_stdin() -> 
     assert "--export=NONE" not in text
     assert 'SBATCH_RELATIVE="scripts/hpc4/phase2_r3_gate1.sbatch"' in text
     assert re.search(r"sbatch \\\n\s+--parsable \\\n\s+--export=", text)
+    assert '--output="${logs}/gate1-%j.out"' in text
+    assert '--error="${logs}/gate1-%j.err"' in text
     assert '"${sbatch_script}"' in text
     assert 'first_line="$(sed -n \'1p\' -- "${sbatch_script}")"' in text
     assert "[[ \"${first_line}\" == '#!/usr/bin/env bash' ]]" in text
@@ -73,6 +75,9 @@ def test_gate1_surfaces_bind_clean_commit_container_and_source_test_chain() -> N
         assert "r3-implementation-closure.json" in text
     assert "source-test receipt already exists; Gate-1 is no-overwrite" in submit
     assert "Gate-1 artifact already exists; Gate-1 is no-overwrite" in submit
+    assert 'logs="${gate1_identity_root}/logs"' in submit
+    assert "#SBATCH --output=" not in batch
+    assert "#SBATCH --error=" not in batch
 
     source_test = batch.index('"${container_python[@]}" "${capture_cli}" source-test')
     capture_live = batch.index('"${host_python}" "${capture_cli}" capture-live')
@@ -125,6 +130,9 @@ def test_gate1_submit_prepares_core_compatible_output_modes() -> None:
     assert '"${mode}" != "750" && "${mode}" != "2750"' in text
     assert 'ensure_real_directory "R3 output root" "${r3_root}" "r3"' in text
     assert 'ensure_real_directory "Gate-1 output root" "${gate1_root}" "r3"' in text
+    assert (
+        'ensure_real_directory "Gate-1 commit identity root" "${gate1_identity_root}" "r3"' in text
+    )
     assert 'ensure_real_directory "Gate-1 log directory" "${logs}" "r3"' in text
 
 

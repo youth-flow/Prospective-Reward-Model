@@ -183,8 +183,8 @@ science_config_file_sha256="$(
   sha256sum -- "${science_config}" | cut -d' ' -f1
 )"
 gate0="${project_root}/runs/phase2-recovery-r3/gate0/r2-1648125-failure-parent.json"
-gate1="${project_root}/runs/phase2-recovery-r3/gate1/r3-implementation-closure.json"
-source_test_receipt="${project_root}/runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
+gate1="${project_root}/runs/phase2-recovery-r3/gate1/${commit}/r3-implementation-closure.json"
+source_test_receipt="${project_root}/runs/phase2-recovery-r3/gate1/${commit}/r3-source-test-receipt.json"
 gate0="$(realpath -e -- "${gate0}")"
 gate1="$(realpath -e -- "${gate1}")"
 source_test_receipt="$(realpath -e -- "${source_test_receipt}")"

@@ -64,4 +64,11 @@ export PRORM_R3_PRIMARY_MEMORY_BYTES="68719476736"
 export PRORM_R3_PROFILE_WALLTIME_SECONDS="21600"
 export PRORM_R3_PROFILE_CPUS_PER_TASK="8"
 export PRORM_R3_PROFILE_MEMORY_MIB="65536"
+# This R3 recovery must preserve and bind the known 7491b17/job-1657236
+# failed attempt before a new source identity may start at attempt-001.
+export PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT="${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/gatep/CHANGE_ME/gatep-attempt-001/failure-evidence/gatep-failure-receipt.json"
+export PRORM_R3_GATEP_PREDECESSOR_FAILURE_RECEIPT_FILE_SHA256="CHANGE_ME"
+# Replace the identity component with `campaign_identity_sha256` and the
+# attempt name with `attempt_name` emitted by:
+# capture_phase2_r3_gatep_failure.py plan-next ...
 export PRORM_R3_GATEP_ATTEMPT_ROOT="${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/gatep/CHANGE_ME/gatep-attempt-001"

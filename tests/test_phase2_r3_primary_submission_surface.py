@@ -46,6 +46,17 @@ def test_submitter_derives_all_scheduler_resources_from_the_pinned_plan() -> Non
     assert 'source_config="${input_root}/common_beta_pilot_base.yaml"' in text
     assert "common_beta_recovery_pilot.yaml" not in text
     assert 'parent_registry="${input_root}/phase2_recovery_parent_failures.json"' in text
+    assert (
+        'gate1="${project_root}/runs/phase2-recovery-r3/gate1/'
+        '${commit}/r3-implementation-closure.json"'
+    ) in text
+    assert (
+        'source_test_receipt="${project_root}/runs/phase2-recovery-r3/gate1/'
+        '${commit}/r3-source-test-receipt.json"'
+    ) in text
+    assert text.index('commit="$(git -C "${repo_root}" rev-parse HEAD)"') < text.index(
+        "${commit}/r3-implementation-closure.json"
+    )
     assert "retained input copy differs from clean repository bytes" in text
     assert "${repo_root}/configs/phase2_recovery_r3_science.yaml" in text
     assert "/home/yyangjo/Smart-Reward-Model" in text

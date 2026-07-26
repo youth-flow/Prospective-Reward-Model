@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -433,6 +434,37 @@ def test_publication_is_no_overwrite_and_inspection_uses_caller_sha(
         gate1._publish_exclusive(path, raw)
 
 
+def test_publication_cleans_only_its_owned_temp_after_fsync_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = (tmp_path / "publication-failure").resolve()
+    parent.mkdir()
+    path = parent / "gate1.json"
+
+    monkeypatch.setattr(
+        gate1.os,
+        "fsync",
+        lambda _descriptor: (_ for _ in ()).throw(OSError("forced fsync failure")),
+    )
+
+    with pytest.raises(OSError, match="forced fsync failure"):
+        gate1._publish_exclusive(path, b"evidence\n")
+
+    assert not path.exists()
+    assert list(parent.iterdir()) == []
+
+
+def test_portable_cleanup_preserves_a_different_inode(tmp_path: Path) -> None:
+    path = tmp_path / "replacement.json"
+    path.write_bytes(b"replacement\n")
+    info = path.stat()
+
+    gate1._unlink_if_identity(path, (info.st_dev, info.st_ino + 1))
+
+    assert path.read_bytes() == b"replacement\n"
+
+
 def test_reopen_reruns_checks_and_rejects_new_clean_commit_or_changed_sif(
     tmp_path: Path,
 ) -> None:
@@ -507,6 +539,32 @@ def test_capabilities_are_distinct_sealed_and_dto_conversion_is_typed(
         file_sha256=gate1._sha256(raw),
         live_reverification_sha256="a" * 64,
     )
+    source_commit = str(payload["source"]["commit"])
+    assert capabilities.gate1.production_relative == gate1._gate1_relative(source_commit).as_posix()
+    assert gate1._gate1_namespace_commit(capabilities.gate1.production_relative) == (source_commit)
+    cross_commit = _constructor_kwargs(capabilities.gate1)
+    cross_commit["production_relative"] = gate1._gate1_relative("f" * 40).as_posix()
+    with pytest.raises(ValueError, match="namespace"):
+        gate1.R3Gate1Capability(
+            **cross_commit,
+            _factory_token=gate1._GATE1_FACTORY_TOKEN,
+        )
+    mismatched_source = _constructor_kwargs(capabilities.gate1)
+    mismatched_source["source_git_commit"] = "f" * 40
+    mismatched_source["production_relative"] = gate1._gate1_relative("f" * 40).as_posix()
+    unsigned = dict(mismatched_source)
+    del unsigned["capability_sha256"]
+    mismatched_source["capability_sha256"] = gate1._canonical_sha256(unsigned)
+    foreign_gate1 = gate1.R3Gate1Capability(
+        **mismatched_source,
+        _factory_token=gate1._GATE1_FACTORY_TOKEN,
+    )
+    with pytest.raises(ValueError, match="close over one evidence bundle"):
+        gate1.R3Gate1Capabilities(
+            gate1=foreign_gate1,
+            source=capabilities.source,
+            container=capabilities.container,
+        )
 
     assert gate1.r3_gate1_artifact_ref(capabilities.gate1).schema_version == (
         gate1.GATE1_ARTIFACT_SCHEMA
@@ -536,6 +594,30 @@ def test_capabilities_are_distinct_sealed_and_dto_conversion_is_typed(
     )
     with pytest.raises(TypeError, match="exact R3SourceCapability"):
         gate1.r3_source_artifact_ref(generic)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires exact POSIX modes")
+def test_stable_bytes_checks_mode_on_the_open_descriptor(tmp_path: Path) -> None:
+    path = tmp_path / "receipt.json"
+    path.write_bytes(b"evidence")
+    os.chmod(path, 0o600)
+    with pytest.raises(ValueError, match="retain mode 0440"):
+        gate1._stable_bytes(
+            path,
+            name="receipt",
+            maximum_bytes=1024,
+            required_mode=0o440,
+        )
+    os.chmod(path, 0o440)
+    assert (
+        gate1._stable_bytes(
+            path,
+            name="receipt",
+            maximum_bytes=1024,
+            required_mode=0o440,
+        )
+        == b"evidence"
+    )
 
 
 def test_public_authorizers_have_no_runner_injection_and_fail_off_hpc4(
@@ -571,6 +653,20 @@ def test_gate1_formal_surfaces_fix_disjoint_roots_and_receipt_path(
     assert repo == gate1.PRODUCTION_REPO_ROOT
     assert project == gate1.PRODUCTION_PROJECT_ROOT
     assert repo != project and repo not in project.parents and project not in repo.parents
+    commit = "1" * 40
+    assert gate1._gate1_relative(commit) == (
+        Path("runs/phase2-recovery-r3/gate1") / commit / "r3-implementation-closure.json"
+    )
+    assert gate1._source_test_receipt_relative(commit) == (
+        Path("runs/phase2-recovery-r3/gate1") / commit / "r3-source-test-receipt.json"
+    )
+    assert gate1._gate1_namespace_commit(gate1._gate1_relative(commit).as_posix()) == commit
+    with pytest.raises(ValueError, match="namespace"):
+        gate1._gate1_namespace_commit(
+            "runs/phase2-recovery-r3/gate1/r3-implementation-closure.json"
+        )
+    with pytest.raises(ValueError, match="namespace commit"):
+        gate1._gate1_relative("../mutable")
     assert set(inspect.signature(gate1.capture_r3_gate1_source_test_receipt).parameters) == set()
     assert set(inspect.signature(gate1.capture_live_r3_gate1_evidence).parameters) == {
         "container",

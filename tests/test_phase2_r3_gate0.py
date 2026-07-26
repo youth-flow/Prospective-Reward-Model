@@ -375,9 +375,16 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
         assert '"${project_root}:${project_root}:rw"' in script
         assert '"/project/sigroup:/project/sigroup:rw"' not in script
         assert "\n  PRORM_R3_SOURCE_TEST_RECEIPT\n" not in script
-        assert (
-            "${project_root}/runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
-        ) in script
+    assert (
+        "${project_root}/runs/phase2-recovery-r3/gate1/"
+        "${PRORM_R3_GIT_COMMIT}/r3-source-test-receipt.json"
+    ) in gatep_sbatch
+    assert (
+        "${project_root}/runs/phase2-recovery-r3/gate1/${commit}/r3-source-test-receipt.json"
+    ) in gatep_submitter
+    assert gatep_submitter.index('commit="$(git -C "${repo_root}" rev-parse HEAD)"') < (
+        gatep_submitter.index("${commit}/r3-source-test-receipt.json")
+    )
     assert 'runner="${repo_root}/scripts/hpc4/run_phase2_r3_gatep.py"' in gatep_sbatch
     assert 'terminal_cli="${repo_root}/scripts/hpc4/' in gatep_submitter
     assert '"${repo_root}/scripts/hpc4/phase2_r3_gatep.sbatch"' in gatep_submitter
@@ -533,13 +540,14 @@ def test_gate_output_namespaces_are_multilevel_owner_writable_0750(
 
     os.chmod(retained_r3, 0o2750)
     gate0_parent = gate0._ensure_output_parent()
-    gate1_parent = gate1._ensure_output_parent()
+    commit = "1" * 40
+    gate1_parent = gate1._ensure_output_parent(gate1._gate1_relative(commit))
     source_receipt_parent = gate1._ensure_output_parent(
-        gate1._SOURCE_TEST_RECEIPT_RELATIVE,
+        gate1._source_test_receipt_relative(commit),
         namespace_name="source-test receipt",
     )
     assert gate0_parent == project / "runs/phase2-recovery-r3/gate0"
-    assert gate1_parent == project / "runs/phase2-recovery-r3/gate1"
+    assert gate1_parent == project / "runs/phase2-recovery-r3/gate1" / commit
     assert source_receipt_parent == gate1_parent
 
     expected_modes = {
@@ -547,11 +555,33 @@ def test_gate_output_namespaces_are_multilevel_owner_writable_0750(
         Path("runs/phase2-recovery-r3"): 0o2750,
         Path("runs/phase2-recovery-r3/gate0"): 0o2750,
         Path("runs/phase2-recovery-r3/gate1"): 0o2750,
+        Path(f"runs/phase2-recovery-r3/gate1/{commit}"): 0o2750,
     }
     for relative, expected_mode in expected_modes.items():
         directory = project / relative
         assert stat.S_IMODE(directory.stat().st_mode) == expected_mode
         assert os.access(directory, os.W_OK | os.X_OK)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX dirfd publication")
+def test_gate0_publication_cleans_owned_temp_after_fsync_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = (tmp_path / "gate0-publication-failure").resolve()
+    parent.mkdir()
+    path = parent / "gate0.json"
+    monkeypatch.setattr(
+        gate0.os,
+        "fsync",
+        lambda _descriptor: (_ for _ in ()).throw(OSError("forced fsync failure")),
+    )
+
+    with pytest.raises(OSError, match="forced fsync failure"):
+        gate0._publish_exclusive(path, b"evidence\n")
+
+    assert not path.exists()
+    assert list(parent.iterdir()) == []
 
 
 def test_local_machine_cannot_issue_live_hpc4_capability() -> None:
@@ -603,6 +633,133 @@ def _immutable_revalidation_payload() -> dict[str, object]:
     }
 
 
+def _recorded_git_identity(commit: str, relative: Path) -> dict[str, object]:
+    raw = f"{commit}:{relative.as_posix()}".encode()
+    return {
+        "repository_relative": relative.as_posix(),
+        "git_commit": commit,
+        "git_object_id": gate0._sha256(raw)[:40],
+        "size_bytes": len(raw),
+        "sha256": gate0._sha256(raw),
+    }
+
+
+def test_recorded_capture_sources_are_revalidated_at_historical_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture_commit = "a" * 40
+    producer = {
+        "execution_git_commit": capture_commit,
+        "clean_worktree": True,
+        "capture_source_blobs": [
+            _recorded_git_identity(capture_commit, path) for path in gate0._CAPTURE_SOURCE_PATHS
+        ],
+        "r2_execution_source_blobs": [
+            _recorded_git_identity(gate0.R2_RECOVERY_GIT_COMMIT, path)
+            for path in gate0._R2_SOURCE_PATHS
+        ],
+    }
+    observed: list[tuple[str, Path]] = []
+    git_calls: list[tuple[str, ...]] = []
+
+    def recorded(commit: str, relative: Path) -> dict[str, object]:
+        observed.append((commit, relative))
+        return _recorded_git_identity(commit, relative)
+
+    monkeypatch.setattr(gate0, "_git_blob_record", recorded)
+    monkeypatch.setattr(
+        gate0,
+        "_git",
+        lambda command, **_kwargs: git_calls.append(tuple(command)) or b"",
+    )
+
+    gate0._revalidate_recorded_capture_source_identity(producer)
+
+    assert git_calls == [
+        ("merge-base", "--is-ancestor", capture_commit, "HEAD"),
+    ]
+    assert observed == [
+        *((capture_commit, path) for path in gate0._CAPTURE_SOURCE_PATHS),
+        *((gate0.R2_RECOVERY_GIT_COMMIT, path) for path in gate0._R2_SOURCE_PATHS),
+    ]
+
+
+def test_recorded_capture_source_revalidation_rejects_blob_or_path_tamper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture_commit = "a" * 40
+
+    def producer() -> dict[str, object]:
+        return {
+            "execution_git_commit": capture_commit,
+            "clean_worktree": True,
+            "capture_source_blobs": [
+                _recorded_git_identity(capture_commit, path) for path in gate0._CAPTURE_SOURCE_PATHS
+            ],
+            "r2_execution_source_blobs": [
+                _recorded_git_identity(gate0.R2_RECOVERY_GIT_COMMIT, path)
+                for path in gate0._R2_SOURCE_PATHS
+            ],
+        }
+
+    monkeypatch.setattr(gate0, "_git_blob_record", _recorded_git_identity)
+    monkeypatch.setattr(gate0, "_git", lambda *_args, **_kwargs: b"")
+    blob_tamper = producer()
+    blob_tamper["capture_source_blobs"][0]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="Git blobs changed"):
+        gate0._revalidate_recorded_capture_source_identity(blob_tamper)
+
+    path_tamper = producer()
+    path_tamper["capture_source_blobs"][0]["repository_relative"] = "docs/other.md"
+    with pytest.raises(ValueError, match="paths are invalid"):
+        gate0._revalidate_recorded_capture_source_identity(path_tamper)
+
+
+def test_published_gate0_capture_commit_reopens_from_real_git_history() -> None:
+    capture_commit = "5e180ae1556582f04adbeadb01836b5cd3acf659"
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head != capture_commit
+    producer = {
+        "execution_git_commit": capture_commit,
+        "clean_worktree": True,
+        "capture_source_blobs": [
+            {
+                "repository_relative": "src/smart_reward/phase2_r3_gate0.py",
+                "git_commit": capture_commit,
+                "git_object_id": "f4ae18b859d5f66fb44c5e07160729469ef789d1",
+                "size_bytes": 77383,
+                "sha256": "37be7e84b0f2030d578907c9e53ea9e9090b661690e49990ad985e212a4b33ef",
+            },
+            {
+                "repository_relative": "scripts/hpc4/capture_phase2_r3_gate0.py",
+                "git_commit": capture_commit,
+                "git_object_id": "d5bc200e6df58c5686ccab4bf089f9de1295b6c3",
+                "size_bytes": 5227,
+                "sha256": "5530915058580d146ca8ff597a7c0bbb1107995ff8850bbc3071bf1dc4f7eb5b",
+            },
+            {
+                "repository_relative": "docs/phase2_recovery_revision3.md",
+                "git_commit": capture_commit,
+                "git_object_id": "381acbd127b87612ed1384318e7ebcc13e2037b7",
+                "size_bytes": 27804,
+                "sha256": "8736b3d96bc8f26c60782359ca3ce9d8c1297e6450fae2365e2c9714187d15b8",
+            },
+        ],
+        "r2_execution_source_blobs": [
+            gate0._git_blob_record(gate0.R2_RECOVERY_GIT_COMMIT, path)
+            for path in gate0._R2_SOURCE_PATHS
+        ],
+    }
+
+    gate0._revalidate_recorded_capture_source_identity(producer)
+
+
 def test_in_container_immutable_revalidation_never_queries_live_slurm(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -610,6 +767,8 @@ def test_in_container_immutable_revalidation_never_queries_live_slurm(
     payload = _immutable_revalidation_payload()
     compared: list[str] = []
     frozen_live_control_checks: list[bool] = []
+    producers: list[object] = []
+    current_sources: list[object] = []
 
     monkeypatch.setattr(
         gate0,
@@ -618,7 +777,16 @@ def test_in_container_immutable_revalidation_never_queries_live_slurm(
             AssertionError("in-container revalidation queried a live command")
         ),
     )
-    monkeypatch.setattr(gate0, "_capture_source_identity", lambda: payload["producer"])
+    monkeypatch.setattr(
+        gate0,
+        "_revalidate_recorded_capture_source_identity",
+        lambda producer: producers.append(producer),
+    )
+    monkeypatch.setattr(
+        gate0,
+        "_capture_source_identity",
+        lambda: current_sources.append({"clean": True}) or {"clean": True},
+    )
     monkeypatch.setattr(
         gate0,
         "_parent_registry_records",
@@ -667,6 +835,8 @@ def test_in_container_immutable_revalidation_never_queries_live_slurm(
 
     assert len(compared) == 10
     assert frozen_live_control_checks == [True]
+    assert producers == [payload["producer"]]
+    assert current_sources == [{"clean": True}]
     assert any("live-scontrol" in name for name in compared)
     assert any("Slurm err" in name for name in compared)
 

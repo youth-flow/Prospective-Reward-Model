@@ -595,6 +595,8 @@ def _successful_profile_terminal(
 ) -> terminal_evidence.SuccessfulProfileTerminalCapability:
     intent = terminal_evidence.publish_profile_allocation_intent(
         (directory / "profile-allocation-intent.json").resolve(),
+        attempt_lineage_file_sha256="1" * 64,
+        attempt_lineage_sha256="2" * 64,
         cluster="hpc4",
         account="sigroup",
         partition=bundle.partition,

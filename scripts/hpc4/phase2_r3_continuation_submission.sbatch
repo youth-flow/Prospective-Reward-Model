@@ -101,9 +101,13 @@ profile_runtime_receipt="$(realpath -e -- "${PRORM_R3_PROFILE_RUNTIME_RECEIPT}")
 profile_terminal_directory="$(
   realpath -e -- "${PRORM_R3_PROFILE_TERMINAL_EVIDENCE_DIRECTORY}"
 )"
+commit="$(git -C "${repo_root}" rev-parse HEAD)"
+[[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || die "invalid Git commit"
+[[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]] \
+  || die "production checkout is not clean"
 gate0="${project_root}/runs/phase2-recovery-r3/gate0/r2-1648125-failure-parent.json"
-gate1="${project_root}/runs/phase2-recovery-r3/gate1/r3-implementation-closure.json"
-source_test_receipt="${project_root}/runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
+gate1="${project_root}/runs/phase2-recovery-r3/gate1/${commit}/r3-implementation-closure.json"
+source_test_receipt="${project_root}/runs/phase2-recovery-r3/gate1/${commit}/r3-source-test-receipt.json"
 gate0="$(realpath -e -- "${gate0}")"
 gate1="$(realpath -e -- "${gate1}")"
 source_test_receipt="$(realpath -e -- "${source_test_receipt}")"
@@ -163,11 +167,6 @@ fi
 for name in "${digest_names[@]}"; do
   [[ "${!name}" =~ ^[0-9a-f]{64}$ ]] || die "${name} is not a lowercase SHA-256"
 done
-
-commit="$(git -C "${repo_root}" rev-parse HEAD)"
-[[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || die "invalid Git commit"
-[[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]] \
-  || die "production checkout is not clean"
 
 # Reuse or publish only byte-identical clean-commit inputs at their exact
 # persistent paths.  External runtime path overrides are intentionally ignored.

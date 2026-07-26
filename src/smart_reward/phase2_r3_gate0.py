@@ -12,10 +12,12 @@ There are deliberately two verification levels:
   evidence, but always returns a non-authorizing inspection.  It is suitable
   for local/offline review.
 * :func:`verify_live_r3_gate0_bundle` additionally requires the exact HPC4
-  production namespace, live ``hpc4`` Slurm control plane, clean committed
-  capture source, unchanged source inodes, container, registries, run
-  inventories, logs, and scheduler bytes.  Only this path can create
-  :class:`R3Gate0Capability`.
+  production namespace, live ``hpc4`` Slurm control plane, the originally
+  recorded capture-source Git blobs, container, registries, run inventories,
+  logs, and scheduler bytes.  Only this path can create
+  :class:`R3Gate0Capability`.  Later clean implementation commits are allowed:
+  the historical capture commit is re-read from Git instead of being confused
+  with the current Gate-1 source commit.
 
 The published artifact is one canonical JSON file.  Raw sacct, the original
 immutable live-scontrol receipt, Slurm logs, and FAILED markers are embedded
@@ -488,6 +490,23 @@ def _require_real_directory(path: Path, *, name: str) -> os.stat_result:
     return info
 
 
+def _stable_stat_identity(
+    info: os.stat_result,
+    *,
+    include_size: bool = True,
+) -> tuple[int, ...]:
+    """Return fields stable across descriptor/path stats on this host."""
+
+    values = [info.st_dev, info.st_ino]
+    if include_size:
+        values.append(info.st_size)
+    values.append(info.st_mtime_ns)
+    if os.name == "posix":
+        values.append(info.st_ctime_ns)
+    values.append(stat.S_IMODE(info.st_mode))
+    return tuple(values)
+
+
 def _stable_file(path: Path, *, name: str, maximum_bytes: int) -> tuple[bytes, dict[str, object]]:
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or path.is_symlink():
@@ -510,15 +529,10 @@ def _stable_file(path: Path, *, name: str, maximum_bytes: int) -> tuple[bytes, d
     finally:
         os.close(descriptor)
     named_after = path.lstat()
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_opened = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    identity_named_after = (
-        named_after.st_dev,
-        named_after.st_ino,
-        named_after.st_size,
-        named_after.st_mtime_ns,
-    )
+    identity_before = _stable_stat_identity(before)
+    identity_opened = _stable_stat_identity(opened)
+    identity_after = _stable_stat_identity(after)
+    identity_named_after = _stable_stat_identity(named_after)
     if (
         identity_before != identity_opened
         or identity_opened != identity_after
@@ -572,15 +586,10 @@ def _stable_file_digest(
     finally:
         os.close(descriptor)
     named_after = path.lstat()
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_opened = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    identity_named_after = (
-        named_after.st_dev,
-        named_after.st_ino,
-        named_after.st_size,
-        named_after.st_mtime_ns,
-    )
+    identity_before = _stable_stat_identity(before)
+    identity_opened = _stable_stat_identity(opened)
+    identity_after = _stable_stat_identity(after)
+    identity_named_after = _stable_stat_identity(named_after)
     if (
         identity_before != identity_opened
         or identity_opened != identity_after
@@ -635,12 +644,9 @@ def _inventory_run(path: Path, *, task: int, seed: int) -> dict[str, object]:
         elif stat.S_ISLNK(info.st_mode) and entry.name == "parent-artifact":
             target = os.readlink(entry)
             after = entry.lstat()
-            if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            ) or not stat.S_ISLNK(after.st_mode):
+            if _stable_stat_identity(info) != _stable_stat_identity(after) or not stat.S_ISLNK(
+                after.st_mode
+            ):
                 raise ValueError("R2 parent-artifact changed while it was inventoried")
             if os.path.isabs(target):
                 raise ValueError("R2 parent-artifact reference must remain relative")
@@ -664,11 +670,10 @@ def _inventory_run(path: Path, *, task: int, seed: int) -> dict[str, object]:
     names = {str(item["name"]) for item in entries}
     directory_after = _require_real_directory(path, name=f"R2 task {task} run directory")
     final_names = sorted(entry.name for entry in path.iterdir())
-    if initial_names != final_names or (
-        directory_before.st_dev,
-        directory_before.st_ino,
-        directory_before.st_mtime_ns,
-    ) != (directory_after.st_dev, directory_after.st_ino, directory_after.st_mtime_ns):
+    if initial_names != final_names or _stable_stat_identity(
+        directory_before,
+        include_size=False,
+    ) != _stable_stat_identity(directory_after, include_size=False):
         raise ValueError(f"R2 task {task} run directory changed during inventory")
     if len(names) != len(entries):
         raise ValueError(f"R2 task {task} inventory contains duplicate names")
@@ -820,6 +825,71 @@ def _capture_source_identity() -> dict[str, object]:
         "capture_source_blobs": records,
         "r2_execution_source_blobs": r2_records,
     }
+
+
+def _revalidate_recorded_capture_source_identity(producer: object) -> None:
+    """Re-read the exact historical Git blobs bound by the published receipt.
+
+    Gate 0 freezes an R2 failure observation.  Its producer commit is therefore
+    a historical input, not a requirement that every later R3 verifier run at
+    that same commit.  Recomputing :func:`_capture_source_identity` from HEAD
+    made Gate 0 and Gate 1 mutually exclusive after the first implementation
+    change.  This closure instead proves that every recorded source blob still
+    resolves to the bytes and object identity published by Gate 0.
+    """
+
+    value = _require_exact_keys(
+        producer,
+        name="recorded Gate-0 producer",
+        keys={
+            "execution_git_commit",
+            "clean_worktree",
+            "capture_source_blobs",
+            "r2_execution_source_blobs",
+        },
+    )
+    commit = str(value["execution_git_commit"])
+    if _GIT_COMMIT_RE.fullmatch(commit) is None or value["clean_worktree"] is not True:
+        raise ValueError("recorded Gate-0 producer identity is invalid")
+    _git(
+        ("merge-base", "--is-ancestor", commit, "HEAD"),
+        name="Gate-0 producer ancestry",
+        allow_empty=True,
+    )
+
+    capture_records = value["capture_source_blobs"]
+    expected_capture_paths = [path.as_posix() for path in _CAPTURE_SOURCE_PATHS]
+    if (
+        not isinstance(capture_records, list)
+        or [
+            record.get("repository_relative") if isinstance(record, Mapping) else None
+            for record in capture_records
+        ]
+        != expected_capture_paths
+    ):
+        raise ValueError("recorded Gate-0 capture source paths are invalid")
+    expected_capture_records = [
+        _git_blob_record(commit, relative) for relative in _CAPTURE_SOURCE_PATHS
+    ]
+    if capture_records != expected_capture_records:
+        raise ValueError("recorded Gate-0 capture source Git blobs changed")
+
+    r2_records = value["r2_execution_source_blobs"]
+    expected_r2_paths = [path.as_posix() for path in _R2_SOURCE_PATHS]
+    if (
+        not isinstance(r2_records, list)
+        or [
+            record.get("repository_relative") if isinstance(record, Mapping) else None
+            for record in r2_records
+        ]
+        != expected_r2_paths
+    ):
+        raise ValueError("recorded Gate-0 R2 execution source paths are invalid")
+    expected_r2_records = [
+        _git_blob_record(R2_RECOVERY_GIT_COMMIT, relative) for relative in _R2_SOURCE_PATHS
+    ]
+    if r2_records != expected_r2_records:
+        raise ValueError("recorded Gate-0 R2 execution source Git blobs changed")
 
 
 def _parent_registry_records() -> list[dict[str, object]]:
@@ -1626,8 +1696,8 @@ def _revalidate_immutable_sources(
     """Revalidate all retained immutable bytes without querying live Slurm."""
 
     _revalidate_frozen_scheduler_bytes(payload)
-    if payload["producer"] != _capture_source_identity():
-        raise ValueError("Gate-0 committed capture source changed after publication")
+    _revalidate_recorded_capture_source_identity(payload["producer"])
+    _capture_source_identity()
     if payload["parent_registries"] != _parent_registry_records():
         raise ValueError("Gate-0 parent registries changed after publication")
     if payload["container"] != _container_record(container):
@@ -1889,14 +1959,27 @@ def _publish_exclusive(path: Path, raw: bytes) -> str:
             0o440,
             dir_fd=directory_fd,
         )
+        try:
+            created = os.fstat(descriptor)
+        except OSError:
+            os.close(descriptor)
+            raise
+        if not stat.S_ISREG(created.st_mode):
+            os.close(descriptor)
+            raise OSError("temporary Gate-0 artifact is not a regular file")
+        temporary_identity = (created.st_dev, created.st_ino)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(raw)
             stream.flush()
             os.fchmod(stream.fileno(), 0o440)
             os.fsync(stream.fileno())
             info = os.fstat(stream.fileno())
-            temporary_identity = (info.st_dev, info.st_ino)
-            if info.st_size != len(raw) or stat.S_IMODE(info.st_mode) != 0o440:
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or (info.st_dev, info.st_ino) != temporary_identity
+                or info.st_size != len(raw)
+                or stat.S_IMODE(info.st_mode) != 0o440
+            ):
                 raise OSError("temporary Gate-0 artifact inode is invalid")
         require_held_parent()
         try:
@@ -1917,23 +2000,48 @@ def _publish_exclusive(path: Path, raw: bytes) -> str:
             dir_fd=directory_fd,
         )
         try:
-            published_info = os.fstat(published_fd)
+            published_before = os.fstat(published_fd)
             chunks: list[bytes] = []
             while True:
                 chunk = os.read(published_fd, 1024 * 1024)
                 if not chunk:
                     break
                 chunks.append(chunk)
+            published_after = os.fstat(published_fd)
         finally:
             os.close(published_fd)
         published = b"".join(chunks)
+        try:
+            named_after = os.stat(
+                path.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise ValueError("published Gate-0 pathname disappeared") from error
         if (
             temporary_identity is None
-            or (published_info.st_dev, published_info.st_ino) != temporary_identity
-            or stat.S_IMODE(published_info.st_mode) != 0o440
+            or (published_before.st_dev, published_before.st_ino) != temporary_identity
+            or _stable_stat_identity(published_before) != _stable_stat_identity(published_after)
+            or _stable_stat_identity(published_after) != _stable_stat_identity(named_after)
+            or not stat.S_ISREG(published_before.st_mode)
+            or not stat.S_ISREG(published_after.st_mode)
+            or not stat.S_ISREG(named_after.st_mode)
+            or stat.S_IMODE(published_after.st_mode) != 0o440
+            or len(published) != published_after.st_size
             or published != raw
         ):
             raise ValueError("published Gate-0 inode failed descriptor verification")
+        temporary_after = os.stat(
+            temporary_name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(temporary_after.st_mode)
+            or (temporary_after.st_dev, temporary_after.st_ino) != temporary_identity
+        ):
+            raise ValueError("temporary Gate-0 artifact pathname changed")
         os.unlink(temporary_name, dir_fd=directory_fd)
         temporary_name = ""
         require_held_parent()
@@ -1941,17 +2049,28 @@ def _publish_exclusive(path: Path, raw: bytes) -> str:
         publication_complete = True
         return _sha256(raw)
     finally:
-        if temporary_name:
-            with suppress(FileNotFoundError):
-                os.unlink(temporary_name, dir_fd=directory_fd)
+        if temporary_name and temporary_identity is not None:
+            with suppress(OSError):
+                current = os.stat(
+                    temporary_name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and (current.st_dev, current.st_ino) == temporary_identity
+                ):
+                    os.unlink(temporary_name, dir_fd=directory_fd)
         if destination_linked and not publication_complete and temporary_identity is not None:
             # A failed publication is removed only when the name still points
             # to the inode created by this call.
-            with suppress(FileNotFoundError):
+            with suppress(OSError):
                 current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
-                if (current.st_dev, current.st_ino) == temporary_identity:
-                    with suppress(FileNotFoundError):
-                        os.unlink(path.name, dir_fd=directory_fd)
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and (current.st_dev, current.st_ino) == temporary_identity
+                ):
+                    os.unlink(path.name, dir_fd=directory_fd)
         with suppress(OSError):
             os.fsync(directory_fd)
         os.close(directory_fd)

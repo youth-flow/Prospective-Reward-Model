@@ -19,6 +19,7 @@ from pathlib import Path
 from smart_reward.phase2_r3_config import load_r3_science_config
 from smart_reward.phase2_r3_gate0 import verify_live_r3_gate0_in_container
 from smart_reward.phase2_r3_gate1 import verify_live_r3_gate1_in_container
+from smart_reward.phase2_r3_gatep_failure import reopen_gate_p_attempt_lineage
 from smart_reward.phase2_r3_identity import (
     create_gate_p_admission,
     create_validated_gate_p_run,
@@ -43,13 +44,6 @@ _PROFILE_SEED = 20260801
 _DIGEST_LENGTH = 64
 PRODUCTION_REPO_ROOT = Path("/home/yyangjo/Smart-Reward-Model")
 PRODUCTION_PROJECT_ROOT = Path("/project/sigroup/smart-reward-model")
-_SOURCE_TEST_RECEIPT = (
-    PRODUCTION_PROJECT_ROOT
-    / "runs"
-    / "phase2-recovery-r3"
-    / "gate1"
-    / "r3-source-test-receipt.json"
-)
 
 
 def _require_production_layout() -> tuple[Path, Path]:
@@ -178,6 +172,50 @@ def _stable_file_sha256(
     return observed
 
 
+def _validate_lineage_cross_binding(
+    *,
+    intent_lineage_file_sha256: str,
+    intent_lineage_sha256: str,
+    actual_lineage_file_sha256: str,
+    actual_lineage_sha256: str,
+    exported_lineage_file_sha256: str,
+    exported_lineage_sha256: str,
+) -> None:
+    """Require the intent, reopened artifact, and scheduler export to agree."""
+
+    bindings = {
+        "profile intent lineage file SHA-256": intent_lineage_file_sha256,
+        "profile intent lineage semantic SHA-256": intent_lineage_sha256,
+        "actual lineage file SHA-256": actual_lineage_file_sha256,
+        "actual lineage semantic SHA-256": actual_lineage_sha256,
+        "exported lineage file SHA-256": exported_lineage_file_sha256,
+        "exported lineage semantic SHA-256": exported_lineage_sha256,
+    }
+    checked = {name: _digest(value, name=name) for name, value in bindings.items()}
+    if (
+        len(
+            {
+                checked["profile intent lineage file SHA-256"],
+                checked["actual lineage file SHA-256"],
+                checked["exported lineage file SHA-256"],
+            }
+        )
+        != 1
+    ):
+        raise ValueError("profile intent lineage file SHA-256 differs from the actual lineage")
+    if (
+        len(
+            {
+                checked["profile intent lineage semantic SHA-256"],
+                checked["actual lineage semantic SHA-256"],
+                checked["exported lineage semantic SHA-256"],
+            }
+        )
+        != 1
+    ):
+        raise ValueError("profile intent lineage semantic SHA-256 differs from the actual lineage")
+
+
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -240,6 +278,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory-bytes", type=_positive_int, required=True)
 
     parser.add_argument("--io-probe-directory", type=Path, required=True)
+    parser.add_argument("--attempt-lineage", type=Path, required=True)
+    parser.add_argument("--attempt-lineage-file-sha256", required=True)
+    parser.add_argument("--attempt-lineage-sha256", required=True)
     parser.add_argument("--operational-bundle", type=Path, required=True)
     parser.add_argument("--allocation-intent", type=Path, required=True)
     parser.add_argument("--allocation-intent-file-sha256", required=True)
@@ -292,6 +333,36 @@ def main(argv: list[str] | None = None) -> int:
         arguments.allocation_intent,
         root=project_root,
         name="allocation intent",
+    )
+    attempt_lineage = _existing_file_in(
+        arguments.attempt_lineage,
+        root=project_root,
+        name="Gate-P attempt lineage",
+    )
+    if attempt_lineage.parent != allocation_intent.parent:
+        raise ValueError("Gate-P attempt lineage and profile allocation intent differ in attempt")
+    intent = reopen_profile_allocation_intent(
+        allocation_intent,
+        expected_file_sha256=_digest(
+            arguments.allocation_intent_file_sha256,
+            name="allocation-intent file SHA-256",
+        ),
+    )
+    lineage = reopen_gate_p_attempt_lineage(
+        attempt_lineage,
+        project_root=project_root,
+        expected_file_sha256=_digest(
+            arguments.attempt_lineage_file_sha256,
+            name="Gate-P attempt lineage file SHA-256",
+        ),
+    )
+    _validate_lineage_cross_binding(
+        intent_lineage_file_sha256=intent.attempt_lineage_file_sha256,
+        intent_lineage_sha256=intent.attempt_lineage_sha256,
+        actual_lineage_file_sha256=lineage.file_sha256,
+        actual_lineage_sha256=lineage.lineage_sha256,
+        exported_lineage_file_sha256=arguments.attempt_lineage_file_sha256,
+        exported_lineage_sha256=arguments.attempt_lineage_sha256,
     )
     operational_bundle = _future_file_in(
         arguments.operational_bundle,
@@ -403,13 +474,6 @@ def main(argv: list[str] | None = None) -> int:
         envelope=envelope,
         formal_result=formal_result,
         resource_plan=plan,
-    )
-    intent = reopen_profile_allocation_intent(
-        allocation_intent,
-        expected_file_sha256=_digest(
-            arguments.allocation_intent_file_sha256,
-            name="allocation-intent file SHA-256",
-        ),
     )
     runtime_receipt = capture_profile_slurm_runtime_receipt(
         bundle,

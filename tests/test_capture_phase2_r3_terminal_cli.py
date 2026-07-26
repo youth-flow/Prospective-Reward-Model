@@ -42,6 +42,75 @@ def _argv(command: str) -> list[str]:
     ]
 
 
+def test_profile_intent_dispatch_binds_failure_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = _load_cli()
+    calls: list[tuple[Path, dict[str, object]]] = []
+
+    def publish(path: Path, **kwargs: object) -> SimpleNamespace:
+        calls.append((path, kwargs))
+        return SimpleNamespace(
+            allocation_intent_sha256="3" * 64,
+            file_sha256="4" * 64,
+        )
+
+    emitted: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "publish_profile_allocation_intent", publish)
+    monkeypatch.setattr(cli, "_emit", emitted.append)
+    argv = [
+        "profile-intent",
+        "--output",
+        "intent.json",
+        "--attempt-lineage-file-sha256",
+        "1" * 64,
+        "--attempt-lineage-sha256",
+        "2" * 64,
+        "--cluster",
+        "hpc4",
+        "--account",
+        "sigroup",
+        "--partition",
+        "gpu-l20",
+        "--gpu-name",
+        "NVIDIA L20",
+        "--gpus-per-task",
+        "1",
+        "--cpus-per-task",
+        "8",
+        "--memory-bytes",
+        "68719476736",
+        "--walltime-seconds",
+        "21600",
+    ]
+
+    assert cli.main(argv) == 0
+    assert calls == [
+        (
+            Path("intent.json"),
+            {
+                "attempt_lineage_file_sha256": "1" * 64,
+                "attempt_lineage_sha256": "2" * 64,
+                "cluster": "hpc4",
+                "account": "sigroup",
+                "partition": "gpu-l20",
+                "gpu_name": "NVIDIA L20",
+                "gpus_per_task": 1,
+                "cpus_per_task": 8,
+                "memory_bytes": 68719476736,
+                "requested_walltime_seconds": 21600,
+            },
+        )
+    ]
+    assert emitted == [
+        {
+            "status": "r3_gate_p_allocation_intent_published",
+            "allocation_intent_sha256": "3" * 64,
+            "file_sha256": "4" * 64,
+        }
+    ]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="publisher is an HPC4 POSIX-only surface")
 def test_raw_publisher_enforces_mode_under_restrictive_umask(tmp_path: Path) -> None:
     cli = _load_cli()

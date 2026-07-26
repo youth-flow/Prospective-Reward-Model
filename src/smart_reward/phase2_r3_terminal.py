@@ -76,7 +76,7 @@ PROFILE_SLURM_RUNTIME_RECEIPT_SCHEMA: Final = (
 )
 PROFILE_SLURM_RUNTIME_SCHEMA: Final = PROFILE_SLURM_RUNTIME_RECEIPT_SCHEMA
 PROFILE_ALLOCATION_INTENT_SCHEMA: Final = (
-    "phase2-recovery-r3-predeclared-profile-allocation-intent/v1"
+    "phase2-recovery-r3-predeclared-profile-allocation-intent/v2"
 )
 PROFILE_ALLOCATION_INTENT_ROLE: Final = "predeclared_profile_allocation_not_primary_resource_plan"
 PRIMARY_SEGMENT_RUNTIME_CLOSURE_SCHEMA: Final = (
@@ -751,6 +751,8 @@ def _resource_expectation(
 
 def _profile_intent_payload(
     *,
+    attempt_lineage_file_sha256: str,
+    attempt_lineage_sha256: str,
     cluster: str,
     account: str,
     partition: str,
@@ -764,6 +766,14 @@ def _profile_intent_payload(
         "schema_version": PROFILE_ALLOCATION_INTENT_SCHEMA,
         "role": PROFILE_ALLOCATION_INTENT_ROLE,
         "declared_before_profile": True,
+        "attempt_lineage_file_sha256": _digest(
+            attempt_lineage_file_sha256,
+            name="Gate-P attempt lineage file SHA-256",
+        ),
+        "attempt_lineage_sha256": _digest(
+            attempt_lineage_sha256,
+            name="Gate-P attempt lineage semantic SHA-256",
+        ),
         "cluster": cluster,
         "account": account,
         "partition": partition,
@@ -781,6 +791,8 @@ def _validated_profile_intent_payload(value: object) -> dict[str, object]:
         "schema_version",
         "role",
         "declared_before_profile",
+        "attempt_lineage_file_sha256",
+        "attempt_lineage_sha256",
         "cluster",
         "account",
         "partition",
@@ -806,6 +818,14 @@ def _validated_profile_intent_payload(value: object) -> dict[str, object]:
         raise ValueError("profile allocation intent identity/self-hash is invalid")
     if payload["cluster"] != _HPC4_CLUSTER or payload["account"] != _HPC4_ACCOUNT:
         raise ValueError("profile allocation intent must target hpc4/sigroup")
+    _digest(
+        payload["attempt_lineage_file_sha256"],
+        name="profile allocation intent lineage file SHA-256",
+    )
+    _digest(
+        payload["attempt_lineage_sha256"],
+        name="profile allocation intent lineage semantic SHA-256",
+    )
     partition = _safe_field(
         payload["partition"],
         name="profile allocation partition",
@@ -839,6 +859,8 @@ class ProfileAllocationIntent:
     file_sha256: str
     size_bytes: int
     allocation_intent_sha256: str
+    attempt_lineage_file_sha256: str
+    attempt_lineage_sha256: str
     cluster: str
     account: str
     partition: str
@@ -863,6 +885,14 @@ class ProfileAllocationIntent:
             self.allocation_intent_sha256,
             name="allocation_intent_sha256",
         )
+        _digest(
+            self.attempt_lineage_file_sha256,
+            name="attempt_lineage_file_sha256",
+        )
+        _digest(
+            self.attempt_lineage_sha256,
+            name="attempt_lineage_sha256",
+        )
         _positive_int(self.size_bytes, name="profile allocation intent size")
         if type(self._canonical_bytes) is not bytes:
             raise TypeError("profile allocation intent bytes must be exact bytes")
@@ -885,6 +915,8 @@ class ProfileAllocationIntent:
         payload = _validated_profile_intent_payload(transport.payload)
         exact = {
             "allocation_intent_sha256": payload["allocation_intent_sha256"],
+            "attempt_lineage_file_sha256": payload["attempt_lineage_file_sha256"],
+            "attempt_lineage_sha256": payload["attempt_lineage_sha256"],
             "cluster": payload["cluster"],
             "account": payload["account"],
             "partition": payload["partition"],
@@ -937,6 +969,8 @@ def _profile_intent_from_transport(
         file_sha256=transport.file_sha256,
         size_bytes=transport.size_bytes,
         allocation_intent_sha256=str(payload["allocation_intent_sha256"]),
+        attempt_lineage_file_sha256=str(payload["attempt_lineage_file_sha256"]),
+        attempt_lineage_sha256=str(payload["attempt_lineage_sha256"]),
         cluster=str(payload["cluster"]),
         account=str(payload["account"]),
         partition=str(payload["partition"]),
@@ -955,6 +989,8 @@ def _profile_intent_from_transport(
 def publish_profile_allocation_intent(
     artifact_path: str | os.PathLike[str],
     *,
+    attempt_lineage_file_sha256: str,
+    attempt_lineage_sha256: str,
     cluster: str,
     account: str,
     partition: str,
@@ -967,6 +1003,8 @@ def publish_profile_allocation_intent(
     """Before submission, publish the exact profile allocation request."""
 
     unsigned = _profile_intent_payload(
+        attempt_lineage_file_sha256=attempt_lineage_file_sha256,
+        attempt_lineage_sha256=attempt_lineage_sha256,
         cluster=cluster,
         account=account,
         partition=partition,

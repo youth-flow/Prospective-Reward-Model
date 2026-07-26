@@ -46,6 +46,9 @@ required_environment=(
   PRORM_R3_PRIMARY_ARRAY_CONCURRENCY
   PRORM_R3_PRIMARY_CPUS_PER_TASK
   PRORM_R3_PRIMARY_MEMORY_BYTES
+  PRORM_R3_GATEP_ATTEMPT_LINEAGE
+  PRORM_R3_GATEP_ATTEMPT_LINEAGE_FILE_SHA256
+  PRORM_R3_GATEP_ATTEMPT_LINEAGE_SHA256
   PRORM_R3_PROFILE_INTENT
   PRORM_R3_PROFILE_INTENT_FILE_SHA256
   PRORM_R3_OPERATIONAL_BUNDLE
@@ -82,11 +85,12 @@ source_config="$(realpath -e -- "${PRORM_R3_SOURCE_CONFIG}")"
 parent_registry="$(realpath -e -- "${PRORM_R3_PARENT_REGISTRY}")"
 scheduler_raw_evidence="$(realpath -e -- "${PRORM_R3_SCHEDULER_RAW_EVIDENCE}")"
 resource_raw_evidence="$(realpath -e -- "${PRORM_R3_RESOURCE_RAW_EVIDENCE}")"
+attempt_lineage="$(realpath -e -- "${PRORM_R3_GATEP_ATTEMPT_LINEAGE}")"
 profile_intent="$(realpath -e -- "${PRORM_R3_PROFILE_INTENT}")"
 io_probe_directory="$(realpath -e -- "${PRORM_R3_IO_PROBE_DIRECTORY}")"
 source_test_receipt="$(
   realpath -e -- \
-    "${project_root}/runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
+    "${project_root}/runs/phase2-recovery-r3/gate1/${PRORM_R3_GIT_COMMIT}/r3-source-test-receipt.json"
 )"
 
 [[ "${PRORM_R3_REPO_ROOT}" == "${repo_root}" ]] \
@@ -128,6 +132,11 @@ input_root="${project_root}/runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT
   || die "scheduler evidence must be durable project evidence"
 [[ "${resource_raw_evidence}" == "${project_root}/"* ]] \
   || die "resource evidence must be durable project evidence"
+[[ "${attempt_lineage}" == \
+  "$(dirname -- "${profile_intent}")/gatep-attempt-lineage.json" \
+  && -f "${attempt_lineage}" \
+  && ! -L "${attempt_lineage}" ]] \
+  || die "Gate-P attempt lineage is outside the exact profile attempt"
 [[ "${profile_intent}" == "${project_root}/"* ]] \
   || die "profile intent must be durable project evidence"
 [[ "${io_probe_directory}" == "${scratch_root}/"* ]] \
@@ -182,6 +191,42 @@ printf '%s  %s\n' \
   "${PRORM_R3_SOURCE_TEST_RECEIPT_FILE_SHA256}" \
   "${source_test_receipt}" \
   | sha256sum --check --status || die "source-test receipt SHA-256 mismatch"
+[[ "${PRORM_R3_GATEP_ATTEMPT_LINEAGE_FILE_SHA256}" =~ ^[0-9a-f]{64}$ \
+  && "${PRORM_R3_GATEP_ATTEMPT_LINEAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+  || die "Gate-P attempt lineage SHA-256 values are invalid"
+printf '%s  %s\n' \
+  "${PRORM_R3_GATEP_ATTEMPT_LINEAGE_FILE_SHA256}" \
+  "${attempt_lineage}" \
+  | sha256sum --check --status \
+  || die "Gate-P attempt lineage file SHA-256 mismatch"
+
+failure_cli="${repo_root}/scripts/hpc4/capture_phase2_r3_gatep_failure.py"
+[[ -f "${failure_cli}" && ! -L "${failure_cli}" ]] \
+  || die "Gate-P failure-lineage CLI is unavailable"
+lineage_inspection="$(
+  apptainer exec \
+    --cleanenv \
+    --bind "${repo_root}:${repo_root}:ro" \
+    --bind "${project_root}:${project_root}:ro" \
+    --bind "${image}:${image}:ro" \
+    --env "PYTHONPATH=${repo_root}/src" \
+    "${image}" \
+    python3 "${failure_cli}" inspect-lineage \
+      --project-root="${project_root}" \
+      --lineage "${attempt_lineage}" \
+      --lineage-file-sha256 \
+        "${PRORM_R3_GATEP_ATTEMPT_LINEAGE_FILE_SHA256}"
+)" || die "Gate-P attempt lineage/predecessor revalidation failed"
+observed_lineage_sha256="$(
+  printf '%s\n' "${lineage_inspection}" \
+    | apptainer exec \
+      --cleanenv \
+      --bind "${image}:${image}:ro" \
+      "${image}" \
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["lineage_sha256"])'
+)"
+[[ "${observed_lineage_sha256}" == "${PRORM_R3_GATEP_ATTEMPT_LINEAGE_SHA256}" ]] \
+  || die "Gate-P attempt lineage semantic SHA-256 mismatch"
 
 runner="${repo_root}/scripts/hpc4/run_phase2_r3_gatep.py"
 [[ -f "${runner}" ]] || die "Gate-P runner is missing"
@@ -244,6 +289,11 @@ apptainer exec \
     --cpus-per-task "${PRORM_R3_PRIMARY_CPUS_PER_TASK}" \
     --memory-bytes "${PRORM_R3_PRIMARY_MEMORY_BYTES}" \
     --io-probe-directory "${io_probe_directory}" \
+    --attempt-lineage "${attempt_lineage}" \
+    --attempt-lineage-file-sha256 \
+      "${PRORM_R3_GATEP_ATTEMPT_LINEAGE_FILE_SHA256}" \
+    --attempt-lineage-sha256 \
+      "${PRORM_R3_GATEP_ATTEMPT_LINEAGE_SHA256}" \
     --operational-bundle "${operational_bundle}" \
     --allocation-intent "${profile_intent}" \
     --allocation-intent-file-sha256 \

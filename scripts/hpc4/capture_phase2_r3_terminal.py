@@ -90,6 +90,8 @@ def _parser() -> argparse.ArgumentParser:
         help="publish the exact Gate-P allocation request before sbatch",
     )
     intent.add_argument("--output", type=Path, required=True)
+    intent.add_argument("--attempt-lineage-file-sha256", required=True)
+    intent.add_argument("--attempt-lineage-sha256", required=True)
     intent.add_argument("--cluster", required=True)
     intent.add_argument("--account", required=True)
     intent.add_argument("--partition", required=True)
@@ -139,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "profile-intent":
         intent = publish_profile_allocation_intent(
             arguments.output,
+            attempt_lineage_file_sha256=arguments.attempt_lineage_file_sha256,
+            attempt_lineage_sha256=arguments.attempt_lineage_sha256,
             cluster=arguments.cluster,
             account=arguments.account,
             partition=arguments.partition,

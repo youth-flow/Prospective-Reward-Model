@@ -30,7 +30,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal, Protocol
 
 GATE1_ARTIFACT_SCHEMA: Final = "phase2-recovery-r3-gate1-implementation/v1"
@@ -48,7 +48,7 @@ R3_SOURCE_TEST_SUITE_SCHEMA: Final = "phase2-recovery-r3-source-test-suite/v1"
 R3_CONTAINER_RUNTIME_SCHEMA: Final = "phase2-recovery-r3-container-runtime/v1"
 R3_IN_CONTAINER_RUNTIME_SCHEMA: Final = "phase2-recovery-r3-in-container-runtime-reverification/v1"
 R3_IN_CONTAINER_VERIFICATION_SCHEMA: Final = "phase2-recovery-r3-in-container-command-suite/v1"
-R3_GATE1_CAPABILITY_SCHEMA: Final = "phase2-recovery-r3-gate1-capability/v1"
+R3_GATE1_CAPABILITY_SCHEMA: Final = "phase2-recovery-r3-gate1-capability/v2"
 R3_SOURCE_CAPABILITY_SCHEMA: Final = "phase2-recovery-r3-source-capability/v1"
 R3_CONTAINER_CAPABILITY_SCHEMA: Final = "phase2-recovery-r3-container-capability/v1"
 
@@ -58,10 +58,9 @@ _EXPECTED_PRODUCTION_REPO_ROOT: Final = Path("/home/yyangjo/Smart-Reward-Model")
 _EXPECTED_PRODUCTION_PROJECT_ROOT: Final = Path("/project/sigroup/smart-reward-model")
 _OUTPUT_DIRECTORY_MODE: Final = 0o750
 R3_HPC4_IMAGE_SHA256: Final = "d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb"
-_GATE1_RELATIVE: Final = Path("runs/phase2-recovery-r3/gate1/r3-implementation-closure.json")
-_SOURCE_TEST_RECEIPT_RELATIVE: Final = Path(
-    "runs/phase2-recovery-r3/gate1/r3-source-test-receipt.json"
-)
+_GATE1_ROOT_RELATIVE: Final = Path("runs/phase2-recovery-r3/gate1")
+_GATE1_FILENAME: Final = "r3-implementation-closure.json"
+_SOURCE_TEST_RECEIPT_FILENAME: Final = "r3-source-test-receipt.json"
 _MAX_EVIDENCE_BYTES: Final = 64 * 1024 * 1024
 _MAX_COMMAND_BYTES: Final = 16 * 1024 * 1024
 _MAX_SOURCE_FILE_BYTES: Final = 128 * 1024 * 1024
@@ -78,6 +77,34 @@ _PYTHON_VERSION_RE = re.compile(r"3\.11\.[0-9]+\Z")
 
 _DEFINITION_PATH: Final = "containers/prorm-hpc4.def"
 _REQUIREMENTS_LOCK_PATH: Final = "containers/requirements-hpc4.lock"
+
+
+def _gate1_relative(commit: str) -> Path:
+    if _GIT_OID_RE.fullmatch(commit) is None:
+        raise ValueError("Gate-1 namespace commit is invalid")
+    return _GATE1_ROOT_RELATIVE / commit / _GATE1_FILENAME
+
+
+def _source_test_receipt_relative(commit: str) -> Path:
+    if _GIT_OID_RE.fullmatch(commit) is None:
+        raise ValueError("source-test namespace commit is invalid")
+    return _GATE1_ROOT_RELATIVE / commit / _SOURCE_TEST_RECEIPT_FILENAME
+
+
+def _gate1_namespace_commit(relative: str) -> str:
+    path = PurePosixPath(relative)
+    expected_parts = (*_GATE1_ROOT_RELATIVE.parts, "", _GATE1_FILENAME)
+    if (
+        path.is_absolute()
+        or path.as_posix() != relative
+        or len(path.parts) != len(expected_parts)
+        or path.parts[: len(_GATE1_ROOT_RELATIVE.parts)] != _GATE1_ROOT_RELATIVE.parts
+        or path.parts[-1] != _GATE1_FILENAME
+        or _GIT_OID_RE.fullmatch(path.parts[-2]) is None
+    ):
+        raise ValueError("Gate-1 production namespace is invalid")
+    return path.parts[-2]
+
 
 # These are the non-discoverable anchors.  The remainder of the package,
 # R3 tests, and R3 HPC4 scripts are discovered from Git and therefore cannot be
@@ -354,6 +381,16 @@ def _root_file(root: Path, relative: str, *, name: str) -> Path:
     return resolved
 
 
+def _stable_stat_identity(info: os.stat_result) -> tuple[int, ...]:
+    """Return fields stable across descriptor/path stats on this host."""
+
+    values = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+    if os.name == "posix":
+        values.append(info.st_ctime_ns)
+    values.append(stat.S_IMODE(info.st_mode))
+    return tuple(values)
+
+
 def _stable_digest(
     path: Path,
     *,
@@ -380,13 +417,19 @@ def _stable_digest(
                 raise ValueError(f"{name} exceeds its byte bound")
             digest.update(chunk)
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ) or observed != before.st_size:
+        if (
+            _stable_stat_identity(before) != _stable_stat_identity(after)
+            or observed != before.st_size
+        ):
             raise ValueError(f"{name} changed while it was hashed")
+        try:
+            named_after = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise ValueError(f"{name} disappeared while it was hashed") from error
+        if _stable_stat_identity(named_after) != _stable_stat_identity(after) or not stat.S_ISREG(
+            named_after.st_mode
+        ):
+            raise ValueError(f"{name} pathname changed while it was hashed")
         return digest.hexdigest(), observed
     finally:
         os.close(descriptor)
@@ -397,6 +440,7 @@ def _stable_bytes(
     *,
     name: str,
     maximum_bytes: int,
+    required_mode: int | None = None,
 ) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
@@ -407,6 +451,8 @@ def _stable_bytes(
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size > maximum_bytes:
             raise ValueError(f"{name} is not a bounded regular file")
+        if required_mode is not None and stat.S_IMODE(before.st_mode) != required_mode:
+            raise ValueError(f"{name} must retain mode {required_mode:04o}")
         chunks: list[bytes] = []
         observed = 0
         while True:
@@ -418,13 +464,19 @@ def _stable_bytes(
             if observed > maximum_bytes:
                 raise ValueError(f"{name} exceeds its byte bound")
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ) or observed != before.st_size:
+        if (
+            _stable_stat_identity(before) != _stable_stat_identity(after)
+            or observed != before.st_size
+        ):
             raise ValueError(f"{name} changed while it was read")
+        try:
+            named_after = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise ValueError(f"{name} disappeared while it was read") from error
+        if _stable_stat_identity(named_after) != _stable_stat_identity(after) or not stat.S_ISREG(
+            named_after.st_mode
+        ):
+            raise ValueError(f"{name} pathname changed while it was read")
         return b"".join(chunks)
     finally:
         os.close(descriptor)
@@ -537,6 +589,16 @@ def _decode_line(raw: bytes, *, name: str) -> str:
     if not text.endswith("\n") or "\n" in text[:-1] or "\r" in text:
         raise ValueError(f"{name} must be exactly one LF-terminated line")
     return text[:-1]
+
+
+def _current_namespace_commit(root: Path, runner: _CommandRunner) -> str:
+    commit = _decode_line(
+        _git(runner, root, "rev-parse", "--verify", "HEAD", name="Gate-1 namespace HEAD"),
+        name="Gate-1 namespace HEAD",
+    )
+    if _GIT_OID_RE.fullmatch(commit) is None:
+        raise ValueError("Gate-1 namespace HEAD is invalid")
+    return commit
 
 
 def _formal_script_roles(relative: str) -> tuple[str, ...]:
@@ -2247,6 +2309,7 @@ def _gate1_capability_payload(
     source_test_receipt_file_sha256: str,
     verification_suite_sha256: str,
     live_reverification_sha256: str,
+    source_git_commit: str,
     production_relative: str,
 ) -> dict[str, object]:
     return {
@@ -2260,6 +2323,7 @@ def _gate1_capability_payload(
         "source_test_receipt_file_sha256": source_test_receipt_file_sha256,
         "verification_suite_sha256": verification_suite_sha256,
         "live_reverification_sha256": live_reverification_sha256,
+        "source_git_commit": source_git_commit,
         "production_relative": production_relative,
     }
 
@@ -2278,6 +2342,7 @@ class R3Gate1Capability:
     source_test_receipt_file_sha256: str
     verification_suite_sha256: str
     live_reverification_sha256: str
+    source_git_commit: str
     production_relative: str
     capability_sha256: str
     _factory_token: InitVar[object] = None
@@ -2290,10 +2355,12 @@ class R3Gate1Capability:
         self._validate_structure()
 
     def _validate_structure(self) -> None:
+        namespace_commit = _gate1_namespace_commit(self.production_relative)
         if (
             self.schema_version != R3_GATE1_CAPABILITY_SCHEMA
             or self.role != GATE1_ARTIFACT_ROLE
-            or self.production_relative != _GATE1_RELATIVE.as_posix()
+            or _GIT_OID_RE.fullmatch(self.source_git_commit) is None
+            or namespace_commit != self.source_git_commit
         ):
             raise ValueError("R3 Gate-1 capability schema/role/namespace is invalid")
         payload = _gate1_capability_payload(
@@ -2329,6 +2396,7 @@ class R3Gate1Capability:
                 self.live_reverification_sha256,
                 name="Gate-1 live reverification SHA256",
             ),
+            source_git_commit=self.source_git_commit,
             production_relative=self.production_relative,
         )
         if self.capability_sha256 != _canonical_sha256(payload):
@@ -2361,6 +2429,7 @@ class R3Gate1Capabilities:
         if (
             self.gate1.source_artifact_sha256 != self.source.artifact_sha256
             or self.gate1.container_artifact_sha256 != self.container.artifact_sha256
+            or self.gate1.source_git_commit != self.source.commit
         ):
             raise ValueError("Gate-1 capabilities do not close over one evidence bundle")
 
@@ -2802,7 +2871,8 @@ def _issue_capabilities(
         source_test_receipt_file_sha256=payload["verification"]["source_test_receipt_file_sha256"],
         verification_suite_sha256=payload["verification"]["suite_sha256"],
         live_reverification_sha256=live_reverification_sha256,
-        production_relative=_GATE1_RELATIVE.as_posix(),
+        source_git_commit=str(source["commit"]),
+        production_relative=_gate1_relative(str(source["commit"])).as_posix(),
     )
     gate1_capability = R3Gate1Capability(
         **gate1_payload,
@@ -2858,11 +2928,7 @@ def _require_frozen_production_sif(path: Path) -> None:
         raise ValueError("R3 HPC4 SIF differs from the frozen d6fc044 image")
 
 
-def _ensure_output_parent(
-    relative: Path = _GATE1_RELATIVE,
-    *,
-    namespace_name: str = "Gate-1",
-) -> Path:
+def _ensure_output_parent(relative: Path, *, namespace_name: str = "Gate-1") -> Path:
     root = PRODUCTION_PROJECT_ROOT
     _require_real_directory(root, name="HPC4 production project root")
     current = root
@@ -2925,7 +2991,33 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _publish_exclusive(path: Path, raw: bytes) -> str:
+def _unlink_if_identity(path: Path, identity: tuple[int, int]) -> None:
+    """Best-effort cleanup without unlinking a replacement pathname."""
+
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or (info.st_dev, info.st_ino) != identity
+        or path.is_symlink()
+    ):
+        return
+    if os.name != "posix":
+        with suppress(OSError):
+            os.chmod(path, 0o600)
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return
+        if (info.st_dev, info.st_ino) != identity or not stat.S_ISREG(info.st_mode):
+            return
+    with suppress(OSError):
+        path.unlink()
+
+
+def _publish_exclusive_portable(path: Path, raw: bytes) -> str:
     parent = path.parent
     _require_real_directory(parent, name="Gate-1 publication parent")
     if path.exists() or path.is_symlink():
@@ -2939,8 +3031,18 @@ def _publish_exclusive(path: Path, raw: bytes) -> str:
         | getattr(os, "O_BINARY", 0)
     )
     linked = False
+    temporary_identity: tuple[int, int] | None = None
     try:
         descriptor = os.open(temporary, flags, 0o440)
+        try:
+            created = os.fstat(descriptor)
+        except OSError:
+            os.close(descriptor)
+            raise
+        if not stat.S_ISREG(created.st_mode):
+            os.close(descriptor)
+            raise OSError("temporary Gate-1 evidence is not a regular file")
+        temporary_identity = (created.st_dev, created.st_ino)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(raw)
             stream.flush()
@@ -2948,7 +3050,8 @@ def _publish_exclusive(path: Path, raw: bytes) -> str:
                 os.fchmod(stream.fileno(), 0o440)
             os.fsync(stream.fileno())
             before = os.fstat(stream.fileno())
-            temporary_identity = (before.st_dev, before.st_ino)
+            if (before.st_dev, before.st_ino) != temporary_identity:
+                raise OSError("temporary Gate-1 evidence inode changed")
         try:
             os.link(temporary, path, follow_symlinks=False)
         except FileExistsError as error:
@@ -2958,32 +3061,183 @@ def _publish_exclusive(path: Path, raw: bytes) -> str:
             path,
             name="published Gate-1 evidence",
             maximum_bytes=_MAX_EVIDENCE_BYTES,
+            required_mode=0o440 if os.name == "posix" else None,
         )
         after = path.stat()
         if (after.st_dev, after.st_ino) != temporary_identity or published != raw:
             raise ValueError("published Gate-1 inode failed descriptor verification")
-        if os.name != "posix":
-            # Windows maps the creation mode to a read-only file attribute;
-            # clear it before removing the temporary hard-link name.
-            os.chmod(temporary, 0o600)
-        temporary.unlink()
+        _unlink_if_identity(temporary, temporary_identity)
+        if temporary.exists() or temporary.is_symlink():
+            raise ValueError("Gate-1 temporary publication link could not be removed safely")
         _fsync_directory(parent)
         return _sha256(raw)
     except Exception:
-        if linked and path.exists() and not path.is_symlink():
-            if os.name != "posix":
-                with suppress(OSError):
-                    os.chmod(path, 0o600)
-            with suppress(OSError):
-                path.unlink()
+        if linked and temporary_identity is not None:
+            _unlink_if_identity(path, temporary_identity)
         raise
     finally:
-        if temporary.exists() and not temporary.is_symlink():
-            if os.name != "posix":
-                with suppress(OSError):
-                    os.chmod(temporary, 0o600)
+        if temporary_identity is not None:
+            _unlink_if_identity(temporary, temporary_identity)
+
+
+def _publish_exclusive(path: Path, raw: bytes) -> str:
+    """Publish through a held parent dirfd on formal POSIX/HPC4 hosts."""
+
+    if os.name != "posix":
+        return _publish_exclusive_portable(path, raw)
+
+    parent = path.parent
+    parent_info = _require_real_directory(parent, name="Gate-1 publication parent")
+    parent_identity = (parent_info.st_dev, parent_info.st_ino)
+    if path.exists() or path.is_symlink():
+        raise FileExistsError("refusing to overwrite existing Gate-1 evidence")
+    directory_fd = os.open(
+        parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    temporary_name = f".{path.name}.{os.getpid()}.{secrets.token_hex(12)}.tmp"
+    destination_linked = False
+    publication_complete = False
+    temporary_identity: tuple[int, int] | None = None
+
+    def require_held_parent() -> None:
+        named = _require_real_directory(parent, name="Gate-1 publication parent")
+        opened = os.fstat(directory_fd)
+        if (named.st_dev, named.st_ino) != parent_identity or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != parent_identity:
+            raise ValueError("Gate-1 publication parent changed")
+
+    try:
+        require_held_parent()
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+            0o440,
+            dir_fd=directory_fd,
+        )
+        try:
+            created = os.fstat(descriptor)
+        except OSError:
+            os.close(descriptor)
+            raise
+        if not stat.S_ISREG(created.st_mode):
+            os.close(descriptor)
+            raise OSError("temporary Gate-1 evidence is not a regular file")
+        temporary_identity = (created.st_dev, created.st_ino)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o440)
+            os.fsync(stream.fileno())
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or (info.st_dev, info.st_ino) != temporary_identity
+                or info.st_size != len(raw)
+                or stat.S_IMODE(info.st_mode) != 0o440
+            ):
+                raise OSError("temporary Gate-1 evidence inode is invalid")
+        require_held_parent()
+        try:
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as error:
+            raise FileExistsError("refusing to overwrite existing Gate-1 evidence") from error
+        destination_linked = True
+        require_held_parent()
+        published_fd = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+            dir_fd=directory_fd,
+        )
+        try:
+            published_before = os.fstat(published_fd)
+            chunks: list[bytes] = []
+            observed = 0
+            while True:
+                chunk = os.read(published_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                observed += len(chunk)
+                if observed > _MAX_EVIDENCE_BYTES:
+                    raise ValueError("published Gate-1 evidence exceeds its byte bound")
+                chunks.append(chunk)
+            published_after = os.fstat(published_fd)
+        finally:
+            os.close(published_fd)
+        published = b"".join(chunks)
+        try:
+            named_after = os.stat(
+                path.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise ValueError("published Gate-1 pathname disappeared") from error
+        if (
+            temporary_identity is None
+            or (published_before.st_dev, published_before.st_ino) != temporary_identity
+            or _stable_stat_identity(published_before) != _stable_stat_identity(published_after)
+            or _stable_stat_identity(published_after) != _stable_stat_identity(named_after)
+            or not stat.S_ISREG(published_before.st_mode)
+            or not stat.S_ISREG(published_after.st_mode)
+            or not stat.S_ISREG(named_after.st_mode)
+            or stat.S_IMODE(published_after.st_mode) != 0o440
+            or len(published) != published_after.st_size
+            or published != raw
+        ):
+            raise ValueError("published Gate-1 inode failed descriptor verification")
+        temporary_after = os.stat(
+            temporary_name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(temporary_after.st_mode)
+            or (temporary_after.st_dev, temporary_after.st_ino) != temporary_identity
+        ):
+            raise ValueError("temporary Gate-1 evidence pathname changed")
+        os.unlink(temporary_name, dir_fd=directory_fd)
+        temporary_name = ""
+        require_held_parent()
+        os.fsync(directory_fd)
+        publication_complete = True
+        return _sha256(raw)
+    finally:
+        if temporary_name and temporary_identity is not None:
             with suppress(OSError):
-                temporary.unlink()
+                current = os.stat(
+                    temporary_name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and (current.st_dev, current.st_ino) == temporary_identity
+                ):
+                    os.unlink(temporary_name, dir_fd=directory_fd)
+        if destination_linked and not publication_complete and temporary_identity is not None:
+            with suppress(OSError):
+                current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and (current.st_dev, current.st_ino) == temporary_identity
+                ):
+                    os.unlink(path.name, dir_fd=directory_fd)
+        with suppress(OSError):
+            os.fsync(directory_fd)
+        os.close(directory_fd)
 
 
 def _utc_now() -> str:
@@ -2991,21 +3245,25 @@ def _utc_now() -> str:
 
 
 def capture_r3_gate1_source_test_receipt() -> R3SourceTestInspection:
-    """Test the fixed clean repository and publish into fixed persistence."""
+    """Test clean source and publish into its append-only commit namespace."""
 
     root, _ = _assert_production_roots()
-    parent = _ensure_output_parent(
-        _SOURCE_TEST_RECEIPT_RELATIVE,
-        namespace_name="source-test receipt",
-    )
-    destination = parent / _SOURCE_TEST_RECEIPT_RELATIVE.name
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError("refusing to overwrite existing source-test receipt")
     raw = _capture_source_test_receipt_for_inspection(
         root=root,
         runner=_subprocess_runner,
         captured_at_utc=_utc_now(),
     )
+    payload = _validate_source_test_receipt(
+        _decode_json(raw, name="new source-test receipt", require_canonical=True)
+    )
+    relative = _source_test_receipt_relative(str(payload["source"]["commit"]))
+    parent = _ensure_output_parent(
+        relative,
+        namespace_name="source-test receipt",
+    )
+    destination = parent / relative.name
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError("refusing to overwrite existing source-test receipt")
     file_sha = _publish_exclusive(destination, raw)
     return inspect_r3_source_test_receipt(
         destination,
@@ -3015,15 +3273,15 @@ def capture_r3_gate1_source_test_receipt() -> R3SourceTestInspection:
 
 def _load_source_test_receipt(
     *,
+    source_commit: str,
     expected_file_sha256: str,
 ) -> tuple[dict[str, Any], bytes, str]:
+    relative = _source_test_receipt_relative(source_commit)
     source_path = _production_project_file(
-        PRODUCTION_PROJECT_ROOT / _SOURCE_TEST_RECEIPT_RELATIVE,
+        PRODUCTION_PROJECT_ROOT / relative,
         name="R3 source-test receipt",
         suffix=".json",
     )
-    if stat.S_IMODE(source_path.stat().st_mode) != 0o440:
-        raise ValueError("production source-test receipt must retain mode 0440")
     expected = _require_digest(
         expected_file_sha256,
         name="expected source-test receipt file SHA256",
@@ -3032,6 +3290,7 @@ def _load_source_test_receipt(
         source_path,
         name="R3 source-test receipt",
         maximum_bytes=_MAX_EVIDENCE_BYTES,
+        required_mode=0o440,
     )
     file_sha = _sha256(raw)
     if file_sha != expected:
@@ -3043,6 +3302,8 @@ def _load_source_test_receipt(
             require_canonical=True,
         )
     )
+    if payload["source"]["commit"] != source_commit:
+        raise ValueError("source-test receipt commit differs from its production namespace")
     return payload, raw, file_sha
 
 
@@ -3061,7 +3322,9 @@ def capture_live_r3_gate1_evidence(
         suffix=".sif",
     )
     _require_frozen_production_sif(container_path)
+    source_commit = _current_namespace_commit(root, _subprocess_runner)
     _, source_test_raw, source_test_file_sha = _load_source_test_receipt(
+        source_commit=source_commit,
         expected_file_sha256=expected_source_test_receipt_file_sha256,
     )
     raw = _capture_gate1_evidence_for_inspection(
@@ -3073,8 +3336,14 @@ def capture_live_r3_gate1_evidence(
         source_test_receipt_raw=source_test_raw,
         expected_source_test_receipt_file_sha256=source_test_file_sha,
     )
-    parent = _ensure_output_parent()
-    destination = parent / _GATE1_RELATIVE.name
+    payload = _validate_payload(
+        _decode_json(raw, name="new Gate-1 evidence", require_canonical=True)
+    )
+    if payload["source"]["commit"] != source_commit:
+        raise ValueError("new Gate-1 evidence commit changed during capture")
+    relative = _gate1_relative(source_commit)
+    parent = _ensure_output_parent(relative)
+    destination = parent / relative.name
     file_sha = _publish_exclusive(destination, raw)
     return inspect_r3_gate1_bundle(
         destination,
@@ -3084,27 +3353,27 @@ def capture_live_r3_gate1_evidence(
 
 def _load_production_evidence(
     *,
+    source_commit: str,
     expected_file_sha256: str,
 ) -> tuple[dict[str, Any], str]:
     file_sha = _require_digest(
         expected_file_sha256,
         name="expected Gate-1 file SHA256",
     )
-    path = PRODUCTION_PROJECT_ROOT / _GATE1_RELATIVE
-    inspect_r3_gate1_bundle(path, expected_file_sha256=file_sha)
-    info = path.stat()
-    if stat.S_IMODE(info.st_mode) != 0o440:
-        raise ValueError("production Gate-1 evidence must retain mode 0440")
+    path = PRODUCTION_PROJECT_ROOT / _gate1_relative(source_commit)
     raw = _stable_bytes(
         path,
         name="Gate-1 production evidence",
         maximum_bytes=_MAX_EVIDENCE_BYTES,
+        required_mode=0o440,
     )
     if _sha256(raw) != file_sha:
         raise ValueError("Gate-1 evidence changed after caller-pinned inspection")
     payload = _validate_payload(
         _decode_json(raw, name="Gate-1 production evidence", require_canonical=True)
     )
+    if payload["source"]["commit"] != source_commit:
+        raise ValueError("Gate-1 evidence commit differs from its production namespace")
     return payload, file_sha
 
 
@@ -3117,7 +3386,9 @@ def verify_live_r3_gate1_bundle(
     """Reopen caller-pinned evidence and issue live HPC4 capabilities."""
 
     _assert_live_hpc4()
+    source_commit = _current_namespace_commit(PRODUCTION_REPO_ROOT, _subprocess_runner)
     payload, file_sha = _load_production_evidence(
+        source_commit=source_commit,
         expected_file_sha256=expected_file_sha256,
     )
     container_path = _production_project_file(
@@ -3127,6 +3398,7 @@ def verify_live_r3_gate1_bundle(
     )
     _require_frozen_production_sif(container_path)
     source_test_payload, _, source_test_file_sha = _load_source_test_receipt(
+        source_commit=source_commit,
         expected_file_sha256=expected_source_test_receipt_file_sha256,
     )
     current, live_sha = _reverify_current(
@@ -3175,10 +3447,13 @@ def verify_live_r3_gate1_in_container(
         suffix=".sif",
     )
     _require_frozen_production_sif(container_path)
+    source_commit = _current_namespace_commit(root, _subprocess_runner)
     payload, file_sha = _load_production_evidence(
+        source_commit=source_commit,
         expected_file_sha256=expected_file_sha256,
     )
     source_test_payload, _, source_test_file_sha = _load_source_test_receipt(
+        source_commit=source_commit,
         expected_file_sha256=expected_source_test_receipt_file_sha256,
     )
     current, live_sha = _reverify_inside_current_container(
