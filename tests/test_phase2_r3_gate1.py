@@ -145,7 +145,14 @@ class _FixtureRunner:
             command = command[14:]
         name = self._command_name(command)
         if name == self.fail_command:
-            return gate1._CommandResult(7, b"", f"{name} failed\n".encode())
+            stdout = (
+                b"progress\n"
+                b"FAILED tests/test_phase2_r3_gate1.py::test_fixture_failure"
+                b" - AssertionError\n"
+                if name == "pytest"
+                else b""
+            )
+            return gate1._CommandResult(7, stdout, f"{name} failed\n".encode())
         if name == "unknown":
             raise AssertionError(f"unexpected fixture command: {command!r}")
         return gate1._CommandResult(0, f"{name} passed\n".encode(), b"")
@@ -351,7 +358,14 @@ def test_any_failed_verification_command_prevents_even_offline_evidence(
 ) -> None:
     fixture = _repository(tmp_path)
     fixture.runner.fail_command = "pytest"
-    with pytest.raises(RuntimeError, match="pytest failed with exit 7"):
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "pytest failed with exit 7; "
+            "stdout_size_bytes=.*failure_tests="
+            "tests/test_phase2_r3_gate1.py::test_fixture_failure"
+        ),
+    ):
         _capture(fixture)
     assert any(
         Path(command[0]).stem.lower().startswith("python")
@@ -359,6 +373,13 @@ def test_any_failed_verification_command_prevents_even_offline_evidence(
         for command in fixture.runner.observed
     )
     assert not any(command[0] == str(fixture.engine) for command in fixture.runner.observed)
+
+
+def test_gate1_source_closure_includes_shared_non_r3_tests() -> None:
+    assert gate1._is_formal_tracked_path("tests/test_training.py")
+    assert gate1._is_formal_tracked_path("tests/test_rollout.py")
+    assert gate1._is_formal_tracked_path("tests/conftest.py")
+    assert not gate1._is_formal_tracked_path("tests/fixtures/result.json")
 
 
 def test_runtime_probe_requires_exact_python_torch_cuda_and_one_l20(

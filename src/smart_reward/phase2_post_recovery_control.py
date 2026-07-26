@@ -927,6 +927,28 @@ def verify_recovery_authorization_file(
     raise ValueError("recovery authorization schema is neither exact R2 nor exact R3")
 
 
+def verify_active_gate_f_authorization_file(
+    path: str | os.PathLike[str],
+    *,
+    expected_sha256: str,
+    project_root: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """Verify active Gate-F only through the fixed combined R3 authorization."""
+
+    # Do not dispatch through the R2-compatible replay verifier here.  The R3
+    # verifier locks the final path, schema, role, Gate-R/Gate-C source
+    # closure, capability booleans, and transport boundary.
+    from .phase2_r3_post_recovery_authorization import (
+        verify_r3_final_authorization,
+    )
+
+    return verify_r3_final_authorization(
+        path,
+        expected_sha256=expected_sha256,
+        project_root=project_root,
+    )
+
+
 def verify_recovery_authorization_config_binding(
     authorization_path: str | os.PathLike[str],
     overlay_path: str | os.PathLike[str],
@@ -935,10 +957,16 @@ def verify_recovery_authorization_config_binding(
     expected_pilot_phase: str | None = None,
     expected_stage: str = "pilot",
     project_root: str | os.PathLike[str] | None = None,
+    require_r3_gate_f: bool = False,
 ) -> dict[str, object]:
     """Verify the actual receipt and its exact hash-bound config projection."""
 
-    payload = verify_recovery_authorization_file(
+    authorization_verifier = (
+        verify_active_gate_f_authorization_file
+        if require_r3_gate_f
+        else verify_recovery_authorization_file
+    )
+    payload = authorization_verifier(
         authorization_path,
         expected_sha256=expected_sha256,
         project_root=project_root,
@@ -4693,6 +4721,7 @@ __all__ = [
     "parse_post_recovery_success_marker",
     "post_recovery_aggregate_sacct_command",
     "sacct_command",
+    "verify_active_gate_f_authorization_file",
     "verify_post_recovery_aggregate_terminal_evidence",
     "verify_post_recovery_success_marker",
     "verify_post_recovery_aggregate_success_receipt",

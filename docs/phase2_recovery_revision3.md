@@ -527,26 +527,25 @@ Fixed-three：
 
 ## 10. 当前放行状态
 
-截至当前本地实现审计：
+截至 2026-07-27 的代码与 HPC4 证据审计：
 
 - R2 已知终态为两次 `TIMEOUT` 和一次 `CANCELLED`，旧 success
   authorization 永久不可签发；
-- R2 immutable terminal bundle 尚未作为本地追踪证据完成审计；
-- 当前 runner/SBATCH/authorization 仍是 five-head、R2-locked 实现；
-- immutable-generation checkpoint、predecessor audit、deferred RNG restore、
-  strict progress/signal schemas 和 safe-boundary controller 已有本地 core
-  实现及 CPU fault-injection tests，但 strict progress/signal 仍未接入正式
-  scheduler orchestrator，HPC4 continuation claim 尚未验证；
-- 100-update BT→ProRM+ profile core 已实现固定工作量、原始 PCG stop reason、
-  CUDA 同步计时、memory 和匿名 checkpoint I/O probe；其 schema 明确标为
-  `unclaimed`，不会签发 Gate-P authorization，也不会保留训练状态；
-- 原先可由 legacy/toy settings 伪装 R3 的 context/result 已降级为 neutral
-  materialization context 与 `unclaimed` primary core；任何当前本地 core
-  输出都不是 R3 result；
+- R2 immutable terminal bundle 已由 HPC4 Gate-0 failure-parent receipt 绑定；
 - R3 science config、verified train-materialization attestation、Gate-P admission/
   terminal/resource authorization、primary logical-run/segment identity、正式
-  primary orchestrator、controls identity、SBATCH 和 terminal finalizer 尚未全部
-  物化并闭环。
+  primary orchestrator、controls identity、SBATCH、terminal finalizer，以及
+  Gate-R + Gate-C combined authorization bridge 已在代码中实现；
+- immutable-generation checkpoint、predecessor audit、deferred RNG restore、
+  strict progress/signal schemas、safe-boundary controller 与 CPU fault-injection
+  tests 已接入对应 R3 控制面；
+- 100-update BT→ProRM+ profile 保持固定工作量、原始 PCG stop reason、CUDA
+  同步计时、memory 和匿名 checkpoint I/O probe，并且不会把训练状态带入 Gate R；
+- 第一次正式 Gate-1 job 未生成 source-test receipt 或 implementation closure；
+  后续在同一已提交快照上的 CPU/GPU 精确全量诊断均通过，但它们明确是
+  non-authorizing evidence，不能替代正式 Gate 1；
+- 当前修订仍须形成新的 clean、pushed commit，再重新通过正式 Gate 1；
+  在此之前 Gate P、Gate R、Gate C 和 Gate F 均未获授权。
 
 因此当前状态是：
 
@@ -556,5 +555,6 @@ FRESH_CALIBRATION_AUTHORIZED = false
 FIXED_THREE_AUTHORIZED = false
 ```
 
-下一步只能先实现并验证 Gate 0 和 Gate 1；不得跳过 profiling，也不得启动
-fresh calibration 或 fixed-three。
+下一步只能先对新的 clean commit 运行并验证正式 Gate 1；通过后严格进入
+Gate P，不得跳过 profiling，也不得提前启动 Gate R、Gate C、fresh
+calibration 或 fixed-three。

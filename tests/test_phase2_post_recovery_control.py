@@ -11,6 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 import smart_reward.phase2_post_recovery_control as control
+from smart_reward.phase2_r3_post_recovery_contract import (
+    R3_FINAL_AUTHORIZATION_RELATIVE,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,6 +39,15 @@ def _load_recovery_test_helpers():
 def _load_authorization_validator_cli():
     path = ROOT / "scripts" / "hpc4" / "validate_phase2_recovery_authorization.py"
     spec = importlib.util.spec_from_file_location("_authorization_validator_cli", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_authorization_materializer():
+    path = ROOT / "scripts" / "hpc4" / "materialize_phase2_post_recovery_calibration.py"
+    spec = importlib.util.spec_from_file_location("_authorization_materializer", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -381,6 +393,22 @@ def test_real_recovery_authorization_verifier_rejects_byte_tampering(
     )
     assert payload["source_array_job_id"] == "1648125"
 
+    with pytest.raises(ValueError, match="exact project path"):
+        control.verify_active_gate_f_authorization_file(
+            output,
+            expected_sha256=digest,
+            project_root=tmp_path,
+        )
+    r3_path = tmp_path / R3_FINAL_AUTHORIZATION_RELATIVE
+    r3_path.parent.mkdir(parents=True, exist_ok=True)
+    r3_path.write_bytes(output.read_bytes())
+    with pytest.raises(ValueError):
+        control.verify_active_gate_f_authorization_file(
+            r3_path,
+            expected_sha256=hashlib.sha256(r3_path.read_bytes()).hexdigest(),
+            project_root=tmp_path,
+        )
+
     tampered = json.loads(output.read_text(encoding="utf-8"))
     tampered["full_calibration_authorized"] = False
     if os.name == "posix":
@@ -428,6 +456,36 @@ def test_recovery_authorization_binding_preserves_stage_contracts(
     assert binding["pilot_phase"] == pilot_phase
     assert binding["authorization_sha256"] == "a" * 64
     assert binding["phase2_design_sha256"] == "b" * 64
+
+
+def test_active_gate_f_binding_never_dispatches_through_r2_compatible_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _binding_bundle(
+        stage="pilot",
+        pilot_phase="calibration",
+        seeds=list(control.ORDERED_SEEDS),
+    )
+    _patch_binding_dependencies(monkeypatch, bundle)
+    monkeypatch.setattr(
+        control,
+        "verify_recovery_authorization_file",
+        lambda *args, **kwargs: pytest.fail("active Gate-F reached the R2-compatible verifier"),
+    )
+    monkeypatch.setattr(
+        control,
+        "verify_active_gate_f_authorization_file",
+        lambda *args, **kwargs: {"authorized_next_action": "materialize_fresh_calibration"},
+    )
+
+    binding = control.verify_recovery_authorization_config_binding(
+        "authorization.json",
+        "overlay.yaml",
+        expected_sha256="a" * 64,
+        require_r3_gate_f=True,
+    )
+
+    assert binding["pilot_phase"] == "calibration"
 
 
 @pytest.mark.parametrize(
@@ -498,9 +556,63 @@ def test_authorization_validator_cli_defaults_to_pilot_and_accepts_budgeted() ->
             "budgeted_end_to_end",
         ]
     )
+    legacy = cli.build_parser().parse_args(
+        [
+            "authorization.json",
+            "overlay.yaml",
+            "--expected-sha256",
+            "a" * 64,
+            "--legacy-r2-replay",
+        ]
+    )
 
     assert default.expected_stage == "pilot"
+    assert default.legacy_r2_replay is False
     assert budgeted.expected_stage == "budgeted_end_to_end"
+    assert legacy.legacy_r2_replay is True
+
+
+def test_calibration_materializer_defaults_to_active_r3_and_isolates_legacy_r2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    materializer = _load_authorization_materializer()
+    calls: list[str] = []
+
+    def fake_active(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append("active-r3")
+        return {"schema_version": "r3"}
+
+    def fake_legacy(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append("legacy-r2-replay")
+        return {"schema_version": "r2"}
+
+    monkeypatch.setattr(materializer, "verify_active_gate_f_authorization_file", fake_active)
+    monkeypatch.setattr(materializer, "verify_recovery_authorization_file", fake_legacy)
+
+    parser = materializer.build_parser()
+    default = parser.parse_args(
+        [
+            "authorization.json",
+            "--expected-sha256",
+            "a" * 64,
+            "--repo-root",
+            ".",
+        ]
+    )
+    assert default.legacy_r2_replay is False
+    assert materializer._verify_authorization(
+        Path("authorization.json"),
+        expected_sha256="a" * 64,
+        project_root=Path("/project"),
+        legacy_r2_replay=False,
+    ) == {"schema_version": "r3"}
+    assert materializer._verify_authorization(
+        Path("authorization.json"),
+        expected_sha256="a" * 64,
+        project_root=Path("/project"),
+        legacy_r2_replay=True,
+    ) == {"schema_version": "r2"}
+    assert calls == ["active-r3", "legacy-r2-replay"]
 
 
 def test_authorization_validator_cli_forwards_budgeted_stage(
@@ -516,6 +628,7 @@ def test_authorization_validator_cli_forwards_budgeted_stage(
         *,
         expected_sha256: str,
         expected_stage: str,
+        require_r3_gate_f: bool,
     ) -> dict[str, object]:
         captured.update(
             {
@@ -523,6 +636,7 @@ def test_authorization_validator_cli_forwards_budgeted_stage(
                 "overlay": overlay,
                 "expected_sha256": expected_sha256,
                 "expected_stage": expected_stage,
+                "require_r3_gate_f": require_r3_gate_f,
             }
         )
         return {
@@ -553,5 +667,6 @@ def test_authorization_validator_cli_forwards_budgeted_stage(
         "overlay": Path("overlay.yaml"),
         "expected_sha256": "a" * 64,
         "expected_stage": "budgeted_end_to_end",
+        "require_r3_gate_f": True,
     }
     assert json.loads(capsys.readouterr().out)["status"] == "ok"

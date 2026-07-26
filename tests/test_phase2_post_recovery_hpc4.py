@@ -26,8 +26,11 @@ def test_submission_is_one_fixed_three_seed_l20_array() -> None:
     assert "array_selection" not in generic
     assert "configs/common_beta_post_recovery_calibration.yaml" in submit
     assert 'configs/common_beta_pilot.yaml"' not in generic
-    assert "fixed stdlib verifier" in submit
+    assert "fixed combined Gate-R/Gate-C authorization" in submit
     assert "exactly one immutable three-seed array" in submit
+    assert "--legacy-r2-replay" not in submit
+    assert 'authorization_mode="active-r3"' in generic
+    assert '--authorization-mode "${authorization_mode}"' in generic
 
 
 def test_job_locks_scheduler_and_uses_only_fresh_execution() -> None:
@@ -97,6 +100,9 @@ def test_job_revalidates_auth_and_detached_commit_before_and_after() -> None:
     assert "authorization-check-container-after.json" in job
     assert "post-recovery-output-verification.json" in job
     assert "optimizer_schedule_sha256=%s" in job
+    assert "PRORM_POST_RECOVERY_AUTHORIZATION_MODE" in job
+    assert '--authorization-mode "${PRORM_POST_RECOVERY_AUTHORIZATION_MODE}"' in job
+    assert '"${authorization_validation_options[@]}"' in job
 
 
 def test_aggregate_is_gated_by_terminal_evidence_and_has_no_project_rw_bind() -> None:
@@ -133,6 +139,10 @@ def test_aggregate_is_gated_by_terminal_evidence_and_has_no_project_rw_bind() ->
     assert 'control.get("pilot_phase")!=sys.argv[9]' in job
     assert 'control.get("pilot_terminal_evidence_sha256")' in job
     assert 'control.get("pilot_array_job_id")' in job
+    assert "PRORM_POST_RECOVERY_AUTHORIZATION_MODE" in submit
+    assert "PRORM_POST_RECOVERY_AUTHORIZATION_MODE" in job
+    assert '--authorization-mode "${PRORM_POST_RECOVERY_AUTHORIZATION_MODE}"' in job
+    assert '"${authorization_validation_options[@]}"' in job
 
 
 def test_old_replay_entrypoints_preserve_v2_and_route_only_post_recovery_schema() -> None:
@@ -140,6 +150,7 @@ def test_old_replay_entrypoints_preserve_v2_and_route_only_post_recovery_schema(
     old_job = (ROOT / "scripts" / "hpc4" / "phase2_pilot.sbatch").read_text(encoding="utf-8")
     assert "prorm-common-beta-post-recovery-experiment/v1" in old_submit
     assert "submit_phase2_post_recovery_pilot.sh" in old_submit
+    assert "--legacy-r2-replay" in old_submit
     assert '[[ "${overlay_relative}" = "configs/common_beta_pilot.yaml" ]]' in old_submit
     assert "prorm-common-beta-config/v2" in old_submit
     assert "post_recovery" not in old_job

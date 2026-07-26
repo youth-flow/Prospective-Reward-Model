@@ -93,8 +93,10 @@ profile_terminal_directory="$(
   || die "unexpected persistent materialization root"
 [[ "${scratch_root}" == "/scratch/yyangjo" ]] \
   || die "unexpected production scratch root"
-[[ "${hf_cache}" == /project/sigroup/* ]] \
-  || die "HF cache must be under /project/sigroup"
+[[ "${image}" == "${project_root}/"* ]] \
+  || die "container image must be under the canonical project root"
+[[ "${hf_cache}" == "${project_root}/"* ]] \
+  || die "HF cache must be under the canonical project root"
 [[ "${science_config}" == \
   "${repo_root}/configs/phase2_recovery_r3_science.yaml" ]] \
   || die "science config must be the frozen R3 production config"
@@ -104,13 +106,13 @@ profile_terminal_directory="$(
 [[ "${repo_parent_registry}" == \
   "${repo_root}/configs/phase2_recovery_parent_failures.json" ]] \
   || die "parent registry must be the fixed clean-repository input"
-[[ "${operational_bundle}" == /project/sigroup/* ]] \
+[[ "${operational_bundle}" == "${project_root}/"* ]] \
   || die "operational bundle must be durable project evidence"
-[[ "${profile_intent}" == /project/sigroup/* ]] \
+[[ "${profile_intent}" == "${project_root}/"* ]] \
   || die "profile intent must be durable project evidence"
-[[ "${profile_runtime_receipt}" == /project/sigroup/* ]] \
+[[ "${profile_runtime_receipt}" == "${project_root}/"* ]] \
   || die "profile runtime receipt must be durable project evidence"
-[[ "${profile_terminal_directory}" == /project/sigroup/* ]] \
+[[ "${profile_terminal_directory}" == "${project_root}/"* ]] \
   || die "profile terminal must be durable project evidence"
 
 digest_environment=(
@@ -236,7 +238,7 @@ if [[ ! -e "${submission_plan}" && ! -L "${submission_plan}" ]]; then
   apptainer exec \
     --cleanenv \
     --bind "${repo_root}:${repo_root}:ro" \
-    --bind "/project/sigroup:/project/sigroup:rw" \
+    --bind "${project_root}:${project_root}:rw" \
     --env "PYTHONPATH=${repo_root}/src" \
     --env "PRORM_R3_REPO_ROOT=${repo_root}" \
     --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
@@ -287,7 +289,7 @@ plan_lines="$(
   apptainer exec \
     --cleanenv \
     --bind "${repo_root}:${repo_root}:ro" \
-    --bind "/project/sigroup:/project/sigroup:ro" \
+    --bind "${project_root}:${project_root}:ro" \
     --env "PYTHONPATH=${repo_root}/src" \
     --env "PRORM_R3_REPO_ROOT=${repo_root}" \
     --env "PRORM_R3_PROJECT_ROOT=${project_root}" \

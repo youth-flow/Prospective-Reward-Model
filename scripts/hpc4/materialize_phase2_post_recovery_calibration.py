@@ -26,6 +26,7 @@ from smart_reward.phase2_config import (
 )
 from smart_reward.phase2_post_recovery_control import (
     POST_RECOVERY_DESIGN_NAME,
+    verify_active_gate_f_authorization_file,
     verify_recovery_authorization_file,
 )
 from smart_reward.phase2_r3_post_recovery_contract import (
@@ -49,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=R3_PRODUCTION_PROJECT_ROOT,
     )
+    parser.add_argument(
+        "--legacy-r2-replay",
+        action="store_true",
+        help="materialize a historical R2 replay instead of active Gate-F",
+    )
     return parser
 
 
@@ -62,6 +68,25 @@ def _require_real_directory(path: Path, *, name: str) -> Path:
     ):
         raise ValueError(f"{name} must be a canonical real directory")
     return absolute
+
+
+def _verify_authorization(
+    path: Path,
+    *,
+    expected_sha256: str,
+    project_root: Path,
+    legacy_r2_replay: bool,
+) -> dict[str, object]:
+    authorization_verifier = (
+        verify_recovery_authorization_file
+        if legacy_r2_replay
+        else verify_active_gate_f_authorization_file
+    )
+    return authorization_verifier(
+        path,
+        expected_sha256=expected_sha256,
+        project_root=project_root,
+    )
 
 
 def _committed_clean_repo(repo_root: Path) -> str:
@@ -200,10 +225,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"refusing to overwrite calibration overlay: {output}")
     authorization_path = arguments.authorization.absolute()
-    authorization = verify_recovery_authorization_file(
+    authorization = _verify_authorization(
         authorization_path,
         expected_sha256=arguments.expected_sha256,
         project_root=arguments.project_root,
+        legacy_r2_replay=arguments.legacy_r2_replay,
     )
     template = load_phase2_config(repo_root / _TEMPLATE_RELATIVE)
     base = load_config(repo_root / _BASE_RELATIVE)

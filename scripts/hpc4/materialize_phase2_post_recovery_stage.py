@@ -473,6 +473,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _active_gate_f_authorization_path(path: Path) -> Path:
+    if path != _AUTHORIZATION_PATH:
+        raise ValueError("active Gate-F requires the fixed combined R3 authorization path")
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     repo_root = _canonical_repo(arguments.repo_root)
@@ -487,6 +493,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     source = source_bundle.config
     if source["schema_version"] != PHASE2_POST_RECOVERY_SCHEMA_VERSION:
         raise ValueError("source overlay is not the post-recovery schema")
+    authorization = _active_gate_f_authorization_path(arguments.authorization)
 
     predecessor = _production_aggregate(arguments.predecessor_aggregate)
     predecessor_sha = _sha256(predecessor)
@@ -613,10 +620,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             raw = _write_yaml_exclusive(output, candidate)
             output_paths.append(output)
             binding = verify_recovery_authorization_config_binding(
-                arguments.authorization,
+                authorization,
                 output,
                 expected_sha256=arguments.authorization_sha256,
                 expected_pilot_phase=str(normalized["design"]["pilot_phase"]),
+                project_root=_PROJECT_ROOT,
+                require_r3_gate_f=True,
             )
             if binding["optimizer_schedule_sha256"] != OPTIMIZER_SCHEDULE_SHA256:
                 raise ValueError("new pilot did not retain the authorized optimizer schedule")
@@ -663,10 +672,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             overlay_raw = _write_yaml_exclusive(overlay_output, candidate)
             output_paths.append(overlay_output)
             binding = verify_recovery_authorization_config_binding(
-                arguments.authorization,
+                authorization,
                 overlay_output,
                 expected_sha256=arguments.authorization_sha256,
                 expected_stage="confirmatory",
+                project_root=_PROJECT_ROOT,
+                require_r3_gate_f=True,
             )
             if binding["optimizer_schedule_sha256"] != OPTIMIZER_SCHEDULE_SHA256 or normalized[
                 "run"

@@ -18,8 +18,7 @@ generic_submit="${repo_root}/scripts/hpc4/submit_phase2_post_recovery_pilot.sh"
 [[ -f "${generic_submit}" && ! -L "${generic_submit}" ]] \
   || die "generic post-recovery submitter is missing or unsafe"
 
-# All schema-specific R2/R3 authorization transport, source, and scheduler
-# checks are owned by the generic path. It inspects the final authorization
-# with the fixed stdlib verifier, then performs deep SIF verification before
-# submitting exactly one immutable three-seed array.
+# The active route delegates in R3-only mode. The generic path inspects the
+# fixed combined Gate-R/Gate-C authorization, then performs deep SIF
+# verification before submitting exactly one immutable three-seed array.
 exec bash "${generic_submit}" "${overlay}" "${authorization}" "${walltime}"

@@ -7,7 +7,7 @@ readonly HOST_PYTHON_SHA256="9c91f9aa231c61c6bf2eabb9b93ebc5a8269a4126a36125e954
 die() { echo "error: $*" >&2; exit 2; }
 
 if [[ $# -lt 3 ]]; then
-  die "usage: $0 <overlay.yaml> <recovery-authorization.json> <walltime> [--beta-source-aggregate <json>] [--horizon-parent-aggregate <json>]"
+  die "usage: $0 <overlay.yaml> <recovery-authorization.json> <walltime> [--beta-source-aggregate <json>] [--horizon-parent-aggregate <json>] [--legacy-r2-replay]"
 fi
 overlay_input="$1"
 authorization_input="$2"
@@ -15,6 +15,7 @@ walltime="$3"
 shift 3
 beta_source_input=""
 horizon_parent_input=""
+authorization_mode="active-r3"
 while (( $# )); do
   case "$1" in
     --beta-source-aggregate)
@@ -28,6 +29,12 @@ while (( $# )); do
         || die "--horizon-parent-aggregate requires one path"
       horizon_parent_input="$2"
       shift 2
+      ;;
+    --legacy-r2-replay)
+      [[ "${authorization_mode}" = "active-r3" ]] \
+        || die "--legacy-r2-replay may be specified only once"
+      authorization_mode="legacy-r2-replay"
+      shift
       ;;
     *) die "unknown post-recovery pilot option: $1" ;;
   esac
@@ -107,7 +114,8 @@ inspector="${repo_root}/scripts/hpc4/inspect_phase2_post_recovery_stdlib.py"
 mapfile -t authorization_transport < <(
   "${host_python}" -I -S "${inspector}" authorization "${authorization}" \
     --expected-sha256 "${authorization_sha256}" \
-    --project-root "${project_root}"
+    --project-root "${project_root}" \
+    --authorization-mode "${authorization_mode}"
 )
 [[ "${#authorization_transport[@]}" -ge 3 \
   && "${authorization_transport[2]}" =~ ^[0-9]+$ \
@@ -237,7 +245,7 @@ mkdir -p \
   "${project_root}/artifacts/phase2-post-recovery-${namespace}" \
   "${scratch_root}/phase2-post-recovery-${namespace}-jobs"
 
-export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_REPO_ROOT=${repo_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_POST_RECOVERY_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_POST_RECOVERY_OVERLAY_SHA256=${overlay_sha256},PRORM_PHASE2_BASE_SHA256=${base_sha256},PRORM_POST_RECOVERY_DESIGN_SHA256=${design_sha256},PRORM_PHASE2_BASE_CONFIG_HASH=${base_hash},PRORM_RECOVERY_AUTHORIZATION=${authorization},PRORM_RECOVERY_AUTHORIZATION_SHA256=${authorization_sha256},PRORM_OPTIMIZER_SCHEDULE_SHA256=${schedule_sha256},PRORM_GIT_COMMIT=${git_commit},PRORM_POST_RECOVERY_PILOT_PHASE=${pilot_phase},PRORM_POST_RECOVERY_NAMESPACE=${namespace},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_PRESENT=${beta_source_present},PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_PRESENT=${horizon_parent_present}"
+export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_REPO_ROOT=${repo_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_POST_RECOVERY_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_POST_RECOVERY_OVERLAY_SHA256=${overlay_sha256},PRORM_PHASE2_BASE_SHA256=${base_sha256},PRORM_POST_RECOVERY_DESIGN_SHA256=${design_sha256},PRORM_PHASE2_BASE_CONFIG_HASH=${base_hash},PRORM_RECOVERY_AUTHORIZATION=${authorization},PRORM_RECOVERY_AUTHORIZATION_SHA256=${authorization_sha256},PRORM_OPTIMIZER_SCHEDULE_SHA256=${schedule_sha256},PRORM_GIT_COMMIT=${git_commit},PRORM_POST_RECOVERY_PILOT_PHASE=${pilot_phase},PRORM_POST_RECOVERY_NAMESPACE=${namespace},PRORM_POST_RECOVERY_AUTHORIZATION_MODE=${authorization_mode},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_PRESENT=${beta_source_present},PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_PRESENT=${horizon_parent_present}"
 if (( beta_source_present )); then
   export_spec+=",PRORM_PHASE2_BETA_SOURCE_AGGREGATE=${beta_source},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_SHA256=${beta_source_sha256}"
 fi

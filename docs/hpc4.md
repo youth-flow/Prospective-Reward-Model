@@ -532,12 +532,13 @@ QoS，因此 accepted FP64 campaign 取 2；`MaxJobsPU=2` 仍是所有 split arr
 调用本节的 `submit_phase2_pilot.sh` 或
 `submit_phase2_pilot_aggregate.sh` 来续跑、补跑或替代 recovery。
 
-唯一 admissible 的当前转换是：one-shot recovery revision 2 先产生三份合法 seed
-终态和 scheduler 终态证据，再构造 head-free recovery-success authorization；随后按
-[recovery authorization contract](phase2_recovery_authorization.md) 和
-[post-recovery HPC4 runbook](phase2_post_recovery_hpc4.md) 物化新的
-authorization-bound calibration identity。下列命令只用于 byte-compatible historical
-replay，不是当前 operator 入口。
+Recovery revision 2 已以两次 `TIMEOUT` 和一次 `CANCELLED` 终止，永久不能构造旧
+recovery-success authorization。唯一 admissible 的当前转换是 Recovery-3：
+Gate 0 绑定 R2 failure parent，新的 clean commit 通过 Gate 1，随后依次通过
+Gate P、三条 Gate-R primary logical runs 和分离的 3-by-3 Gate-C controls；
+只有固定路径上的 combined Gate-R + Gate-C authorization 才能进入
+[post-recovery HPC4 runbook](phase2_post_recovery_hpc4.md) 的 Gate-F
+calibration。下列命令只用于 byte-compatible historical replay，不是当前 operator 入口。
 
 这个历史 Phase 2 路径使用两个被同时锁定的 config：
 

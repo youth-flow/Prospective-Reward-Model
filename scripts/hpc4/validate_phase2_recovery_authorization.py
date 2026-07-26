@@ -24,6 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("pilot", "budgeted_end_to_end", "confirmatory"),
         default="pilot",
     )
+    parser.add_argument(
+        "--legacy-r2-replay",
+        action="store_true",
+        help="validate a historical R2 replay instead of active Gate-F",
+    )
     return parser
 
 
@@ -32,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     verification_options: dict[str, object] = {
         "expected_sha256": arguments.expected_sha256,
         "expected_stage": arguments.expected_stage,
+        "require_r3_gate_f": not arguments.legacy_r2_replay,
     }
     if arguments.project_root is not None:
         verification_options["project_root"] = arguments.project_root

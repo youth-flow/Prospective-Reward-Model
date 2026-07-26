@@ -132,14 +132,25 @@ parent_registry="$(realpath -e -- "${expected_parent_registry}")"
   || die "unexpected persistent materialization root"
 [[ "${scratch_root}" == "/scratch/yyangjo" ]] \
   || die "unexpected production scratch root"
+[[ "${image}" == "${project_root}/"* ]] \
+  || die "container image must be under the canonical project root"
+[[ "${hf_cache}" == "${project_root}/"* ]] \
+  || die "HF cache must be under the canonical project root"
 [[ "${science_config}" == "${expected_science_config}" ]] \
   || die "science config must be the retained R3 production config"
-[[ "${attempt_root}" == /project/sigroup/* ]] \
+[[ "${attempt_root}" == "${project_root}/"* ]] \
   || die "primary attempt root must be durable project evidence"
 [[ "${task_root_base}" == "${scratch_root}/phase2-r3/"* ]] \
   || die "primary task root is outside the fixed scratch namespace"
-[[ "${submission_plan}" == /project/sigroup/* ]] \
+[[ "${submission_plan}" == "${project_root}/"* ]] \
   || die "primary submission plan must be durable project evidence"
+for retained_path in \
+  "${PRORM_R3_OPERATIONAL_BUNDLE}" "${PRORM_R3_PROFILE_INTENT}" \
+  "${PRORM_R3_PROFILE_RUNTIME_RECEIPT}" \
+  "${PRORM_R3_PROFILE_TERMINAL_EVIDENCE_DIRECTORY}"; do
+  [[ "${retained_path}" == "${project_root}/"* ]] \
+    || die "primary evidence must be under the canonical project root"
+done
 if [[ "${continuation_mode}" == "false" ]]; then
   [[ "${submission_plan}" == "${attempt_root}/"* ]] \
     || die "fresh primary submission plan is outside its attempt root"
@@ -185,7 +196,7 @@ observed_plan_lines="$(
   apptainer exec \
     --cleanenv \
     --bind "${repo_root}:${repo_root}:ro" \
-    --bind "/project/sigroup:/project/sigroup:ro" \
+    --bind "${project_root}:${project_root}:ro" \
     --env "PYTHONPATH=${repo_root}/src" \
     --env "PRORM_R3_REPO_ROOT=${repo_root}" \
     --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
@@ -244,7 +255,7 @@ if [[ "${continuation_mode}" == "true" ]]; then
     apptainer exec \
       --cleanenv \
       --bind "${repo_root}:${repo_root}:ro" \
-      --bind "/project/sigroup:/project/sigroup:ro" \
+      --bind "${project_root}:${project_root}:ro" \
       --env "PYTHONPATH=${repo_root}/src" \
       --env "PRORM_R3_REPO_ROOT=${repo_root}" \
       --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
@@ -292,7 +303,7 @@ apptainer exec \
   --cleanenv \
   --nv \
   --bind "${repo_root}:${repo_root}:ro" \
-  --bind "/project/sigroup:/project/sigroup:rw" \
+  --bind "${project_root}:${project_root}:rw" \
   --bind "/scratch/yyangjo:/scratch/yyangjo:rw" \
   --env "PYTHONPATH=${repo_root}/src" \
   --env "PRORM_R3_REPO_ROOT=${repo_root}" \

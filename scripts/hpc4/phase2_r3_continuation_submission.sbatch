@@ -115,6 +115,10 @@ prepare_primary="${repo_root}/scripts/hpc4/prepare_phase2_r3_primary_submission.
   || die "unexpected persistent materialization root"
 [[ "${scratch_root}" == "/scratch/yyangjo" ]] \
   || die "unexpected production scratch root"
+[[ "${image}" == "${project_root}/"* ]] \
+  || die "container image must be under the canonical project root"
+[[ "${hf_cache}" == "${project_root}/"* ]] \
+  || die "HF cache must be under the canonical project root"
 [[ "${repo_science_config}" == \
   "${repo_root}/configs/phase2_recovery_r3_science.yaml" ]] \
   || die "science config must be the frozen R3 production config"
@@ -124,13 +128,13 @@ prepare_primary="${repo_root}/scripts/hpc4/prepare_phase2_r3_primary_submission.
 [[ "${repo_parent_registry}" == \
   "${repo_root}/configs/phase2_recovery_parent_failures.json" ]] \
   || die "parent registry must be the fixed clean-repository input"
-[[ "${base_plan}" == /project/sigroup/* ]] \
+[[ "${base_plan}" == "${project_root}/"* ]] \
   || die "base primary plan must be durable project evidence"
 for retained_path in \
   "${operational_bundle}" "${profile_intent}" "${profile_runtime_receipt}" \
   "${profile_terminal_directory}"; do
-  [[ "${retained_path}" == /project/sigroup/* ]] \
-    || die "Gate-P evidence must be retained under /project/sigroup"
+  [[ "${retained_path}" == "${project_root}/"* ]] \
+    || die "Gate-P evidence must be retained under the canonical project root"
 done
 
 digest_names=(
@@ -227,7 +231,7 @@ base_binding_lines="$(
   apptainer exec \
     --cleanenv \
     --bind "${repo_root}:${repo_root}:ro" \
-    --bind "/project/sigroup:/project/sigroup:ro" \
+    --bind "${project_root}:${project_root}:ro" \
     --env "PYTHONPATH=${repo_root}/src" \
     --env "PRORM_R3_REPO_ROOT=${repo_root}" \
     --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
@@ -354,7 +358,7 @@ if [[ ! -e "${continuation_plan}" && ! -L "${continuation_plan}" ]]; then
   apptainer exec \
     --cleanenv \
     --bind "${repo_root}:${repo_root}:ro" \
-    --bind "/project/sigroup:/project/sigroup:rw" \
+    --bind "${project_root}:${project_root}:rw" \
     --env "PYTHONPATH=${repo_root}/src" \
     --env "PRORM_R3_REPO_ROOT=${repo_root}" \
     --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
@@ -379,7 +383,7 @@ plan_lines="$(
   apptainer exec \
     --cleanenv \
     --bind "${repo_root}:${repo_root}:ro" \
-    --bind "/project/sigroup:/project/sigroup:ro" \
+    --bind "${project_root}:${project_root}:ro" \
     --env "PYTHONPATH=${repo_root}/src" \
     --env "PRORM_R3_REPO_ROOT=${repo_root}" \
     --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
@@ -490,7 +494,7 @@ primary_lines="$(
   apptainer exec \
     --cleanenv \
     --bind "${repo_root}:${repo_root}:ro" \
-    --bind "/project/sigroup:/project/sigroup:ro" \
+    --bind "${project_root}:${project_root}:ro" \
     --env "PYTHONPATH=${repo_root}/src" \
     --env "PRORM_R3_REPO_ROOT=${repo_root}" \
     --env "PRORM_R3_PROJECT_ROOT=${project_root}" \

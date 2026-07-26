@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,7 @@ def test_real_builders_roundtrip_to_exact_head_free_bind_plan(
         final_artifact.artifact_path,
         expected_sha256=final_artifact.file_sha256,
         project_root=root,
+        authorization_mode=inspector.AUTHORIZATION_MODE_ACTIVE_R3,
     )
     bindings = inspected["bindings"]
     assert inspected["schema_version"] == inspector.R3_AUTHORIZATION_SCHEMA
@@ -129,6 +131,50 @@ def test_real_builders_roundtrip_to_exact_head_free_bind_plan(
     assert sum(binding["kind"] == "directory" for binding in bindings) == 4
     assert all("head.pt" not in binding["path"] for binding in bindings)
     assert all("checkpoint" not in Path(binding["path"]).name for binding in bindings)
+
+
+def test_authorization_modes_isolate_active_r3_from_legacy_r2(tmp_path: Path) -> None:
+    inspector = _load_path(
+        ROOT / "scripts" / "hpc4" / "inspect_phase2_post_recovery_stdlib.py",
+        "_post_recovery_stdlib_inspector_modes",
+    )
+    root = tmp_path.resolve()
+    authorization = root / inspector.R2_AUTHORIZATION_RELATIVE
+    authorization.parent.mkdir(parents=True)
+    authorization.write_text(
+        json.dumps(
+            {
+                "schema_version": inspector.R2_AUTHORIZATION_SCHEMA,
+                "optimizer_schedule_sha256": inspector.ADOPTED_SCHEDULE_SHA256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(authorization.read_bytes()).hexdigest()
+
+    compatible = inspector.inspect_authorization(
+        authorization,
+        expected_sha256=digest,
+        project_root=root,
+    )
+    legacy = inspector.inspect_authorization(
+        authorization,
+        expected_sha256=digest,
+        project_root=root,
+        authorization_mode=inspector.AUTHORIZATION_MODE_LEGACY_R2_REPLAY,
+    )
+    assert compatible["schema_version"] == inspector.R2_AUTHORIZATION_SCHEMA
+    assert legacy == compatible
+    with pytest.raises(ValueError, match="active Gate-F"):
+        inspector.inspect_authorization(
+            authorization,
+            expected_sha256=digest,
+            project_root=root,
+            authorization_mode=inspector.AUTHORIZATION_MODE_ACTIVE_R3,
+        )
 
 
 @pytest.mark.parametrize(

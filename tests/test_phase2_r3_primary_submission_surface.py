@@ -8,6 +8,18 @@ SUBMIT = ROOT / "scripts" / "hpc4" / "phase2_r3_primary_submission.sbatch"
 SBATCH = ROOT / "scripts" / "hpc4" / "phase2_r3_primary.sbatch"
 
 
+def test_primary_containers_bind_only_the_canonical_project_namespace() -> None:
+    submitter = SUBMIT.read_text(encoding="utf-8")
+    worker = SBATCH.read_text(encoding="utf-8")
+
+    for source in (submitter, worker):
+        assert "/project/sigroup:/project/sigroup:" not in source
+        assert '--bind "${project_root}:${project_root}:ro"' in source
+        assert '--bind "${project_root}:${project_root}:rw"' in source
+        assert '[[ "${image}" == "${project_root}/"* ]]' in source
+        assert '[[ "${hf_cache}" == "${project_root}/"* ]]' in source
+
+
 def test_login_launcher_never_executes_the_container() -> None:
     text = LAUNCHER.read_text(encoding="utf-8")
 

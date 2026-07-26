@@ -8,11 +8,12 @@
 > confirmatory/exact-30 sections below remain a future protocol, not the
 > currently active campaign.
 
-This protocol starts a new three-seed calibration after the train-only
-recovery has succeeded and implements the complete v3 lineage: calibration,
+This protocol starts a new three-seed calibration only after both Recovery-3
+Gate R and the separated Gate C controls have succeeded and their fixed,
+combined authorization has been verified. It implements the complete v3 lineage: calibration,
 horizon escalation, frozen-beta rehearsal, sequential doubled-beta retries,
-and accepted-freeze to confirmatory promotion. The recovery run contributes
-exactly one thing: its frozen optimizer schedule. It does **not** contribute
+and accepted-freeze production. The Recovery-3 chain contributes its
+head-free capability authorization and frozen optimizer schedule. It does **not** contribute
 trained heads, optimizer state, artifacts, beta values, responses, labels,
 rewards, or policy state.
 
@@ -24,7 +25,9 @@ produce confirmatory efficacy evidence.
 
 The submission is accepted only when all of the following agree:
 
-- the canonical recovery-success authorization and its external SHA256;
+- the canonical combined R3 Gate-R + Gate-C authorization at
+  `runs/phase2-recovery-r3-controls/gate-c-success-authorization.json`
+  and its external SHA256;
 - the authorization projection embedded in
   `configs/common_beta_post_recovery_calibration.yaml`;
 - the adopted five-stage AdamW schedule SHA256
@@ -35,19 +38,17 @@ The submission is accepted only when all of the following agree:
 - one L20 allocation per seed on cluster `hpc4`, account `sigroup`, partition
   `gpu-l20`, with restart count zero.
 
-The historical v2 implementation remains available for byte-compatible replay.
-The shared pilot entrypoints inspect the submitted schema and route only
-post-recovery v1 identities to the separate v3 scripts, namespaces, receipts,
-and aggregate schema.
+The historical R2 implementation remains available only through an explicit
+legacy-replay mode. Active Gate F fails closed on any otherwise valid R2
+authorization; schema auto-detection is not an active-stage permission.
 
 ## 1. Materialize the authorization-bound overlay
 
-Start from a clean checkout after
-`recovery-success-authorization.json` has been produced. Compute its byte
-SHA256, then run:
+Start from a clean checkout after the fixed combined R3 authorization has been
+produced. Compute its byte SHA256, then run:
 
 ```bash
-authorization=/project/sigroup/smart-reward-model/runs/phase2-recovery-pilot/recovery-success-authorization.json
+authorization=/project/sigroup/smart-reward-model/runs/phase2-recovery-r3-controls/gate-c-success-authorization.json
 authorization_sha256="$(sha256sum "${authorization}" | awk '{print $1}')"
 
 PYTHONPATH=src python scripts/hpc4/materialize_phase2_post_recovery_calibration.py \
@@ -78,6 +79,10 @@ python -m pytest -q \
   tests/test_phase2_post_recovery_hpc4.py \
   tests/test_phase2_post_recovery_aggregate.py
 ```
+
+For a byte-compatible historical R2 replay only, use its historical path and
+pass `--legacy-r2-replay` to both the materializer and validator. That flag
+must never appear in an active Gate-F submission.
 
 Commit and push this exact overlay and the control-plane code. Sync that commit
 to HPC4 before submission. The submit script will reject an untracked,

@@ -316,7 +316,7 @@ $$
 
 | Endpoint | 定义 | 越优方向 | 有利的 `Delta` |
 |---|---|---|---|
-| `heldout_local_regret` | test split、固定 `beta_0` 下的局部下游 regret | 越低越好 | `< 0` |
+| `heldout_local_regret` | test split、固定 `beta_0` 下以 `F_test + lambda I` 重新求解的 held-out ridge local-regret proxy | 越低越好 | `< 0` |
 | `finite_policy_utility` | `mean(r*) - beta_0 * mean KL(pi_updated || pi_0)` | 越高越好 | `> 0` |
 | `oracle_pairwise_cross_entropy` | 对 test prompt 内全部 unordered candidate pairs 的 operational-oracle CE，先 prompt 内平均再跨 prompt 平均 | 越低越好 | `< 0` |
 | `oracle_probability_mae` | 预测 pairwise probability 与 oracle probability 的 MAE，同样先 prompt 内平均 | 越低越好 | `< 0` |
@@ -324,6 +324,19 @@ $$
 
 前两个直接回答 prospective/downstream 问题；后三个描述传统 preference fit。
 后三个改善不能代替 local regret 或 finite-policy utility。
+
+保留的 schema key `heldout_local_regret` 必须按上表的有限样本代理量解释：
+它在 held-out split 上重新求解局部方向，因此既不是总体 ProRM regret 的无偏估计，
+也不是把训练 split 得到的部署方向直接带到 held-out 数据上的 realized regret。
+只有把 `lambda ||delta||^2 / 2` 同时纳入局部效用定义时，
+`F_test + lambda I` 的二次型才是该 ridge 局部问题的精确 regret；否则它只是稳定化代理。
+
+三个 preference-fit 端点在冻结的 reference-policy candidate graph 上计算：
+每个 test prompt 的 4 个候选形成全部 6 个 unordered pairs，先 prompt 内平均，
+再等权跨 prompt 平均。CE 与 MAE 保留 operational-oracle ties；
+accuracy 在 oracle 或预测发生 tie 时记 `0.5`。与之不同，
+`finite_policy_utility` 使用更新后 policy 的新 rollouts，并扣除同一支持上的 on-policy KL；
+两类支持不可混写。
 
 `finite_policy_utility` 的 operational oracle 仍是 Skywork 变换后的 `r*`，因此结论只能是：
 
@@ -364,7 +377,7 @@ verification JSON 使用
 完整描述性汇总包含：
 
 - 每个 seed 的 BT、ProRM+ 和 `ProRM+ - BT`；
-- `n=5`；
+- `n=3`；
 - mean、sample SD、min、median、max；
 - seed-level paired percentile-bootstrap **descriptive interval**。
 
@@ -392,8 +405,8 @@ PYTHONPATH=src python scripts/hpc4/materialize_phase2_budgeted_end_to_end.py \
   SOURCE_FREEZE_OVERLAY \
   ACCEPTED_FREEZE_AGGREGATE \
   --repo-root REPO_ROOT \
-  --authorization RECOVERY_SUCCESS_AUTHORIZATION \
-  --authorization-sha256 RECOVERY_SUCCESS_AUTHORIZATION_SHA256
+  --authorization /project/sigroup/smart-reward-model/runs/phase2-recovery-r3-controls/gate-c-success-authorization.json \
+  --authorization-sha256 R3_GATE_F_AUTHORIZATION_SHA256
 ```
 
 该入口只创建候选文件：
@@ -412,7 +425,7 @@ PYTHONPATH=src python scripts/hpc4/materialize_phase2_budgeted_end_to_end.py \
 ```bash
 bash scripts/hpc4/submit_phase2_budgeted_end_to_end.sh \
   configs/common_beta_post_recovery_budgeted_end_to_end.yaml \
-  RECOVERY_SUCCESS_AUTHORIZATION \
+  /project/sigroup/smart-reward-model/runs/phase2-recovery-r3-controls/gate-c-success-authorization.json \
   ACCEPTED_FREEZE_AGGREGATE \
   WALLTIME
 ```
@@ -475,7 +488,7 @@ PYTHONPATH=src python \
 ```
 
 随后只从三个 canonical `SUCCESS` run directory 发布描述性汇总，run 参数顺序必须
-严格对应 task `0..4`：
+严格对应 task `0..2`：
 
 ```bash
 aggregate_json="${PRORM_PROJECT_ROOT}/aggregates/phase2-budgeted-${DESIGN_SHA256}.json"

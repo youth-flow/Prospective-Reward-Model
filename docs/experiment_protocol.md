@@ -861,12 +861,12 @@ policy 与 RM 属于不同基座家族，同时避免模板混用或语义内容
 
 ### 13.6 Endpoint、统计与外部有效性
 
-正式正面结论要求以下证据的交集：
+正式正面结论要求以下四个统一为“越大越好”的预注册 contrast 及所有工程门禁的交集：
 
-1. held-out fixed-`beta_0` local regret 支持 ProRM+；
-2. `utility(ProRM+) - utility(BT-MLE)` paired interval 下界大于 0；
-3. `utility(ProRM+) - utility(zero-B)` paired interval 下界大于 0；
-4. `utility(oracle-step) - utility(zero-B)` paired interval 下界大于 0；
+1. `regret(BT-MLE) - regret(ProRM+)`；
+2. `utility(ProRM+) - utility(BT-MLE)`；
+3. `utility(ProRM+) - utility(zero-B)`；
+4. `utility(oracle-step) - utility(zero-B)`；
 5. 所有 optimization、rank、positive-control、KL/horizon、identity 与 numerical gates 通过。
 
 每个 prompt 先平均 candidates，每个 seed 只贡献一个 paired scalar；candidate/prompt 不充当
@@ -885,7 +885,9 @@ $$
 \right].
 $$
 
-四个正向 endpoint 构成一个 intersection-union test：
+这里的 `Delta_k` 必须严格采用上述方向，尤其不能把第一项写成
+`regret(ProRM+) - regret(BT-MLE)` 后仍套用 `mu_k > 0`。四个正向 endpoint
+构成一个 intersection-union test：
 
 $$
 H_0=\bigcup_k\{\mu_k\le0\},

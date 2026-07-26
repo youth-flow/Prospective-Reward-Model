@@ -113,6 +113,7 @@ PY
   command=(
     bash "${repo_root}/scripts/hpc4/submit_phase2_post_recovery_pilot.sh"
     "${overlay_input}" "${authorization}" "${walltime}"
+    --legacy-r2-replay
   )
   if [[ -n "${beta_source_aggregate_input}" ]]; then
     command+=(--beta-source-aggregate "${beta_source_aggregate_input}")

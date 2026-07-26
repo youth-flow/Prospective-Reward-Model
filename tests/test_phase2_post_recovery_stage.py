@@ -39,6 +39,21 @@ def _post_recovery_config() -> dict[str, object]:
     return helpers._post_recovery_config()
 
 
+def test_stage_materializer_locks_active_gate_f_to_fixed_r3_authorization() -> None:
+    materializer = _materializer()
+    assert (
+        materializer._active_gate_f_authorization_path(materializer._AUTHORIZATION_PATH)
+        == materializer._AUTHORIZATION_PATH
+    )
+    with pytest.raises(ValueError, match="fixed combined R3"):
+        materializer._active_gate_f_authorization_path(
+            Path("/project/sigroup/smart-reward-model")
+            / "runs"
+            / "phase2-recovery-pilot"
+            / "recovery-success-authorization.json"
+        )
+
+
 def test_horizon_escalation_materializes_a_new_bound_base_identity() -> None:
     materializer = _materializer()
     source = _post_recovery_config()
@@ -275,6 +290,7 @@ def test_shell_control_plane_covers_all_v3_phases_and_keeps_v2_replay() -> None:
     assert "prorm-common-beta-config/v2" in legacy_pilot
     assert "phase2_pilot_aggregate.sbatch" in legacy_aggregate
     assert "submit_phase2_post_recovery_pilot.sh" in legacy_pilot
+    assert "--legacy-r2-replay" in legacy_pilot
     assert "submit_phase2_post_recovery_aggregate.sh" in legacy_aggregate
 
 

@@ -98,7 +98,8 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Current post-Phase-1 route | Recovery 3（排除且不得复用其 head/data/optimizer state）→ fresh calibration/freeze（排除）→ accepted global `beta`/horizon → exactly three fresh `budgeted_end_to_end` exploratory E2E seeds；exact-30 不是当前执行目标 |
 | Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed normalization/description core implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
 | First Phase-2 calibration pilot | All three excluded pilot seeds fail-closed at the BT first-order gate under constant-`1e-3` AdamW; a train-only diagnostic established a deterministic decay path that passes without held-out access. The one-shot recovery has a separate identity and can only authorize a new full calibration pilot; it cannot produce or enter a beta aggregate |
-| Phase-2 recovery execution | Execution revision 1 (`1648094`) stopped before training when Hugging Face Datasets attempted a runtime lock in the read-only shared cache. Revision 2 is authorized only after exact marker/file/log hashes and absent trainer outputs pass at submission and job time; frozen assets remain read-only, only derived Datasets cache files are isolated per job, and the scientific recovery schedule/identity are unchanged |
+| Phase-2 recovery history | Execution revision 1 (`1648094`) stopped before training when Hugging Face Datasets attempted a runtime lock in the read-only shared cache. Revision 2 ended with two `TIMEOUT` tasks and one `CANCELLED` task, so its success authorization is permanently unavailable |
+| Active Recovery-3 chain | The immutable R2 failure-parent receipt (Gate 0) exists. The earlier formal Gate-1 attempt failed without publishing closure; later exact CPU/GPU full-suite diagnostics passed but are explicitly non-authorizing. A new clean, pushed commit must pass formal Gate 1 before Gate P, Gate R, Gate C, fresh Gate-F calibration, or any E2E allocation |
 
 The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
 manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
@@ -501,9 +502,9 @@ The confirmatory chain is:
    `KL(pi_0 || pi_updated)` only as a secondary diagnostic;
 4. fail closed on frozen mean/tail KL, optimization, rank, identity, numerical,
    horizon, or positive-control gates;
-5. require the intersection of held-out fixed-`beta_0` regret, ProRM+ versus
-   BT-MLE utility, ProRM+ versus zero-B utility, and oracle-step versus zero-B
-   utility—not preference accuracy alone.
+5. require the intersection of `regret(BT-MLE) - regret(ProRM+)`,
+   `utility(ProRM+) - utility(BT-MLE)`, `utility(ProRM+) - utility(zero-B)`,
+   and `utility(oracle-step) - utility(zero-B)`—not preference accuracy alone.
 
 Candidate values are averaged within prompt, and every seed contributes one
 paired scalar. The five Phase 1 seeds and all pilot/design-development seeds
@@ -511,8 +512,9 @@ are permanently excluded. The confirmatory campaign is the exact ordered
 30-seed list `20260901` through `20260930`; outcome-dependent early stopping is
 forbidden. Its formal estimand is the RNG expectation of each paired contrast
 conditional on the frozen eligible prompt pool, models, oracle, and design—not
-an unrestricted human-prompt population. The four required positive contrasts
-form one intersection-union test: a two-sided 95% paired-seed percentile
+an unrestricted human-prompt population. Every contrast is oriented so positive
+favors the required claim, including BT regret minus ProRM+ regret. The four
+required positive contrasts form one intersection-union test: a two-sided 95% paired-seed percentile
 interval must have lower endpoint above zero for every component. This is an
 effective one-sided component level of `0.025`; no Bonferroni correction is
 needed for the single conjunctive claim, while separate endpoint claims are
@@ -838,17 +840,23 @@ the validated **SIF SHA256**; it does not require the source commit to equal ima
 accepted smoke record. See [hpc4.md](docs/hpc4.md) for exact aggregation acceptance and scratch-retention
 commands.
 
-### Legacy pre-recovery Phase 2 pilot — historical replay only
+### Recovery transition and legacy replay boundary
 
 The commands in this subsection document the original v2
 `common_beta_pilot.yaml` campaign. That calibration identity has already
 terminated at its frozen optimization gate and must **not** be invoked to
-continue the current experiment. The only admissible continuation is:
+continue the current experiment. Revision 2 ended with two timeouts and one
+cancellation, so it can never emit the historical recovery-success
+authorization. The only admissible active continuation is:
 
 ```text
-one-shot recovery revision 2 reaches a valid three-seed terminal state
-  -> recovery-success authorization is built and verified
-  -> a fresh authorization-bound post-recovery calibration is materialized
+R3 Gate 0 binds the immutable R2 failure parent
+  -> Gate 1 closes the clean source and full verification suite
+  -> Gate P validates the fixed 100-update BT -> ProRM+ resource profile
+  -> Gate R completes all three primary logical runs and scheduler segments
+  -> Gate C completes the separated 3-by-3 mechanism controls
+  -> the fixed combined R3 Gate-R + Gate-C authorization is built and verified
+  -> a fresh R3-authorization-bound Gate-F calibration is materialized
   -> the post-recovery pilot/aggregate control plane is used
 ```
 
@@ -1086,33 +1094,37 @@ Smart-Reward-Model/             # retained repository name
 1. Preserve the completed Phase 1 aggregate and its `not_passed` conclusion.
 2. Freeze and verify the Phase 2 implementation, image, base inventory, and
    dual base/overlay identities.
-3. Preserve the failed original calibration and recovery execution revision 1
-   as immutable history. Finish recovery execution revision 2; only three
-   successful seed receipts plus exact terminal scheduler evidence may produce
-   the head-free recovery-success authorization.
-4. From that authorization, materialize and run a fresh three-seed
+3. Preserve the failed original calibration and recovery revisions 1–2 as
+   immutable history. Bind R2's failed terminal bundle through R3 Gate 0; it
+   cannot produce a recovery-success authorization.
+4. Pass the commit-bound R3 Gate-1 source closure, then Gate P's fixed
+   100-update resource profile. Run all three Gate-R primary logical runs and
+   all separated Gate-C mechanism controls; partial success cannot authorize
+   the next stage.
+5. Only the fixed combined R3 Gate-R + Gate-C authorization may materialize and
+   run a fresh three-seed
    post-recovery calibration and its strict aggregate. Recovery heads, labels,
    beta values, optimizer state, and policy state do not cross this boundary.
    If the length gate fails, rerun calibration under a new identity at the next
    horizon in `[256, 512, 1024]`, binding the failed parent aggregate SHA-256.
-5. Run a second target-free freeze pilot with one global beta for every
+6. Run a second target-free freeze pilot with one global beta for every
    seed/arm. Start at the maximum calibration candidate; failures may only
    issue a new identity at the next `beta*=2` grid point, byte-bound to the
    immediately preceding failed freeze aggregate.
-6. Bind the accepted freeze aggregate SHA-256, unique global `beta_0`, response
+7. Bind the accepted freeze aggregate SHA-256, unique global `beta_0`, response
    horizon, optimizer schedule, implementation, image and data inventory into
    one new `budgeted_end_to_end` identity.
-7. Audit and commit the fixed-three materializer, exactly-once held-array
+8. Audit and commit the fixed-three materializer, exactly-once held-array
    submitter, GPU wrapper, per-seed verifier, terminal-evidence capture and
    descriptive publication layer before allocating the E2E jobs.
-8. Submit exactly fresh seeds `20261001`–`20261003` as one `0-2%2` array. There is no
+9. Submit exactly fresh seeds `20261001`–`20261003` as one `0-2%2` array. There is no
    adaptive seed selection, outcome-dependent stopping or substitution.
-9. Require all three canonical run directories and exact Slurm
+10. Require all three canonical run directories and exact Slurm
    `COMPLETED/0:0/0:0` evidence, then publish only the three frozen
    `ProRM+ - BT-MLE` endpoints with mean/SD/min/median/max and the fixed paired
    descriptive bootstrap interval. No p-value, significance label, efficacy
    gate or formal population claim is permitted.
-10. Preserve exact-30 and the broader sensitivity/robustness matrix only as
+11. Preserve exact-30 and the broader sensitivity/robustness matrix only as
     future, separately authorized studies. The fixed-three outcome cannot
     trigger them.
 

@@ -68,6 +68,10 @@ _MAX_SOURCE_FILE_BYTES: Final = 128 * 1024 * 1024
 _MAX_SIF_BYTES: Final = 64 * 1024 * 1024 * 1024
 
 _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+_PYTEST_FAILURE_LINE_RE = re.compile(
+    rb"^(?:FAILED|ERROR) (tests/[A-Za-z0-9_./-]+(?:::[A-Za-z0-9_]+)?)",
+    re.MULTILINE,
+)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _PYTHON_VERSION_RE = re.compile(r"3\.11\.[0-9]+\Z")
@@ -492,8 +496,19 @@ def _checked_result(
     if type(result) is not _CommandResult:
         raise TypeError(f"{name} runner returned the wrong result type")
     if result.returncode != 0:
+        failure_tests: list[str] = []
+        if name == "pytest":
+            for match in _PYTEST_FAILURE_LINE_RE.finditer(result.stdout):
+                identifier = match.group(1).decode("ascii")
+                if identifier not in failure_tests:
+                    failure_tests.append(identifier)
+                if len(failure_tests) == 20:
+                    break
         raise RuntimeError(
-            f"{name} failed with exit {result.returncode}; stderr_sha256={_sha256(result.stderr)}"
+            f"{name} failed with exit {result.returncode}; "
+            f"stdout_size_bytes={len(result.stdout)}; stdout_sha256={_sha256(result.stdout)}; "
+            f"stderr_size_bytes={len(result.stderr)}; stderr_sha256={_sha256(result.stderr)}; "
+            f"failure_tests={','.join(failure_tests) if failure_tests else 'unavailable'}"
         )
     return result
 
@@ -580,9 +595,10 @@ def _is_formal_tracked_path(relative: str) -> bool:
         return True
     if relative.startswith("src/smart_reward/") and relative.endswith(".py"):
         return True
-    if relative.startswith("tests/") and Path(relative).name.startswith(
-        ("test_phase2_r3_", "test_phase2_checkpoint", "test_phase2_core_checkpoint")
-    ):
+    # R3 imports shared numerical, data, rollout, and legacy-compatibility
+    # modules. A prefix-selected test subset cannot close that dependency
+    # surface, so Gate 1 binds and executes every tracked Python test.
+    if relative.startswith("tests/"):
         return relative.endswith(".py")
     if relative.startswith("scripts/hpc4/"):
         name = Path(relative).name.lower()

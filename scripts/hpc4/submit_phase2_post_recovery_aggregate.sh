@@ -166,6 +166,15 @@ mapfile -t authorization_transport < <(
   || die "authorization transport inspection returned an invalid binding set"
 authorization_schema="${authorization_transport[0]}"
 authorization_schedule_sha256="${authorization_transport[1]}"
+case "${authorization_schema}" in
+  phase2-recovery-r3-gate-c-success-authorization/v1)
+    authorization_mode="active-r3"
+    ;;
+  prorm-phase2-recovery-success-authorization/v1)
+    authorization_mode="legacy-r2-replay"
+    ;;
+  *) die "authorization schema cannot select an aggregate replay mode" ;;
+esac
 mapfile -t identities < <(
   inspector_arguments=(
     overlay "${overlay}"
@@ -343,7 +352,7 @@ beta_source_present=0
 horizon_parent_present=0
 [[ -z "${beta_source}" ]] || beta_source_present=1
 [[ -z "${horizon_parent}" ]] || horizon_parent_present=1
-export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_REPO_ROOT=${repo_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_POST_RECOVERY_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_POST_RECOVERY_OVERLAY_SHA256=${overlay_sha256},PRORM_PHASE2_BASE_SHA256=${base_sha256},PRORM_POST_RECOVERY_DESIGN_SHA256=${design_sha256},PRORM_PHASE2_BASE_CONFIG_HASH=${base_hash},PRORM_RECOVERY_AUTHORIZATION=${authorization},PRORM_RECOVERY_AUTHORIZATION_SHA256=${authorization_sha256},PRORM_POST_RECOVERY_TERMINAL=${terminal},PRORM_POST_RECOVERY_TERMINAL_RAW=${terminal_raw},PRORM_POST_RECOVERY_TERMINAL_SHA256=${terminal_sha256},PRORM_POST_RECOVERY_ARRAY_JOB_ID=${array_job_id},PRORM_AGGREGATOR_GIT_COMMIT=${aggregator_commit},PRORM_PRODUCER_GIT_COMMIT=${producer_commit},PRORM_POST_RECOVERY_AGGREGATE_OUTPUT=${output},PRORM_POST_RECOVERY_EVIDENCE_ROOT=${evidence_root},PRORM_POST_RECOVERY_OVERLAY_EVIDENCE=${overlay_evidence},PRORM_POST_RECOVERY_BASE_EVIDENCE=${base_evidence},PRORM_POST_RECOVERY_PILOT_PHASE=${pilot_phase},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_PRESENT=${beta_source_present},PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_PRESENT=${horizon_parent_present}"
+export_spec="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_REPO_ROOT=${repo_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_POST_RECOVERY_OVERLAY_REL=${overlay_relative},PRORM_PHASE2_BASE_REL=${base_relative},PRORM_POST_RECOVERY_OVERLAY_SHA256=${overlay_sha256},PRORM_PHASE2_BASE_SHA256=${base_sha256},PRORM_POST_RECOVERY_DESIGN_SHA256=${design_sha256},PRORM_PHASE2_BASE_CONFIG_HASH=${base_hash},PRORM_RECOVERY_AUTHORIZATION=${authorization},PRORM_RECOVERY_AUTHORIZATION_SHA256=${authorization_sha256},PRORM_POST_RECOVERY_TERMINAL=${terminal},PRORM_POST_RECOVERY_TERMINAL_RAW=${terminal_raw},PRORM_POST_RECOVERY_TERMINAL_SHA256=${terminal_sha256},PRORM_POST_RECOVERY_ARRAY_JOB_ID=${array_job_id},PRORM_AGGREGATOR_GIT_COMMIT=${aggregator_commit},PRORM_PRODUCER_GIT_COMMIT=${producer_commit},PRORM_POST_RECOVERY_AGGREGATE_OUTPUT=${output},PRORM_POST_RECOVERY_EVIDENCE_ROOT=${evidence_root},PRORM_POST_RECOVERY_OVERLAY_EVIDENCE=${overlay_evidence},PRORM_POST_RECOVERY_BASE_EVIDENCE=${base_evidence},PRORM_POST_RECOVERY_PILOT_PHASE=${pilot_phase},PRORM_POST_RECOVERY_AUTHORIZATION_MODE=${authorization_mode},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_PRESENT=${beta_source_present},PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_PRESENT=${horizon_parent_present}"
 if [[ -n "${beta_source}" ]]; then
   export_spec+=",PRORM_PHASE2_BETA_SOURCE_AGGREGATE=${beta_source},PRORM_PHASE2_BETA_SOURCE_AGGREGATE_SHA256=${beta_source_sha256}"
 fi

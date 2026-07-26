@@ -40,6 +40,16 @@ R3_GATE_R_RELATIVE: Final = Path("runs/phase2-recovery-r3/recovery-success-autho
 R3_GATE_C_RELATIVE: Final = Path("runs/phase2-recovery-r3-controls/gate-c-aggregate.json")
 R3_GATE_R_ROLE: Final = "three_seed_all_scheduler_segments_audited_gate_r_capability"
 R3_FINAL_ROLE: Final = "head_free_exact_three_by_three_gate_c_success_capability"
+AUTHORIZATION_MODE_COMPATIBLE: Final = "compatible"
+AUTHORIZATION_MODE_ACTIVE_R3: Final = "active-r3"
+AUTHORIZATION_MODE_LEGACY_R2_REPLAY: Final = "legacy-r2-replay"
+AUTHORIZATION_MODES: Final = frozenset(
+    {
+        AUTHORIZATION_MODE_COMPATIBLE,
+        AUTHORIZATION_MODE_ACTIVE_R3,
+        AUTHORIZATION_MODE_LEGACY_R2_REPLAY,
+    }
+)
 R3_EXECUTION_REVISION: Final = 3
 R3_RECOVERY_STATUS: Final = "all_three_seeds_all_scheduler_segments_success"
 R3_GATE_R_NEXT_ACTION: Final = "await_separate_gate_c_authorization"
@@ -878,7 +888,10 @@ def inspect_authorization(
     *,
     expected_sha256: str,
     project_root: Path,
+    authorization_mode: str = AUTHORIZATION_MODE_COMPATIBLE,
 ) -> dict[str, object]:
+    if authorization_mode not in AUTHORIZATION_MODES:
+        raise ValueError("authorization mode is invalid")
     root = _canonical_directory(project_root, name="project root")
     expected = _digest(expected_sha256, name="authorization SHA256")
     source = _canonical_file(
@@ -890,6 +903,13 @@ def inspect_authorization(
         raise ValueError("recovery authorization SHA256 mismatch")
     payload, raw = _strict_json(source, name="recovery authorization")
     schema = payload.get("schema_version")
+    if authorization_mode == AUTHORIZATION_MODE_ACTIVE_R3 and schema != R3_AUTHORIZATION_SCHEMA:
+        raise ValueError("active Gate-F requires the exact combined R3 authorization schema")
+    if (
+        authorization_mode == AUTHORIZATION_MODE_LEGACY_R2_REPLAY
+        and schema != R2_AUTHORIZATION_SCHEMA
+    ):
+        raise ValueError("legacy R2 replay requires the exact R2 authorization schema")
     if schema == R2_AUTHORIZATION_SCHEMA:
         expected_path = root / R2_AUTHORIZATION_RELATIVE
         bindings: list[tuple[str, Path, str | None]] = []
@@ -1343,6 +1363,11 @@ def build_parser() -> argparse.ArgumentParser:
     authorization.add_argument("path", type=Path)
     authorization.add_argument("--expected-sha256", required=True)
     authorization.add_argument("--project-root", type=Path, required=True)
+    authorization.add_argument(
+        "--authorization-mode",
+        choices=tuple(sorted(AUTHORIZATION_MODES)),
+        default=AUTHORIZATION_MODE_COMPATIBLE,
+    )
     authorization.add_argument("--format", choices=("lines", "json"), default="lines")
 
     overlay = subparsers.add_parser("overlay")
@@ -1363,6 +1388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.path,
                 expected_sha256=arguments.expected_sha256,
                 project_root=arguments.project_root,
+                authorization_mode=arguments.authorization_mode,
             ),
             output_format=arguments.format,
         )

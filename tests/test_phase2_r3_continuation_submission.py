@@ -453,6 +453,11 @@ def test_completed_task_and_unsealed_failure_paths_never_run_or_resubmit(
     submit = SUBMIT.read_text(encoding="utf-8")
     launcher = LAUNCHER.read_text(encoding="utf-8")
     sbatch = SBATCH.read_text(encoding="utf-8")
+    assert "/project/sigroup:/project/sigroup:" not in submit
+    assert '--bind "${project_root}:${project_root}:ro"' in submit
+    assert '--bind "${project_root}:${project_root}:rw"' in submit
+    assert '[[ "${image}" == "${project_root}/"* ]]' in submit
+    assert '[[ "${hf_cache}" == "${project_root}/"* ]]' in submit
     assert "apptainer exec" not in launcher
     assert "phase2_r3_continuation_submission.sbatch" in launcher
     assert "exec srun" in launcher

@@ -367,15 +367,13 @@ selection, gating, beta calibration, seed exclusion, or retry decisions.
 ## 6. Formal endpoints and decision rule
 
 After the pilot freezes the single global `beta_0`, the formal claim is
-supported only by the intersection of:
+supported only by the intersection of four contrasts, all oriented so positive
+favors the claim:
 
-1. held-out fixed-`beta_0` local regret favors ProRM+ over BT-MLE;
-2. the paired-seed interval for
-   `utility(ProRM+) - utility(BT-MLE)` has lower endpoint above zero;
-3. the paired-seed interval for
-   `utility(ProRM+) - utility(zero-B)` has lower endpoint above zero;
-4. the paired-seed interval for
-   `utility(oracle-step) - utility(zero-B)` has lower endpoint above zero;
+1. `regret(BT-MLE) - regret(ProRM+)`;
+2. `utility(ProRM+) - utility(BT-MLE)`;
+3. `utility(ProRM+) - utility(zero-B)`;
+4. `utility(oracle-step) - utility(zero-B)`;
 5. every optimization, positive-control, KL-safety, provenance, and numerical
    gate passes.
 
@@ -386,7 +384,8 @@ Candidate values are averaged within prompt. Each seed then contributes one
 paired scalar. Formal uncertainty is computed over paired seeds; candidates or
 prompts are not treated as independent training replicates.
 
-For endpoint `k`, the formal estimand is
+For endpoint `k`, `Delta_k` uses exactly the orientation above and the formal
+estimand is
 
 $$
 \mu_k
