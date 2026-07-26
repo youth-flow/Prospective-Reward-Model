@@ -68,7 +68,8 @@ done
 [[ -z "${SLURM_ARRAY_JOB_ID:-}" && -z "${SLURM_ARRAY_TASK_ID:-}" ]] \
   || die "Gate-1 must not execute as an array task"
 scontrol show config \
-  | grep -Eq '^[[:space:]]*ClusterName[[:space:]]*=[[:space:]]*hpc4[[:space:]]*$' \
+  | grep -E '^[[:space:]]*ClusterName[[:space:]]*=[[:space:]]*hpc4[[:space:]]*$' \
+    >/dev/null \
   || die "Gate-1 requires ClusterName=hpc4"
 
 repo_root="$(realpath -e -- "${REPO_ROOT}")"

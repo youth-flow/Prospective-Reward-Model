@@ -38,6 +38,14 @@ def test_gate1_sbatch_has_one_complete_shebang_and_bounded_resources() -> None:
     assert "#SBATCH --requeue" not in text
 
 
+def test_gate1_cluster_probe_does_not_trip_pipefail_via_grep_quit() -> None:
+    text = _text(SBATCH)
+
+    assert "scontrol show config" in text
+    assert "| grep -Eq " not in text
+    assert "| grep -E '^[[:space:]]*ClusterName[[:space:]]*=[[:space:]]*hpc4[[:space:]]*$'" in text
+
+
 def test_gate1_submit_passes_the_tracked_file_and_never_uses_wrap_or_stdin() -> None:
     text = _text(SUBMIT)
     assert "--wrap" not in text
