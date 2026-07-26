@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture and verify terminal Slurm evidence for the fixed-five budgeted wave."""
+"""Capture and verify terminal Slurm evidence for the fixed-three budgeted wave."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = "prorm-phase2-budgeted-end-to-end-terminal/v1"
-ORDERED_SEEDS = (20261001, 20261002, 20261003, 20261004, 20261005)
+SCHEMA_VERSION = "prorm-phase2-budgeted-end-to-end-fixed-three-terminal/v1"
+ORDERED_SEEDS = (20261001, 20261002, 20261003)
 
 _SACCT_FIELDS = (
     "JobID",
@@ -245,7 +245,7 @@ def _parse_sacct(raw: bytes, *, array_job_id: str) -> list[dict[str, object]]:
         raise ValueError("raw sacct bytes contain unsafe characters")
     lines = text.splitlines()
     if len(lines) != len(ORDERED_SEEDS) or any(not line for line in lines):
-        raise ValueError("raw sacct evidence must contain exactly five allocation rows")
+        raise ValueError("raw sacct evidence must contain exactly three allocation rows")
 
     rows: list[dict[str, object]] = []
     allocation_ids: set[str] = set()
@@ -314,7 +314,7 @@ def capture_terminal_evidence(
     array_job_id: str,
     destination: str | os.PathLike[str],
 ) -> dict[str, object]:
-    """Capture raw sacct bytes and their canonical fixed-five envelope."""
+    """Capture raw sacct bytes and their canonical fixed-three envelope."""
 
     checked_id = _array_job_id(array_job_id)
     output = Path(destination).absolute()
@@ -339,7 +339,7 @@ def capture_terminal_evidence(
     rows = _parse_sacct(raw, array_job_id=checked_id)
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "analysis_role": "fixed_five_exploratory_execution_evidence",
+        "analysis_role": "fixed_three_exploratory_execution_evidence",
         "formal_claim_eligible": False,
         "captured_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "query": list(command),
@@ -367,7 +367,7 @@ def verify_terminal_evidence(
     expected_sha256: str,
     expected_array_job_id: str,
 ) -> dict[str, object]:
-    """Verify canonical JSON, raw sacct bytes, and all five terminal rows."""
+    """Verify canonical JSON, raw sacct bytes, and all three terminal rows."""
 
     expected_digest = _digest(expected_sha256, name="terminal evidence SHA256")
     checked_id = _array_job_id(expected_array_job_id)
@@ -392,7 +392,7 @@ def verify_terminal_evidence(
         raise ValueError("terminal scheduler evidence fields are invalid")
     if (
         decoded["schema_version"] != SCHEMA_VERSION
-        or decoded["analysis_role"] != "fixed_five_exploratory_execution_evidence"
+        or decoded["analysis_role"] != "fixed_three_exploratory_execution_evidence"
         or decoded["formal_claim_eligible"] is not False
         or decoded["array_job_id"] != checked_id
         or decoded["ordered_seeds"] != list(ORDERED_SEEDS)

@@ -25,7 +25,7 @@ def _embedded_python(function_name: str) -> str:
     return source[body_start:body_end]
 
 
-def test_budgeted_sbatch_is_an_exploratory_five_seed_hpc4_array() -> None:
+def test_budgeted_sbatch_is_an_exploratory_fixed_three_hpc4_array() -> None:
     source = _source()
     for directive in (
         "#SBATCH --account=sigroup",
@@ -38,16 +38,20 @@ def test_budgeted_sbatch_is_an_exploratory_five_seed_hpc4_array() -> None:
         assert directive in source
     assert "#SBATCH --array=" not in source  # submitter owns the array declaration.
     assert 'readonly BUDGETED_STAGE="budgeted_end_to_end"' in source
-    assert 'readonly BUDGETED_EVIDENCE_ROLE="budgeted_end_to_end_exploratory_only"' in source
-    assert "seeds=(20261001 20261002 20261003 20261004 20261005)" in source
+    assert (
+        'readonly BUDGETED_EVIDENCE_ROLE="budgeted_end_to_end_fixed_three_exploratory_only"'
+    ) in source
+    assert "seeds=(20261001 20261002 20261003)" in source
     for check in (
-        'SLURM_ARRAY_TASK_COUNT:-}" = 5',
+        'SLURM_ARRAY_TASK_COUNT:-}" = 3',
         'SLURM_ARRAY_TASK_MIN:-}" = 0',
-        'SLURM_ARRAY_TASK_MAX:-}" = 4',
+        'SLURM_ARRAY_TASK_MAX:-}" = 2',
         'SLURM_ARRAY_TASK_STEP:-}" = 1',
-        'SLURM_ARRAY_TASK_ID}" =~ ^[0-4]$',
+        'SLURM_ARRAY_TASK_ID}" =~ ^[0-2]$',
     ):
         assert check in source
+    assert "20261004" not in source
+    assert "20261005" not in source
 
 
 def test_budgeted_sbatch_fails_closed_on_ledger_commit_and_immutable_inputs() -> None:

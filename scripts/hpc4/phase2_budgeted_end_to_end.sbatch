@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# This is an exploratory-only, five-seed end-to-end array.  It is intentionally
+# This is an exploratory-only, fixed-three end-to-end array.  It is intentionally
 # not a formal-wave entry point and does not consume a formal registry.
 #SBATCH --job-name=prorm-p2-budgeted-e2e
 #SBATCH --account=sigroup
@@ -15,7 +15,7 @@ set -euo pipefail
 umask 027
 
 readonly BUDGETED_STAGE="budgeted_end_to_end"
-readonly BUDGETED_EVIDENCE_ROLE="budgeted_end_to_end_exploratory_only"
+readonly BUDGETED_EVIDENCE_ROLE="budgeted_end_to_end_fixed_three_exploratory_only"
 readonly ADOPTED_SCHEDULE_SHA256="46e0b0fdc70c507b0325c445068326ba7bc30326d70b65fa33803cc3c876c216"
 readonly SBATCH_RELATIVE="scripts/hpc4/phase2_budgeted_end_to_end.sbatch"
 verification_complete=0
@@ -47,9 +47,9 @@ done
 [[ "${SLURM_NNODES:-}" = 1 && "${SLURM_NTASKS:-}" = 1 ]] || die "allocation must be 1 node / 1 task"
 case "${SLURM_GPUS_ON_NODE:-}" in 1|gpu:1) ;; *) die "exactly one GPU is required" ;; esac
 [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_VISIBLE_DEVICES}" != *,* ]] || die "exactly one visible GPU is required"
-[[ "${SLURM_ARRAY_TASK_COUNT:-}" = 5 ]] || die "array must contain exactly five tasks"
-[[ "${SLURM_ARRAY_TASK_MIN:-}" = 0 && "${SLURM_ARRAY_TASK_MAX:-}" = 4 && "${SLURM_ARRAY_TASK_STEP:-}" = 1 ]] || die "array must be exactly 0-4 step 1"
-[[ "${SLURM_ARRAY_TASK_ID}" =~ ^[0-4]$ ]] || die "array task must be 0..4"
+[[ "${SLURM_ARRAY_TASK_COUNT:-}" = 3 ]] || die "array must contain exactly three tasks"
+[[ "${SLURM_ARRAY_TASK_MIN:-}" = 0 && "${SLURM_ARRAY_TASK_MAX:-}" = 2 && "${SLURM_ARRAY_TASK_STEP:-}" = 1 ]] || die "array must be exactly 0-2 step 1"
+[[ "${SLURM_ARRAY_TASK_ID}" =~ ^[0-2]$ ]] || die "array task must be 0..2"
 
 for command_name in apptainer git python3 realpath sha256sum awk mktemp cp rm ln id; do
   command -v "${command_name}" >/dev/null 2>&1 || die "missing command: ${command_name}"
@@ -114,7 +114,7 @@ done
 [[ "$(sha256 "$0")" = "$(git -C "${PRORM_REPO_ROOT}" cat-file blob "${PRORM_GIT_COMMIT}:${SBATCH_RELATIVE}" | sha256sum | awk '{print $1}')" ]] \
   || die "running sbatch script differs from committed bytes"
 
-seeds=(20261001 20261002 20261003 20261004 20261005)
+seeds=(20261001 20261002 20261003)
 seed="${seeds[SLURM_ARRAY_TASK_ID]}"
 execution_id="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 campaign_root="${PRORM_PROJECT_ROOT}/runs/phase2-budgeted-end-to-end/${PRORM_BUDGETED_DESIGN_SHA256}"
@@ -491,7 +491,7 @@ write_marker() {
   fi
   temporary="$(mktemp "${project_run}/.${status}.XXXXXX")" || return 1
   if ! {
-    printf 'schema_version=prorm-phase2-budgeted-end-to-end-run-status/v1\nstatus=%s\nformal=false\nevidence_role=%s\nstage=%s\nseed=%s\n' "${status}" "${BUDGETED_EVIDENCE_ROLE}" "${BUDGETED_STAGE}" "${seed}"
+    printf 'schema_version=prorm-phase2-budgeted-end-to-end-fixed-three-run-status/v1\nstatus=%s\nformal=false\nevidence_role=%s\nstage=%s\nseed=%s\n' "${status}" "${BUDGETED_EVIDENCE_ROLE}" "${BUDGETED_STAGE}" "${seed}"
     printf 'slurm_job_id=%s\narray_job_id=%s\narray_task_id=%s\ncluster=hpc4\naccount=sigroup\npartition=gpu-l20\nrestart_count=0\n' "${SLURM_JOB_ID}" "${SLURM_ARRAY_JOB_ID}" "${SLURM_ARRAY_TASK_ID}"
     printf 'phase2_design_sha256=%s\nbase_config_hash=%s\ngit_commit=%s\nsubmission_intent_sha256=%s\nsubmission_ledger_sha256=%s\n' "${PRORM_BUDGETED_DESIGN_SHA256}" "${PRORM_BUDGETED_BASE_CONFIG_HASH}" "${PRORM_GIT_COMMIT}" "${submission_intent_sha256}" "${submission_ledger_sha256}"
     printf 'freeze_evidence_sha256=%s\nfrozen_global_beta=%s\noptimizer_schedule_sha256=%s\nartifact_metadata_sha256=%s\nphase2_result_sha256=%s\nrollouts_sha256=%s\nverification_sha256=%s\nmanifest_sha256=%s\n' "${PRORM_BUDGETED_FREEZE_EVIDENCE_SHA256}" "${PRORM_BUDGETED_FROZEN_BETA}" "${PRORM_OPTIMIZER_SCHEDULE_SHA256}" "$(hash_or_none "${project_run}/artifact/metadata.json")" "$(hash_or_none "${project_run}/phase2-result.json")" "$(hash_or_none "${project_run}/phase2-result.rollouts.jsonl")" "$(hash_or_none "${project_run}/phase2-budgeted-output-verification.json")" "$(hash_or_none "${project_run}/run-manifest.json")"
@@ -674,11 +674,11 @@ observed_hashes = {
 }
 if (
     verification.get("schema_version")
-    != "prorm-phase2-budgeted-seed-output-verification/v1"
+    != "prorm-phase2-budgeted-fixed-three-seed-output-verification/v1"
     or verification.get("status") != "verified"
     or verification.get("design_stage") != "budgeted_end_to_end"
     or verification.get("evidence_role")
-    != "budgeted_end_to_end_exploratory_only"
+    != "budgeted_end_to_end_fixed_three_exploratory_only"
     or verification.get("formal_eligibility") is not False
     or verification.get("formal_claim_eligible") is not False
     or verification.get("supports_formal_claim") is not False
@@ -838,16 +838,17 @@ horizon = config["evaluation"]["max_length"]
 if (
     config["design"]["stage"] != "budgeted_end_to_end"
     or config["design"].get("formal_eligibility") is not False
-    or config["design"].get("evidence_role") != "budgeted_end_to_end_exploratory_only"
+    or config["design"].get("evidence_role")
+    != "budgeted_end_to_end_fixed_three_exploratory_only"
     or config["design"].get("source_config_hash") != sys.argv[2]
-    or tuple(config["run"].get("seeds", ())) != (20261001, 20261002, 20261003, 20261004, 20261005)
+    or tuple(config["run"].get("seeds", ())) != (20261001, 20261002, 20261003)
     or config["run"].get("confirmatory") is not False
     or common.get("beta_source_aggregate_sha256") != sys.argv[3]
     or horizon.get("parent_pilot_aggregate_sha256") != sys.argv[3]
     or not math.isclose(float(common["frozen_global_beta"]), float(sys.argv[4]), rel_tol=0.0, abs_tol=0.0)
 ):
     raise SystemExit("budgeted overlay does not bind the accepted freeze, beta, and source identity")
-print('{"status":"ok","formal":false,"evidence_role":"budgeted_end_to_end_exploratory_only"}')
+print('{"status":"ok","formal":false,"evidence_role":"budgeted_end_to_end_fixed_three_exploratory_only"}')
 PY
 "${container[@]}" python - "${execution_overlay}" "${PRORM_BUDGETED_FREEZE_EVIDENCE}" "${PRORM_BUDGETED_FREEZE_EVIDENCE_SHA256}" "${PRORM_BUDGETED_FROZEN_BETA}" <<'PY' >"${job_dir}/accepted-freeze-preflight.json"
 import json, math, sys

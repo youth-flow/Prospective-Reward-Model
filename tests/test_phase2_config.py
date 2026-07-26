@@ -1368,7 +1368,7 @@ def test_schema_accepts_a_future_confirmatory_stage_only_with_new_base_identity(
     assert validated["design"]["source_config_hash"] == config_hash(base)
 
 
-def test_budgeted_end_to_end_is_fixed_five_seed_exploratory_evidence(
+def test_budgeted_end_to_end_is_fixed_three_seed_exploratory_evidence(
     pilot_config: dict[str, Any],
 ) -> None:
     post_recovery = _post_recovery_calibration_pilot(pilot_config)
@@ -1387,6 +1387,9 @@ def test_budgeted_end_to_end_is_fixed_five_seed_exploratory_evidence(
     )
     assert validated["design"]["source_config"] == (PHASE2_BUDGETED_END_TO_END_BASE_CONFIG)
     assert validated["design"]["evidence_role"] == (PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE)
+    assert PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE == (
+        "budgeted_end_to_end_fixed_three_exploratory_only"
+    )
     assert validated["design"]["formal_eligibility"] is False
     assert "budgeted-end-to-end" in validated["design"]["name"]
     assert validated["run"] == {
@@ -1397,6 +1400,7 @@ def test_budgeted_end_to_end_is_fixed_five_seed_exploratory_evidence(
         "formal_eligibility": False,
         "excluded_from_confirmatory_evidence": True,
     }
+    assert PHASE2_BUDGETED_END_TO_END_SEEDS == (20261001, 20261002, 20261003)
     assert common["rule"] == "single_accepted_freeze_global_beta_scalar"
     assert common["calibration_split"] == "excluded_pilot"
     assert common["calibration_source"] == (
@@ -1437,6 +1441,12 @@ def test_budgeted_end_to_end_is_fixed_five_seed_exploratory_evidence(
         (
             lambda config: config["run"].update(
                 {"seeds": list(reversed(PHASE2_BUDGETED_END_TO_END_SEEDS))}
+            ),
+            "exact ordered exploratory seed list",
+        ),
+        (
+            lambda config: config["run"].update(
+                {"seeds": [20261001, 20261002, 20261003, 20261004, 20261005]}
             ),
             "exact ordered exploratory seed list",
         ),

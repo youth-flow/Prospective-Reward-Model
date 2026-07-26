@@ -2,9 +2,9 @@
 
 > **Current route:** this document preserves the complete future formal
 > design, including exact-30. The experiment currently being executed is the
-> non-formal fixed-five budgeted route documented in
+> non-formal fixed-three budgeted route documented in
 > [phase2_budgeted_end_to_end.md](phase2_budgeted_end_to_end.md). Nothing in a
-> five-seed exploratory result activates the exact-30 protocol.
+> three-seed exploratory result activates the exact-30 protocol.
 
 This document records the decisions made after auditing the completed Phase 1
 campaign. It is intentionally separate from the frozen Phase 1 result. Nothing
@@ -527,7 +527,7 @@ architecture:
    control evaluations.
 
 For this project, “many” means exactly 30 preregistered paired formal seeds, not a
-five-seed point estimate. OOD or human-labeled evaluations remain external
+three-seed point estimate. OOD or human-labeled evaluations remain external
 validity endpoints and cannot replace the controlled operational-oracle
 mechanism test.
 

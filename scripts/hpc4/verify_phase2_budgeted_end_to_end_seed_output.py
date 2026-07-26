@@ -2,7 +2,7 @@
 """Fail-closed verifier for one budgeted Phase-2 end-to-end seed.
 
 The verifier is deliberately separate from both the workload and the
-fixed-five descriptive aggregate.  It proves that the raw result, rollout
+fixed-three descriptive aggregate.  It proves that the raw result, rollout
 sidecar, run manifest, freshly materialized artifact metadata, and local
 materialization receipt form one immutable seed/design/environment closure.
 It then admits the result through the shared budgeted normalizer and publishes
@@ -40,7 +40,7 @@ from smart_reward.phase2_rollout import (
 )
 from smart_reward.seeding import SeedBundle, derive_seed
 
-_VERIFICATION_SCHEMA = "prorm-phase2-budgeted-seed-output-verification/v1"
+_VERIFICATION_SCHEMA = "prorm-phase2-budgeted-fixed-three-seed-output-verification/v1"
 _MANIFEST_SCHEMA = "smart-reward-run/v1"
 _ARTIFACT_SCHEMA = "controlled-feature-artifact/v1"
 _ARTIFACT_BINDING_SCHEMA = "prorm-phase2-budgeted-artifact-binding/v1"
@@ -446,7 +446,7 @@ def _validate_overlay(
         )
         != frozen_beta
     ):
-        raise ValueError("overlay is not the fixed-five accepted-freeze budgeted design")
+        raise ValueError("overlay is not the fixed-three accepted-freeze budgeted design")
     candidates = _integer(
         evaluation.get("rollout_candidates_per_prompt"),
         name="overlay rollout_candidates_per_prompt",
@@ -1255,7 +1255,7 @@ def verify_seed_output(
 
     expected_seed = _integer(seed, name="seed", minimum=0)
     if expected_seed not in PHASE2_BUDGETED_END_TO_END_SEEDS:
-        raise ValueError("seed is outside the fixed-five budgeted design")
+        raise ValueError("seed is outside the fixed-three budgeted design")
     expected_design = _digest(design_sha256, name="design_sha256")
     expected_base = _digest(base_config_hash, name="base_config_hash")
     expected_git = _digest(

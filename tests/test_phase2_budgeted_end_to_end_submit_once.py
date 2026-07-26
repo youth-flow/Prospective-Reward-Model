@@ -104,7 +104,7 @@ class _FakeScheduler:
         fields = [
             f"JobId={job_id}",
             f"ArrayJobId={job_id}",
-            "ArrayTaskId=0-4%2",
+            "ArrayTaskId=0-2%2",
             "ArrayTaskThrottle=2",
             f"JobName={self.job_name}",
             f"UserId={self.user}(1000)",
@@ -133,7 +133,7 @@ class _FakeScheduler:
 
     def squeue_raw(self) -> str:
         return "".join(
-            f"{job_id}|0-4%2|{self.job_name}|{self.user}|gpu-l20|l20_qos\n"
+            f"{job_id}|0-2%2|{self.job_name}|{self.user}|gpu-l20|l20_qos\n"
             for job_id in sorted(self.jobs, key=int)
         )
 
@@ -198,7 +198,7 @@ class _FakeScheduler:
                 self.events.append("sbatch")
                 self.sbatch_arguments = arguments
                 assert "--hold" in arguments
-                assert self._option(arguments, "--array=") == "0-4%2"
+                assert self._option(arguments, "--array=") == "0-2%2"
                 assert self._option(arguments, "--job-name=") == self.job_name
                 comment = self._option(arguments, "--comment=")
                 assert comment == SCHEDULER_COMMENT
@@ -298,7 +298,7 @@ def _harness(
     return module, scheduler, _arguments(project, repo, script)
 
 
-def test_fresh_fixed_five_submission_has_exact_order_and_namespace(
+def test_fresh_fixed_three_submission_has_exact_order_and_namespace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -327,7 +327,7 @@ def test_fresh_fixed_five_submission_has_exact_order_and_namespace(
     assert scheduler.events.index("sacct:2") < scheduler.events.index("release")
 
     assert scheduler.sbatch_arguments is not None
-    assert "--array=0-4%2" in scheduler.sbatch_arguments
+    assert "--array=0-2%2" in scheduler.sbatch_arguments
     assert "--no-requeue" in scheduler.sbatch_arguments
     assert f"--comment={SCHEDULER_COMMENT}" in scheduler.sbatch_arguments
     assert scheduler.sbatch_arguments[-1] == str(
@@ -337,14 +337,48 @@ def test_fresh_fixed_five_submission_has_exact_order_and_namespace(
     submission = json.loads((scheduler.ledger / "submission.json").read_bytes())
     assert intent["schema_version"] == module.INTENT_SCHEMA
     assert submission["schema_version"] == module.SUBMISSION_SCHEMA
-    assert intent["ordered_seeds"] == list(range(20261001, 20261006))
-    assert submission["ordered_seeds"] == list(range(20261001, 20261006))
-    assert intent["array_spec"] == submission["array_spec"] == "0-4%2"
+    assert intent["ordered_seeds"] == [20261001, 20261002, 20261003]
+    assert submission["ordered_seeds"] == [20261001, 20261002, 20261003]
+    assert intent["array_spec"] == submission["array_spec"] == "0-2%2"
+    assert intent["max_running_tasks"] == 2
+    assert intent["evidence_role"] == "budgeted_end_to_end_fixed_three_exploratory_only"
     assert intent["replacement_array_allowed"] is False
     assert intent["replacement_seed_allowed"] is False
     assert submission["replacement_array_allowed"] is False
     assert submission["replacement_seed_allowed"] is False
     assert not (scheduler.project / "runs" / "phase2-post-recovery-calibration" / DESIGN).exists()
+
+
+@pytest.mark.parametrize("artifact", ["intent", "submission", "scheduler"])
+def test_old_fixed_five_control_schema_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    module, scheduler, arguments = _harness(tmp_path, monkeypatch)
+    assert module.main(arguments) == 0
+    intent_path = scheduler.ledger / "intent.json"
+    intent = json.loads(intent_path.read_bytes())
+    submission = json.loads((scheduler.ledger / "submission.json").read_bytes())
+
+    if artifact == "intent":
+        mutated = dict(intent)
+        mutated["schema_version"] = "prorm-phase2-budgeted-end-to-end-array-intent/v1"
+        with pytest.raises(ValueError, match="intent identity"):
+            module._validate_intent(mutated, expected=intent)
+        return
+    if artifact == "submission":
+        submission["schema_version"] = "prorm-phase2-budgeted-end-to-end-array-submission/v1"
+    else:
+        submission["scheduler_request"]["schema_version"] = (
+            "prorm-phase2-budgeted-end-to-end-held-scheduler-request/v2"
+        )
+    with pytest.raises(ValueError, match="submission policy|scheduler evidence"):
+        module._validate_submission(
+            submission,
+            intent=intent,
+            intent_sha256=hashlib.sha256(intent_path.read_bytes()).hexdigest(),
+        )
 
 
 def test_ledger_deep_verifier_binds_exact_source_and_identity(
@@ -373,7 +407,7 @@ def test_ledger_deep_verifier_binds_exact_source_and_identity(
 
     assert verified["status"] == "verified"
     assert verified["array_job_id"] == "1000"
-    assert verified["ordered_seeds"] == list(range(20261001, 20261006))
+    assert verified["ordered_seeds"] == [20261001, 20261002, 20261003]
 
 
 def test_crash_after_sbatch_recovers_held_orphan_without_replacement(
@@ -551,12 +585,12 @@ def test_concurrent_invocations_submit_once(
 @pytest.mark.parametrize(
     "raw",
     [
-        f"1000|0-4%2|prorm-p2-budgeted-{DESIGN[:12]}|intruder|gpu-l20|l20_qos\n",
-        f"1000|0-4%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20|wrong\n",
+        f"1000|0-2%2|prorm-p2-budgeted-{DESIGN[:12]}|intruder|gpu-l20|l20_qos\n",
+        f"1000|0-2%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20|wrong\n",
         f"1000|0-9%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20|l20_qos\n",
-        f"1000|0-4%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20\n",
-        f"1000|0-4%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20|l20_qos\r\n",
-        f"1000|0-4%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20|l20_qos\n\n2000",
+        f"1000|0-2%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20\n",
+        f"1000|0-2%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20|l20_qos\r\n",
+        f"1000|0-2%2|prorm-p2-budgeted-{DESIGN[:12]}|tester|gpu-l20|l20_qos\n\n2000",
     ],
 )
 def test_squeue_parser_rejects_every_malformed_or_foreign_row(raw: str) -> None:
@@ -572,7 +606,7 @@ def test_squeue_parser_rejects_every_malformed_or_foreign_row(raw: str) -> None:
 def test_squeue_parser_uses_array_root_and_accepts_only_fixed_wave_subsets() -> None:
     module = _load_submitter()
     name = f"prorm-p2-budgeted-{DESIGN[:12]}"
-    raw = f"1000|1-4%2|{name}|tester|gpu-l20|l20_qos\n1000|0|{name}|tester|gpu-l20|l20_qos\n"
+    raw = f"1000|1-2%2|{name}|tester|gpu-l20|l20_qos\n1000|0|{name}|tester|gpu-l20|l20_qos\n"
 
     assert module._parse_squeue_ids(
         raw,
@@ -587,7 +621,7 @@ def test_sacct_parser_preserves_empty_alloc_tres_and_rejects_identity_drift() ->
     valid = "|".join(
         (
             "2000",
-            "1000_4",
+            "1000_2",
             name,
             "tester",
             "hpc4",
@@ -622,7 +656,7 @@ def test_sacct_parser_preserves_empty_alloc_tres_and_rejects_identity_drift() ->
         valid.replace("|hpc4|", "|other|"),
         valid + "|extra",
         valid.replace("|FAILED|", "|FAILED by user|"),
-        valid.replace("2000|1000_4", "bad|also-bad"),
+        valid.replace("2000|1000_2", "bad|also-bad"),
     ):
         with pytest.raises(ValueError):
             module._parse_sacct_ids(
@@ -641,7 +675,7 @@ def test_sacct_parser_preserves_empty_alloc_tres_and_rejects_identity_drift() ->
             "TRES=billing=8,cpu=8,gres/gpu=1,mem=96G,node=1",
             "TRES=billing=8,cpu=7,gres/gpu=1,mem=96G,node=1",
         ),
-        ("ArrayTaskId=0-4%2", "ArrayTaskId=0-2%2"),
+        ("ArrayTaskId=0-2%2", "ArrayTaskId=0-1%2"),
         ("Command=", "Command=/wrong"),
         ("WorkDir=", "WorkDir=/wrong"),
     ],
@@ -751,7 +785,7 @@ def test_scontrol_accepts_released_partial_array_with_allocated_l20_tres(
     module, scheduler, _ = _harness(tmp_path, monkeypatch)
     scheduler.add_released("1000")
     raw = scheduler.scontrol_record("1000")
-    raw = raw.replace("ArrayTaskId=0-4%2", "ArrayTaskId=1-4%2")
+    raw = raw.replace("ArrayTaskId=0-2%2", "ArrayTaskId=1-2%2")
     raw = raw.replace(
         "TRES=billing=8,cpu=8,gres/gpu=1,mem=96G,node=1",
         "TRES=billing=8,cpu=8,gres/gpu=1,mem=96G,node=1,gres/gpu:l20=1",

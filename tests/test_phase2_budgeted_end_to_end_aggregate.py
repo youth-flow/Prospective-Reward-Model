@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "hpc4" / "aggregate_phase2_budgeted_end_to_end.py"
-SEEDS = tuple(range(20261001, 20261006))
+SEEDS = (20261001, 20261002, 20261003)
 ARRAY = "7000"
 DESIGN = "a" * 64
 BASE = "b" * 64
@@ -195,8 +195,8 @@ class Campaign:
 @pytest.fixture
 def campaign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Campaign:
     module = _load()
-    project = tmp_path / "project"
-    repository = tmp_path / "repository"
+    project = tmp_path / "p"
+    repository = tmp_path / "r"
     (project / "aggregates").mkdir(parents=True)
     repository.mkdir()
     campaign_root = project / "runs" / "phase2-budgeted-end-to-end" / DESIGN
@@ -365,7 +365,7 @@ def campaign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Campaign:
         repository=repository,
         terminal=terminal,
         runs=runs,
-        output=project / "aggregates" / "budgeted-fixed-five.json",
+        output=project / "aggregates" / "budgeted-fixed-three.json",
     )
 
 
@@ -386,6 +386,11 @@ def test_publishes_only_complete_descriptive_effects_and_receipt(campaign: Campa
     assert '"significance"' not in serialized
     receipt_path = Path(f"{campaign.output}.evidence.json")
     assert receipt_path.is_file()
+    assert receipt["schema_version"] == (
+        "prorm-phase2-budgeted-end-to-end-fixed-three-descriptive-publication/v1"
+    )
+    assert receipt["analysis_role"] == "fixed_three_exploratory_descriptive_only"
+    assert receipt["ordered_seeds"] == [20261001, 20261002, 20261003]
     assert receipt["aggregate"]["sha256"] == _sha(campaign.output)
     assert [row["seed"] for row in receipt["seed_evidence"]] == list(SEEDS)
 
@@ -398,7 +403,7 @@ def test_cross_seed_run_order_and_missing_seed_fail_closed(campaign: Campaign) -
 
     campaign.runs[0], campaign.runs[1] = campaign.runs[1], campaign.runs[0]
     campaign.runs.pop()
-    with pytest.raises(ValueError, match="exactly five"):
+    with pytest.raises(ValueError, match="exactly three"):
         campaign.publish()
     assert not campaign.output.exists()
 
@@ -407,6 +412,31 @@ def test_result_and_cross_seed_verifier_tampering_are_rejected(campaign: Campaig
     result = campaign.runs[0] / "phase2-result.json"
     result.write_bytes(result.read_bytes() + b" ")
     with pytest.raises(ValueError, match="does not bind"):
+        campaign.publish()
+    assert not campaign.output.exists()
+
+
+def test_old_fixed_five_seed_verification_schema_is_rejected(campaign: Campaign) -> None:
+    run = campaign.runs[0]
+    verification_path = run / "phase2-budgeted-output-verification.json"
+    verification = json.loads(verification_path.read_bytes())
+    verification["schema_version"] = "prorm-phase2-budgeted-seed-output-verification/v1"
+    verification_path.write_bytes(_canonical(verification))
+    marker, _ = campaign.module._parse_success(run / "SUCCESS")
+    marker["verification_sha256"] = _sha(verification_path)
+    (run / "SUCCESS").write_bytes(_success(marker, campaign.module._SUCCESS_KEYS))
+
+    with pytest.raises(ValueError, match="verification identity"):
+        campaign.publish()
+    assert not campaign.output.exists()
+
+
+def test_old_fixed_five_run_status_schema_is_rejected(campaign: Campaign) -> None:
+    marker, _ = campaign.module._parse_success(campaign.runs[0] / "SUCCESS")
+    marker["schema_version"] = "prorm-phase2-budgeted-end-to-end-run-status/v1"
+    (campaign.runs[0] / "SUCCESS").write_bytes(_success(marker, campaign.module._SUCCESS_KEYS))
+
+    with pytest.raises(ValueError, match="SUCCESS marker identity"):
         campaign.publish()
     assert not campaign.output.exists()
 
@@ -446,7 +476,7 @@ def test_atomic_publication_never_overwrites_existing_output(campaign: Campaign)
 
 
 def test_cross_seed_freeze_splice_is_rejected_even_after_rehash(campaign: Campaign) -> None:
-    run = campaign.runs[3]
+    run = campaign.runs[1]
     verification_path = run / "phase2-budgeted-output-verification.json"
     verification = json.loads(verification_path.read_bytes())
     verification["accepted_freeze_aggregate_sha256"] = "5" * 64
@@ -464,7 +494,7 @@ def test_toctou_change_after_normalization_is_detected(
     campaign: Campaign,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_builder = campaign.module.build_fixed_five_exploratory_aggregate
+    original_builder = campaign.module.build_fixed_three_exploratory_aggregate
     result = campaign.runs[0] / "phase2-result.json"
 
     def mutate_after_normalization(*args: object, **kwargs: object) -> dict[str, object]:
@@ -474,7 +504,7 @@ def test_toctou_change_after_normalization_is_detected(
 
     monkeypatch.setattr(
         campaign.module,
-        "build_fixed_five_exploratory_aggregate",
+        "build_fixed_three_exploratory_aggregate",
         mutate_after_normalization,
     )
     with pytest.raises(ValueError, match="changed after authentication"):
@@ -483,7 +513,7 @@ def test_toctou_change_after_normalization_is_detected(
 
 
 def test_cross_seed_submission_ledger_splice_is_rejected(campaign: Campaign) -> None:
-    run = campaign.runs[4]
+    run = campaign.runs[2]
     marker, _ = campaign.module._parse_success(run / "SUCCESS")
     marker["submission_ledger_sha256"] = "5" * 64
     (run / "SUCCESS").write_bytes(_success(marker, campaign.module._SUCCESS_KEYS))

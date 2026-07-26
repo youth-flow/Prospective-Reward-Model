@@ -1,18 +1,18 @@
-"""Strict descriptive aggregation for the fixed-five Phase-2 exploratory wave.
+"""Strict descriptive aggregation for the fixed-three Phase-2 exploratory wave.
 
 This module is deliberately independent of :mod:`smart_reward.phase2_aggregate`.
 It accepts already-normalized in-memory seed records and performs no file or
 HPC access.  A later publication layer may load and authenticate artifacts,
 normalize them into this small mapping contract, and call
-:func:`build_fixed_five_exploratory_aggregate`.
+:func:`build_fixed_three_exploratory_aggregate`.
 
 The scientific contract is intentionally narrow:
 
-* the experimental units are exactly seeds ``20261001`` through ``20261005``;
+* the experimental units are exactly seeds ``20261001`` through ``20261003``;
 * every effect is oriented as ``ProRM+ - BT``;
 * the downstream and operational-oracle preference endpoint definitions and
   their favorable signs are fixed here;
-* all five records must be present and admissible before any effect summary is
+* all three records must be present and admissible before any effect summary is
   emitted;
 * intervals are deterministic paired-seed bootstrap descriptions, not
   hypothesis tests; and
@@ -71,8 +71,8 @@ from .statistics import (
     paired_bootstrap_ci,
 )
 
-FIXED_FIVE_EXPLORATORY_SEEDS = _CONFIG_BUDGETED_SEEDS
-FIXED_FIVE_EXPLORATORY_SCHEMA = "prorm-phase2-fixed-five-exploratory-descriptive-aggregate/v1"
+FIXED_THREE_EXPLORATORY_SEEDS = _CONFIG_BUDGETED_SEEDS
+FIXED_THREE_EXPLORATORY_SCHEMA = "prorm-phase2-fixed-three-exploratory-descriptive-aggregate/v1"
 CONTRAST_ORIENTATION = "prorm_plus_minus_bt"
 PHASE2_BUDGETED_END_TO_END_RESULT_SCHEMA = "common-beta-budgeted-end-to-end/v1"
 PHASE2_BUDGETED_END_TO_END_STAGE = _CONFIG_BUDGETED_STAGE
@@ -881,7 +881,7 @@ def _extract_budgeted_endpoints(
 def normalize_budgeted_end_to_end_seed_result(
     result: Mapping[str, object],
 ) -> dict[str, object]:
-    """Normalize one raw budgeted E2E result for the fixed-five aggregate.
+    """Normalize one raw budgeted E2E result for the fixed-three aggregate.
 
     The returned mapping is deliberately the *only* bridge from raw result
     artifacts to descriptive aggregation.  Immutable identity is extracted
@@ -1133,9 +1133,9 @@ def _digest(value: object, *, name: str) -> str:
 def _seed(value: object, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an integer")
-    if value not in FIXED_FIVE_EXPLORATORY_SEEDS:
+    if value not in FIXED_THREE_EXPLORATORY_SEEDS:
         raise ValueError(
-            f"{name} must be one of the fixed exploratory seeds {FIXED_FIVE_EXPLORATORY_SEEDS!r}"
+            f"{name} must be one of the fixed exploratory seeds {FIXED_THREE_EXPLORATORY_SEEDS!r}"
         )
     return value
 
@@ -1148,8 +1148,8 @@ def _seed_records(
     records = tuple(
         _mapping(record, name=f"seed_records[{index}]") for index, record in enumerate(value)
     )
-    if len(records) > len(FIXED_FIVE_EXPLORATORY_SEEDS):
-        raise ValueError("seed_records cannot contain more than the fixed five seeds")
+    if len(records) > len(FIXED_THREE_EXPLORATORY_SEEDS):
+        raise ValueError("seed_records cannot contain more than the fixed three seeds")
     return records
 
 
@@ -1288,14 +1288,14 @@ def _effect_summary(
     }
 
 
-def build_fixed_five_exploratory_aggregate(
+def build_fixed_three_exploratory_aggregate(
     seed_records: Sequence[Mapping[str, object]],
     *,
     bootstrap_seed: int,
     bootstrap_resamples: int = DEFAULT_BOOTSTRAP_RESAMPLES,
     confidence_level: float = DEFAULT_CONFIDENCE_LEVEL,
 ) -> dict[str, object]:
-    """Build the fixed-five exploratory descriptive aggregate.
+    """Build the fixed-three exploratory descriptive aggregate.
 
     Each normalized record has these required fields:
 
@@ -1362,21 +1362,21 @@ def build_fixed_five_exploratory_aggregate(
             endpoint_rows[endpoint].append((seed, bt, prorm_plus))
 
     expected_observed_order = tuple(
-        seed for seed in FIXED_FIVE_EXPLORATORY_SEEDS if seed in set(observed)
+        seed for seed in FIXED_THREE_EXPLORATORY_SEEDS if seed in set(observed)
     )
     if tuple(observed) != expected_observed_order:
         raise ValueError(
             "seed_records must be unique and follow the exact fixed exploratory seed order"
         )
 
-    missing = [seed for seed in FIXED_FIVE_EXPLORATORY_SEEDS if seed not in set(observed)]
+    missing = [seed for seed in FIXED_THREE_EXPLORATORY_SEEDS if seed not in set(observed)]
     complete_and_admissible = not missing and not inadmissible
     payload: dict[str, object] = {
-        "schema_version": FIXED_FIVE_EXPLORATORY_SCHEMA,
-        "analysis_role": "fixed_five_exploratory_descriptive_only",
+        "schema_version": FIXED_THREE_EXPLORATORY_SCHEMA,
+        "analysis_role": "fixed_three_exploratory_descriptive_only",
         "formal_claim_eligible": False,
         "contrast_orientation": CONTRAST_ORIENTATION,
-        "seeds": list(FIXED_FIVE_EXPLORATORY_SEEDS),
+        "seeds": list(FIXED_THREE_EXPLORATORY_SEEDS),
         "observed_seeds": observed,
         "missing_seeds": missing,
         "inadmissible_seeds": inadmissible,
@@ -1409,7 +1409,7 @@ def build_fixed_five_exploratory_aggregate(
     return payload
 
 
-def validate_fixed_five_exploratory_aggregate(
+def validate_fixed_three_exploratory_aggregate(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
     """Validate a serialized aggregate and return a shallow normalized copy."""
@@ -1433,26 +1433,26 @@ def validate_fixed_five_exploratory_aggregate(
     allowed_root_keys = required_root_keys | {"effect_summaries"}
     if not required_root_keys.issubset(value) or not set(value).issubset(allowed_root_keys):
         raise ValueError("payload root fields are invalid")
-    if value.get("schema_version") != FIXED_FIVE_EXPLORATORY_SCHEMA:
+    if value.get("schema_version") != FIXED_THREE_EXPLORATORY_SCHEMA:
         raise ValueError("payload schema_version is invalid")
-    if value.get("analysis_role") != "fixed_five_exploratory_descriptive_only":
+    if value.get("analysis_role") != "fixed_three_exploratory_descriptive_only":
         raise ValueError("payload analysis_role is invalid")
     if value.get("formal_claim_eligible") is not False:
         raise ValueError("payload formal_claim_eligible must be false")
     if value.get("contrast_orientation") != CONTRAST_ORIENTATION:
         raise ValueError("payload contrast_orientation is invalid")
-    if value.get("seeds") != list(FIXED_FIVE_EXPLORATORY_SEEDS):
-        raise ValueError("payload seeds do not match the exact fixed-five order")
+    if value.get("seeds") != list(FIXED_THREE_EXPLORATORY_SEEDS):
+        raise ValueError("payload seeds do not match the exact fixed-three order")
 
     observed_value = value.get("observed_seeds")
     if not isinstance(observed_value, list):
         raise TypeError("payload observed_seeds must be a list")
     observed = tuple(_seed(seed, name="payload observed seed") for seed in observed_value)
-    expected_order = tuple(seed for seed in FIXED_FIVE_EXPLORATORY_SEEDS if seed in set(observed))
+    expected_order = tuple(seed for seed in FIXED_THREE_EXPLORATORY_SEEDS if seed in set(observed))
     if observed != expected_order:
         raise ValueError("payload observed_seeds are not unique and in fixed order")
 
-    missing = [seed for seed in FIXED_FIVE_EXPLORATORY_SEEDS if seed not in set(observed)]
+    missing = [seed for seed in FIXED_THREE_EXPLORATORY_SEEDS if seed not in set(observed)]
     if value.get("missing_seeds") != missing:
         raise ValueError("payload missing_seeds is inconsistent with observed_seeds")
     inadmissible_value = value.get("inadmissible_seeds")
@@ -1462,7 +1462,7 @@ def validate_fixed_five_exploratory_aggregate(
         _seed(seed, name="payload inadmissible seed") for seed in inadmissible_value
     )
     if inadmissible != tuple(
-        seed for seed in FIXED_FIVE_EXPLORATORY_SEEDS if seed in set(inadmissible)
+        seed for seed in FIXED_THREE_EXPLORATORY_SEEDS if seed in set(inadmissible)
     ) or not set(inadmissible).issubset(observed):
         raise ValueError("payload inadmissible_seeds must be an ordered observed subset")
 
@@ -1471,7 +1471,7 @@ def validate_fixed_five_exploratory_aggregate(
     if value.get("aggregation_state") != expected_state:
         raise ValueError("payload aggregation_state is inconsistent")
     if complete != ("effect_summaries" in value):
-        raise ValueError("effect_summaries must exist exactly when all five seeds are admissible")
+        raise ValueError("effect_summaries must exist exactly when all three seeds are admissible")
 
     identity = _mapping(value.get("identity"), name="payload identity")
     if set(identity) != set(_IDENTITY_KEYS):
@@ -1569,18 +1569,18 @@ def _validate_effect_summary(
         or summary["direction"] != endpoint.direction
         or summary["favorable_prorm_plus_minus_bt_sign"] != endpoint.favorable_sign
         or summary["contrast_orientation"] != CONTRAST_ORIENTATION
-        or summary["n"] != len(FIXED_FIVE_EXPLORATORY_SEEDS)
+        or summary["n"] != len(FIXED_THREE_EXPLORATORY_SEEDS)
     ):
         raise ValueError(f"effect_summaries.{endpoint.key} contract is invalid")
 
     per_seed_value = summary["per_seed"]
     if not isinstance(per_seed_value, list) or len(per_seed_value) != len(
-        FIXED_FIVE_EXPLORATORY_SEEDS
+        FIXED_THREE_EXPLORATORY_SEEDS
     ):
-        raise ValueError(f"effect_summaries.{endpoint.key}.per_seed must contain five rows")
+        raise ValueError(f"effect_summaries.{endpoint.key}.per_seed must contain three rows")
     differences: list[float] = []
     for expected_seed, raw_row in zip(
-        FIXED_FIVE_EXPLORATORY_SEEDS,
+        FIXED_THREE_EXPLORATORY_SEEDS,
         per_seed_value,
         strict=True,
     ):
@@ -1632,10 +1632,10 @@ def _validate_effect_summary(
 
 __all__ = [
     "CONTRAST_ORIENTATION",
-    "FIXED_FIVE_EXPLORATORY_SCHEMA",
-    "FIXED_FIVE_EXPLORATORY_SEEDS",
+    "FIXED_THREE_EXPLORATORY_SCHEMA",
+    "FIXED_THREE_EXPLORATORY_SEEDS",
     "normalize_budgeted_end_to_end_seed_result",
     "assert_exploratory_payload_has_no_inferential_fields",
-    "build_fixed_five_exploratory_aggregate",
-    "validate_fixed_five_exploratory_aggregate",
+    "build_fixed_three_exploratory_aggregate",
+    "validate_fixed_three_exploratory_aggregate",
 ]

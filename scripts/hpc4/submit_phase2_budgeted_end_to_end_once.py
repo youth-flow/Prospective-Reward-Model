@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit the fixed five-seed budgeted Phase-2 array exactly once.
+"""Submit the fixed three-seed budgeted Phase-2 array exactly once.
 
 This is an exploratory-only control plane.  It is deliberately independent of
 the formal fixed-wave and post-recovery pilot submission registries.  A new
@@ -26,11 +26,11 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-INTENT_SCHEMA = "prorm-phase2-budgeted-end-to-end-array-intent/v1"
-SUBMISSION_SCHEMA = "prorm-phase2-budgeted-end-to-end-array-submission/v1"
-SCHEDULER_REQUEST_SCHEMA = "prorm-phase2-budgeted-end-to-end-held-scheduler-request/v2"
-ORDERED_SEEDS = (20261001, 20261002, 20261003, 20261004, 20261005)
-ARRAY_SPEC = "0-4%2"
+INTENT_SCHEMA = "prorm-phase2-budgeted-end-to-end-fixed-three-array-intent/v1"
+SUBMISSION_SCHEMA = "prorm-phase2-budgeted-end-to-end-fixed-three-array-submission/v1"
+SCHEDULER_REQUEST_SCHEMA = "prorm-phase2-budgeted-end-to-end-fixed-three-held-scheduler-request/v1"
+ORDERED_SEEDS = (20261001, 20261002, 20261003)
+ARRAY_SPEC = "0-2%2"
 SBATCH_SCRIPT_RELATIVE = "scripts/hpc4/phase2_budgeted_end_to_end.sbatch"
 OPTIMIZER_SCHEDULE_SHA256 = "46e0b0fdc70c507b0325c445068326ba7bc30326d70b65fa33803cc3c876c216"
 SCHEDULER_COMMENT_PREFIX = "prorm-budgeted:"
@@ -363,7 +363,7 @@ def _intent_payload(
         "experiment_stage": "budgeted_end_to_end",
         "formal_eligibility": False,
         "supports_formal_claim": False,
-        "evidence_role": "budgeted_end_to_end_exploratory_only",
+        "evidence_role": "budgeted_end_to_end_fixed_three_exploratory_only",
         "phase2_design_sha256": design_sha256,
         "base_config_hash": base_config_hash,
         "recovery_authorization_sha256": authorization_sha256,
@@ -466,10 +466,10 @@ def _parse_array_task_set(raw: str) -> frozenset[int]:
         raise ValueError("scheduler array task expression has multiple throttles")
     tasks: set[int] = set()
     for component in body.split(","):
-        if re.fullmatch(r"[0-4]", component):
+        if re.fullmatch(r"[0-2]", component):
             values: Sequence[int] = (int(component),)
         else:
-            match = re.fullmatch(r"([0-4])-([0-4])", component)
+            match = re.fullmatch(r"([0-2])-([0-2])", component)
             if match is None or int(match.group(1)) > int(match.group(2)):
                 raise ValueError("scheduler array task expression is invalid")
             values = range(int(match.group(1)), int(match.group(2)) + 1)
@@ -484,7 +484,7 @@ def _parse_array_task_set(raw: str) -> frozenset[int]:
 
 def _array_root(value: str) -> str | None:
     match = re.fullmatch(
-        r"([1-9][0-9]*)(?:_(?:[0-4]|\[(?:[0-4](?:[-,][0-4])*)%?2?\]))?",
+        r"([1-9][0-9]*)(?:_(?:[0-2]|\[(?:[0-2](?:[-,][0-2])*)%?2?\]))?",
         value,
     )
     return None if match is None else match.group(1)

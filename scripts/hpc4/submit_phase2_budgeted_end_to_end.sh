@@ -332,7 +332,7 @@ if (
     or run.get("formal_eligibility") is not False
     or run.get("excluded_from_confirmatory_evidence") is not True
 ):
-    raise ValueError("overlay is not the exact fixed-five budgeted_end_to_end identity")
+    raise ValueError("overlay is not the exact fixed-three budgeted_end_to_end identity")
 
 receipt = strict_json(
     receipt_path,
@@ -356,7 +356,7 @@ source_commit = receipt.get("git_commit_used_for_source")
 if (
     set(receipt) != receipt_keys
     or receipt.get("schema_version")
-    != "budgeted-end-to-end-materialization-receipt/v1"
+    != "budgeted-end-to-end-fixed-three-materialization-receipt/v1"
     or receipt.get("stage") != PHASE2_BUDGETED_END_TO_END_STAGE
     or receipt.get("formal_claim_eligible") is not False
     or receipt.get("base_relative_path") != base_relative

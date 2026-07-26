@@ -18,7 +18,7 @@
   的历史协议与证据解释；
 - 本文仅取代它们对未来 recovery execution 的设计权限，不改写历史事实；
 - [budgeted end-to-end route](phase2_budgeted_end_to_end.md) 的 fresh
-  calibration、target-free freeze 和 fixed-five 顺序不变；
+  calibration、target-free freeze 和 fixed-three 顺序不变；
 - 若旧文档与本文对 R3 的要求冲突，以本文为准；不得做兼容回退。
 
 ## 1. R2 冻结为失败证据
@@ -498,14 +498,14 @@ freeze aggregate 才能锁定：
 - optimizer schedule identity；
 - accepted-freeze aggregate bytes 和 SHA256。
 
-### Gate E — budgeted fixed-five
+### Gate E — budgeted fixed-three
 
-只有 Gate B 完成且 fixed-five config/receipt/campaign identity 已物化，才允许
-固定 seeds `20261001..20261005` 的 budgeted end-to-end array。该阶段是第一次
+只有 Gate B 完成且 fixed-three config/receipt/campaign identity 已物化，才允许
+固定 fresh seeds `20261001..20261003` 的 budgeted end-to-end array。该阶段是第一次
 允许 policy rollout、held-out geometry、preference fit 和 finite-policy
 utility。
 
-Fixed-five：
+Fixed-three：
 
 - 每 seed 的主 reward heads 仍仅为 BT-MLE 与 ProRM+；
 - 使用同一个 accepted global beta 和 horizon；
@@ -553,8 +553,8 @@ Fixed-five：
 ```text
 R3_HPC_SUBMISSION_AUTHORIZED = false
 FRESH_CALIBRATION_AUTHORIZED = false
-FIXED_FIVE_AUTHORIZED = false
+FIXED_THREE_AUTHORIZED = false
 ```
 
 下一步只能先实现并验证 Gate 0 和 Gate 1；不得跳过 profiling，也不得启动
-fresh calibration 或 fixed-five。
+fresh calibration 或 fixed-three。

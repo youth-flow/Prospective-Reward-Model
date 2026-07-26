@@ -431,6 +431,7 @@ def test_recovery_authorization_binding_preserves_stage_contracts(
         ("freeze", list(control.PHASE2_BUDGETED_END_TO_END_SEEDS)),
         (None, list(reversed(control.PHASE2_BUDGETED_END_TO_END_SEEDS))),
         (None, list(control.PHASE2_BUDGETED_END_TO_END_SEEDS[:-1])),
+        (None, [20261001, 20261002, 20261003, 20261004, 20261005]),
     ],
 )
 def test_budgeted_recovery_authorization_binding_rejects_wrong_scope(

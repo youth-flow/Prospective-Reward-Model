@@ -1,7 +1,7 @@
 # Phase 2 预算版端到端实验：权威路线与工程契约
 
 本文是当前实际执行路线的权威说明。它描述的是
-`budgeted_end_to_end` 五-seed 探索性实验，不是未来的 exact-30 正式实验。
+`budgeted_end_to_end` 三-seed 探索性实验，不是未来的 exact-30 正式实验。
 实时 Slurm 队列以 HPC4 上的 `squeue`、`sacct` 和不可变运行证据为准，不写入静态文档。
 
 ## 1. 一句话结论
@@ -19,26 +19,26 @@
 one-shot recovery：3 seeds，工程修复证据，永久排除
   -> fresh post-recovery calibration：3 seeds，只看 train/target-free 诊断
   -> target-free freeze：接受一个全局 beta 与 response horizon
-  -> budgeted_end_to_end：固定 5 seeds，完整 RM -> policy -> held-out evaluation
-  -> fixed-five descriptive aggregate：只做描述统计，不做正式推断
+  -> budgeted_end_to_end：固定 3 个 fresh seeds，完整 RM -> policy -> held-out evaluation
+  -> fixed-three descriptive aggregate：只做描述统计，不做正式推断
 ```
 
-五个端到端 seed 固定且有序：
+三个端到端 seed 固定且有序：
 
 ```text
-20261001, 20261002, 20261003, 20261004, 20261005
+20261001, 20261002, 20261003
 ```
 
-这五个 seed 的结果永远满足：
+这三个 seed 的结果永远满足：
 
 - `formal_eligibility=false`；
 - `formal_claim_eligible=false`；
-- `evidence_role=budgeted_end_to_end_exploratory_only`；
+- `evidence_role=budgeted_end_to_end_fixed_three_exploratory_only`；
 - 不进入 confirmatory evidence；
 - 不产生 p-value、显著性标签或正式论文 claim。
 
 exact-30 仅保留为未来协议。只有重新冻结并预注册正式 identity、代码、数据、镜像、
-全局 `beta`、30 个 seed 和 no-retry ledger 后，才能启动该协议；本轮五-seed
+全局 `beta`、30 个 seed 和 no-retry ledger 后，才能启动该协议；本轮三-seed
 结果不能被事后升级为正式实验。
 
 ## 2. 为什么必须按这条链执行
@@ -46,15 +46,17 @@ exact-30 仅保留为未来协议。只有重新冻结并预注册正式 identit
 ### 2.1 Recovery 的 3 个 seed 只修工程，不估计效果
 
 第一次 post-Phase-1 calibration 在固定学习率下未通过 BT-MLE 的一阶收敛门。
-one-shot recovery 用三个排除 seed 验证授权后的确定性 AdamW decay schedule。
+one-shot recovery 用三个排除 seed `20260801..20260803` 验证授权后的确定性
+AdamW decay schedule。
 它可以证明“训练器能在不访问 validation/test 的条件下稳定收敛”，但不能：
 
 - 选择或训练可复用的正式 reward head；
 - 贡献 preference、regret 或 utility 结果；
 - 进入 calibration/freeze aggregate；
-- 直接授权五-seed efficacy 结论。
+- 直接授权三-seed efficacy 结论。
 
-recovery 成功后只产生 head-free authorization。后续阶段重新物化数据、重新生成标签、
+recovery 成功后只产生 head-free authorization。其 head、数据物化、标签、
+checkpoint 和 optimizer state 均不得复用；后续阶段重新物化数据、重新生成标签、
 从零初始化 reward heads，并创建新的 optimizer state。
 
 ### 2.2 Fresh calibration 的 3 个 seed 只选择全局尺度
@@ -84,7 +86,7 @@ target-free KL/length/numerical gates。只有完整通过的 freeze aggregate �
 
 端到端 seed 无权重估 `beta`。当前 seed 的 curvature 只能作为诊断，不能改变步长。
 
-### 2.4 五-seed E2E 是第一次允许读取最终效果的阶段
+### 2.4 三-seed E2E 是第一次允许读取最终效果的阶段
 
 每个端到端 seed 都执行完整闭环：
 
@@ -352,9 +354,9 @@ verification JSON 使用
 `O_EXCL` no-overwrite，并绑定所有输入 SHA256。它只能声明 `status=verified`，
 不能声明科学结果 “passed”。
 
-## 8. Fixed-five 聚合与 claim 边界
+## 8. Fixed-three 聚合与 claim 边界
 
-聚合单位是 seed，不是 prompt、candidate 或 pair。只有五个固定 seed 全部存在、顺序正确、
+聚合单位是 seed，不是 prompt、candidate 或 pair。只有三个固定 seed 全部存在、顺序正确、
 共享同一 design/runtime/freeze/beta identity 且全部 admissible 时，才输出 effect summaries。
 任一 seed 缺失或 inadmissible，聚合器输出
 `effect_summaries_withheld`，不会对剩余 seed 计算效果。
@@ -373,10 +375,10 @@ verification JSON 使用
 - 正式 hypothesis-test verdict；
 - `passed` / `not_passed` efficacy gate；
 - population confidence interval 表述；
-- 用五个 seed 决定是否补 seed、换 beta、重跑或启动 exact-30。
+- 用三个 seed 决定是否补 seed、换 beta、重跑或启动 exact-30。
 
-允许的论文语言是“在该冻结系统的五个 exploratory seed 中观察到的方向、大小和异质性”。
-即使五个点方向一致，也不能称为正式证据或显著结果。
+允许的论文语言是“在该冻结系统的三个 exploratory seed 中观察到的方向、大小和异质性”。
+即使三个点方向一致，也不能称为正式证据或显著结果。
 
 ## 9. HPC4 已落地的执行入口
 
@@ -402,7 +404,7 @@ PYTHONPATH=src python scripts/hpc4/materialize_phase2_budgeted_end_to_end.py \
 
 它们必须 review、commit、push 并同步到 HPC4；未提交或 dirty worktree 不能提交实验。
 
-### 9.2 exactly-once 提交 fixed-five array
+### 9.2 exactly-once 提交 fixed-three array
 
 在已配置 `PRORM_PROJECT_ROOT`、`PRORM_SCRATCH_ROOT`、`PRORM_IMAGE`、
 `PRORM_IMAGE_SHA256` 和 `PRORM_HF_CACHE` 的干净提交上：
@@ -417,8 +419,8 @@ bash scripts/hpc4/submit_phase2_budgeted_end_to_end.sh \
 
 wrapper 会验证 materialization receipt、accepted freeze、authorization、Git、image、
 inventory 和 committed script bytes，再调用
-`submit_phase2_budgeted_end_to_end_once.py`。固定 array 是 `0-4%2`：
-五个 task，最多两个并发；不是 adaptive seed selection。
+`submit_phase2_budgeted_end_to_end_once.py`。固定 array 是 `0-2%2`：
+三个 task，最多两个并发；不是 adaptive seed selection。
 
 ### 9.3 每个 seed 的 output verifier
 
@@ -444,10 +446,14 @@ verify_phase2_budgeted_end_to_end_seed_output.py
 
 ### 9.4 终态聚合
 
-五个 array task 全部离开队列后，先捕获一次严格的 Slurm 终态快照。该命令只接受
-task `0..4` 全部为 `COMPLETED/0:0/0:0`，并锁定 `hpc4/sigroup/gpu-l20/l20_qos`
-和 seeds `20261001..20261005`；原始 `sacct` 字节与 canonical JSON 会一起
+三个 array task 全部离开队列后，先捕获一次严格的 Slurm 终态快照。该命令只接受
+task `0..2` 全部为 `COMPLETED/0:0/0:0`，并锁定 `hpc4/sigroup/gpu-l20/l20_qos`
+和 seeds `20261001..20261003`；原始 `sacct` 字节与 canonical JSON 会一起
 no-replace 发布：
+
+只有三个 fresh seed 都从数据物化完整运行到 RM 训练、policy 更新、rollout、
+最终评估，且三个 seed 的逐项验证、Slurm 终态和描述性聚合全部通过，当前预算内
+工程才算完成；任何 `2/3` 部分结果都不得发布效果汇总。
 
 ```bash
 campaign_root="${PRORM_PROJECT_ROOT}/runs/phase2-budgeted-end-to-end/${DESIGN_SHA256}"
@@ -468,7 +474,7 @@ PYTHONPATH=src python \
   --array-job-id "${ARRAY_JOB_ID}"
 ```
 
-随后只从五个 canonical `SUCCESS` run directory 发布描述性汇总，run 参数顺序必须
+随后只从三个 canonical `SUCCESS` run directory 发布描述性汇总，run 参数顺序必须
 严格对应 task `0..4`：
 
 ```bash
@@ -480,8 +486,6 @@ PYTHONPATH=src python \
   "${campaign_root}/seed-20261001/job-${ARRAY_JOB_ID}_0" \
   "${campaign_root}/seed-20261002/job-${ARRAY_JOB_ID}_1" \
   "${campaign_root}/seed-20261003/job-${ARRAY_JOB_ID}_2" \
-  "${campaign_root}/seed-20261004/job-${ARRAY_JOB_ID}_3" \
-  "${campaign_root}/seed-20261005/job-${ARRAY_JOB_ID}_4" \
   --project-root "${PRORM_PROJECT_ROOT}" \
   --repo-root "${repo_root}" \
   --terminal-evidence "${terminal_json}" \
@@ -489,7 +493,7 @@ PYTHONPATH=src python \
   --array-job-id "${ARRAY_JOB_ID}"
 ```
 
-publication layer 会重新执行唯一 seed normalizer，并逐一绑定五个 `SUCCESS`、
+publication layer 会重新执行唯一 seed normalizer，并逐一绑定三个 `SUCCESS`、
 result、rollouts、manifest、artifact、verification、submission intent/ledger、
 terminal evidence、producer commit 和 clean checkout。bootstrap 固定为 seed
 `20260801`、`10000` 次、`95%` descriptive interval，CLI 不允许事后选择。
@@ -507,7 +511,7 @@ aggregate 已精确写入而 receipt 尚未写入时中断，相同命令只能�
   结果只能授权新鲜下游阶段。
 - [Post-recovery HPC4 runbook](phase2_post_recovery_hpc4.md) 覆盖
   calibration/freeze 控制面。
-- 本文覆盖 accepted freeze 之后当前实际采用的 fixed-five budgeted E2E 路线。
+- 本文覆盖 accepted freeze 之后当前实际采用的 fixed-three budgeted E2E 路线。
 
 优先级是明确的：当前执行与结果解释以本文为准；未来 exact-30 只有在新的正式 identity
 被显式启用后，才由正式协议接管。

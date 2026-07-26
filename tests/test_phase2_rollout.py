@@ -1372,13 +1372,15 @@ def test_budgeted_end_to_end_safety_is_nonformal_but_fail_closed_before_oracle(
     assert not (tmp_path / "unsafe-budgeted.rollouts.jsonl").exists()
 
 
-def test_budgeted_end_to_end_rejects_nonfixed_seed_before_backend_access(
+@pytest.mark.parametrize("invalid_seed", [20261004, 20261005])
+def test_budgeted_end_to_end_rejects_historical_fixed_five_only_seed_before_backend_access(
     tmp_path: Path,
+    invalid_seed: int,
 ) -> None:
     backend = _FakeBackend()
     with pytest.raises(ValueError, match="fixed exploratory seed list"):
         run_common_beta_rollouts(
-            _inputs(tmp_path),
+            replace(_inputs(tmp_path), seed=invalid_seed),
             _FakeHeadTrainer(backend),
             backend,
             output_json=tmp_path / "wrong-budgeted-seed.json",

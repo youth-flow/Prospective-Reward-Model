@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize the five-seed, non-formal Phase-2 end-to-end identity.
+"""Materialize the fixed-three, non-formal Phase-2 end-to-end identity.
 
 This entrypoint is intentionally independent from the formal confirmatory
 materializer and campaign control plane.  It consumes exactly one terminally
@@ -62,7 +62,8 @@ _BUDGETED_OVERLAY_RELATIVE = Path(PHASE2_BUDGETED_END_TO_END_CONFIG)
 _BUDGETED_RECEIPT_RELATIVE = Path(
     "configs/.common_beta_post_recovery_budgeted_end_to_end.materialized.json"
 )
-_BUDGETED_EVIDENCE_ROLE = "budgeted_end_to_end_exploratory_only"
+_BUDGETED_EVIDENCE_ROLE = "budgeted_end_to_end_fixed_three_exploratory_only"
+_MATERIALIZATION_RECEIPT_SCHEMA = "budgeted-end-to-end-fixed-three-materialization-receipt/v1"
 if PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE != _BUDGETED_EVIDENCE_ROLE:
     raise RuntimeError("core config and budgeted materializer evidence roles differ")
 
@@ -718,7 +719,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     design_sha256 = phase2_design_identity(normalized)
     receipt_raw = _canonical_json_bytes(
         {
-            "schema_version": "budgeted-end-to-end-materialization-receipt/v1",
+            "schema_version": _MATERIALIZATION_RECEIPT_SCHEMA,
             "stage": PHASE2_BUDGETED_END_TO_END_STAGE,
             "formal_claim_eligible": False,
             "git_commit_used_for_source": git_commit,

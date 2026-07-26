@@ -102,6 +102,7 @@ def _execute_deep_validator(
     wrong_stage: bool = False,
     wrong_freeze: bool = False,
     wrong_receipt: bool = False,
+    old_receipt_schema: bool = False,
 ) -> tuple[BaseException | None, tuple[str, ...]]:
     import smart_reward.phase2_config as phase2_config
     import smart_reward.phase2_pilot_aggregate as pilot_aggregate
@@ -191,7 +192,11 @@ def _execute_deep_validator(
         design_identity=design_sha256,
     )
     receipt = {
-        "schema_version": "budgeted-end-to-end-materialization-receipt/v1",
+        "schema_version": (
+            "budgeted-end-to-end-materialization-receipt/v1"
+            if old_receipt_schema
+            else "budgeted-end-to-end-fixed-three-materialization-receipt/v1"
+        ),
         "stage": "pilot" if wrong_receipt else PHASE2_BUDGETED_END_TO_END_STAGE,
         "formal_claim_eligible": False,
         "git_commit_used_for_source": "a" * 40,
@@ -361,6 +366,7 @@ def test_legal_walltimes_pass_the_dedicated_nonexport_validation(walltime: str) 
         ({"wrong_stage": True}, "budgeted_end_to_end"),
         ({"wrong_freeze": True}, "fully accepted"),
         ({"wrong_receipt": True}, "materialization receipt"),
+        ({"old_receipt_schema": True}, "materialization receipt"),
     ),
 )
 def test_executable_deep_validator_rejects_wrong_identity_layers(

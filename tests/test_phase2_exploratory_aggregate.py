@@ -15,21 +15,22 @@ from smart_reward.phase2_config import (
     PHASE2_RECOVERY_LR_SCHEDULE_SHA256,
 )
 from smart_reward.phase2_exploratory_aggregate import (
-    FIXED_FIVE_EXPLORATORY_SEEDS,
+    FIXED_THREE_EXPLORATORY_SCHEMA,
+    FIXED_THREE_EXPLORATORY_SEEDS,
     assert_exploratory_payload_has_no_inferential_fields,
-    build_fixed_five_exploratory_aggregate,
+    build_fixed_three_exploratory_aggregate,
     normalize_budgeted_end_to_end_seed_result,
-    validate_fixed_five_exploratory_aggregate,
+    validate_fixed_three_exploratory_aggregate,
 )
 from smart_reward.phase2_heldout import heldout_evaluation_sha256
 from smart_reward.phase2_rollout import BUDGETED_COMMON_BETA_RULE, Phase2Design
 
 
 def _records() -> list[dict[str, object]]:
-    bt_regret = [5.0, 6.0, 7.0, 8.0, 9.0]
-    prorm_regret = [4.0, 5.0, 8.0, 11.0, 10.0]
-    bt_utility = [1.0, 1.2, 0.9, 1.1, 1.4]
-    prorm_utility = [1.2, 1.1, 1.3, 1.5, 1.8]
+    bt_regret = [5.0, 6.0, 7.0]
+    prorm_regret = [4.0, 5.0, 8.0]
+    bt_utility = [1.0, 1.2, 0.9]
+    prorm_utility = [1.2, 1.1, 1.3]
     return [
         {
             "seed": seed,
@@ -61,14 +62,14 @@ def _records() -> list[dict[str, object]]:
                 },
             },
         }
-        for index, seed in enumerate(FIXED_FIVE_EXPLORATORY_SEEDS)
+        for index, seed in enumerate(FIXED_THREE_EXPLORATORY_SEEDS)
     ]
 
 
 def _aggregate(
     records: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    return build_fixed_five_exploratory_aggregate(
+    return build_fixed_three_exploratory_aggregate(
         _records() if records is None else records,
         bootstrap_seed=934,
         bootstrap_resamples=2_000,
@@ -357,7 +358,7 @@ def _budgeted_result() -> dict[str, object]:
     runtime_sha = _canonical_sha256(runtime)
     frozen = {
         "schema_version": "common-beta-frozen-global-budgeted/v1",
-        "evidence_role": "budgeted_end_to_end_exploratory_only",
+        "evidence_role": "budgeted_end_to_end_fixed_three_exploratory_only",
         "formal_eligibility": False,
         "supports_formal_claim": False,
         "beta_common": 2.5,
@@ -380,8 +381,8 @@ def _budgeted_result() -> dict[str, object]:
         "per_seed_supports_formal_claim": False,
         "excluded_from_confirmatory_evidence": True,
         "confirmatory_authorization_created": False,
-        "evidence_role": "budgeted_end_to_end_exploratory_only",
-        "seed": FIXED_FIVE_EXPLORATORY_SEEDS[0],
+        "evidence_role": "budgeted_end_to_end_fixed_three_exploratory_only",
+        "seed": FIXED_THREE_EXPLORATORY_SEEDS[0],
         "phase2_design_sha256": "a" * 64,
         "phase2_runtime_contract_sha256": runtime_sha,
         "phase2_runtime_contract": runtime,
@@ -451,7 +452,7 @@ def _budgeted_result() -> dict[str, object]:
             "formal_gate": False,
             "enforced_before_final_oracle": True,
             "supports_formal_claim": False,
-            "evidence_role": "budgeted_end_to_end_exploratory_only",
+            "evidence_role": "budgeted_end_to_end_fixed_three_exploratory_only",
             "passed": True,
             "beta_retuned": False,
             "on_violation": "fail_before_final_oracle_and_heldout",
@@ -546,11 +547,13 @@ def _budgeted_result() -> dict[str, object]:
     return result
 
 
-def test_complete_fixed_five_emits_only_descriptive_oriented_effects() -> None:
+def test_complete_fixed_three_emits_only_descriptive_oriented_effects() -> None:
     payload = _aggregate()
 
-    assert payload["seeds"] == list(FIXED_FIVE_EXPLORATORY_SEEDS)
-    assert payload["observed_seeds"] == list(FIXED_FIVE_EXPLORATORY_SEEDS)
+    assert payload["schema_version"] == FIXED_THREE_EXPLORATORY_SCHEMA
+    assert payload["analysis_role"] == "fixed_three_exploratory_descriptive_only"
+    assert payload["seeds"] == list(FIXED_THREE_EXPLORATORY_SEEDS)
+    assert payload["observed_seeds"] == list(FIXED_THREE_EXPLORATORY_SEEDS)
     assert payload["formal_claim_eligible"] is False
     assert payload["aggregation_state"] == "complete_descriptive_aggregate"
     assert payload["contrast_orientation"] == "prorm_plus_minus_bt"
@@ -561,22 +564,20 @@ def test_complete_fixed_five_emits_only_descriptive_oriented_effects() -> None:
         -1.0,
         -1.0,
         1.0,
-        3.0,
-        1.0,
     ]
-    assert regret["n"] == 5
-    assert regret["mean"] == pytest.approx(0.6)
-    assert regret["sd_ddof1"] == pytest.approx(math.sqrt(2.8))
+    assert regret["n"] == 3
+    assert regret["mean"] == pytest.approx(-1.0 / 3.0)
+    assert regret["sd_ddof1"] == pytest.approx(math.sqrt(4.0 / 3.0))
     assert regret["min"] == -1.0
-    assert regret["median"] == 1.0
-    assert regret["max"] == 3.0
+    assert regret["median"] == -1.0
+    assert regret["max"] == 1.0
     assert regret["direction"] == "lower_is_better"
     assert regret["favorable_prorm_plus_minus_bt_sign"] == "negative"
 
     utility = effects["finite_policy_utility"]
     assert utility["direction"] == "higher_is_better"
     assert utility["favorable_prorm_plus_minus_bt_sign"] == "positive"
-    assert utility["n"] == 5
+    assert utility["n"] == 3
     assert utility["per_seed"][0]["prorm_plus_minus_bt"] == pytest.approx(0.2)
 
     cross_entropy = effects["oracle_pairwise_cross_entropy"]
@@ -592,7 +593,7 @@ def test_complete_fixed_five_emits_only_descriptive_oriented_effects() -> None:
     assert order_accuracy["direction"] == "higher_is_better"
     assert order_accuracy["favorable_prorm_plus_minus_bt_sign"] == "positive"
     assert order_accuracy["per_seed"][0]["prorm_plus_minus_bt"] == pytest.approx(0.06)
-    assert validate_fixed_five_exploratory_aggregate(payload) == payload
+    assert validate_fixed_three_exploratory_aggregate(payload) == payload
 
 
 def test_deterministic_paired_bootstrap_does_not_touch_global_torch_rng() -> None:
@@ -619,7 +620,7 @@ def test_deterministic_paired_bootstrap_does_not_touch_global_torch_rng() -> Non
     }
 
 
-@pytest.mark.parametrize("missing_index", range(5))
+@pytest.mark.parametrize("missing_index", range(3))
 def test_any_missing_seed_withholds_all_effect_summaries(missing_index: int) -> None:
     records = _records()
     del records[missing_index]
@@ -628,11 +629,11 @@ def test_any_missing_seed_withholds_all_effect_summaries(missing_index: int) -> 
 
     assert "effect_summaries" not in payload
     assert payload["aggregation_state"] == "effect_summaries_withheld"
-    assert payload["missing_seeds"] == [FIXED_FIVE_EXPLORATORY_SEEDS[missing_index]]
-    assert validate_fixed_five_exploratory_aggregate(payload) == payload
+    assert payload["missing_seeds"] == [FIXED_THREE_EXPLORATORY_SEEDS[missing_index]]
+    assert validate_fixed_three_exploratory_aggregate(payload) == payload
 
 
-@pytest.mark.parametrize("inadmissible_index", range(5))
+@pytest.mark.parametrize("inadmissible_index", range(3))
 def test_any_inadmissible_seed_withholds_all_effect_summaries(
     inadmissible_index: int,
 ) -> None:
@@ -644,8 +645,8 @@ def test_any_inadmissible_seed_withholds_all_effect_summaries(
 
     assert "effect_summaries" not in payload
     assert payload["missing_seeds"] == []
-    assert payload["inadmissible_seeds"] == [FIXED_FIVE_EXPLORATORY_SEEDS[inadmissible_index]]
-    assert validate_fixed_five_exploratory_aggregate(payload) == payload
+    assert payload["inadmissible_seeds"] == [FIXED_THREE_EXPLORATORY_SEEDS[inadmissible_index]]
+    assert validate_fixed_three_exploratory_aggregate(payload) == payload
 
 
 @pytest.mark.parametrize(
@@ -658,8 +659,17 @@ def test_any_inadmissible_seed_withholds_all_effect_summaries(
 )
 def test_seed_order_duplicates_and_extras_fail_closed(records: object) -> None:
     malformed = records(_records())
-    with pytest.raises(ValueError, match="fixed|order|five"):
+    with pytest.raises(ValueError, match="fixed|order|three"):
         _aggregate(malformed)
+
+
+@pytest.mark.parametrize("historical_seed", [20261004, 20261005])
+def test_historical_fixed_five_only_seeds_are_rejected(historical_seed: int) -> None:
+    records = _records()
+    records[-1]["seed"] = historical_seed
+
+    with pytest.raises(ValueError, match="fixed exploratory seeds"):
+        _aggregate(records)
 
 
 @pytest.mark.parametrize(
@@ -676,7 +686,7 @@ def test_all_seed_beta_design_and_runtime_identities_must_match(
     replacement: object,
 ) -> None:
     records = _records()
-    records[3][field] = replacement
+    records[2][field] = replacement
 
     with pytest.raises(ValueError, match="identity"):
         _aggregate(records)
@@ -776,30 +786,40 @@ def test_validator_rejects_tampered_orientation_statistics_and_withholding() -> 
     tampered = copy.deepcopy(payload)
     tampered["verdict"] = "descriptive"
     with pytest.raises(ValueError, match="root fields"):
-        validate_fixed_five_exploratory_aggregate(tampered)
+        validate_fixed_three_exploratory_aggregate(tampered)
 
     tampered = copy.deepcopy(payload)
     row = tampered["effect_summaries"]["heldout_local_regret"]["per_seed"][0]
     row["prorm_plus_minus_bt"] = 1.0
     with pytest.raises(ValueError, match="ProRM\\+ minus BT"):
-        validate_fixed_five_exploratory_aggregate(tampered)
+        validate_fixed_three_exploratory_aggregate(tampered)
 
     tampered = copy.deepcopy(payload)
     tampered["effect_summaries"]["heldout_local_regret"]["sd_ddof1"] = 0.0
     with pytest.raises(ValueError, match="sd_ddof1"):
-        validate_fixed_five_exploratory_aggregate(tampered)
+        validate_fixed_three_exploratory_aggregate(tampered)
 
     incomplete = _aggregate(_records()[:-1])
     incomplete["effect_summaries"] = payload["effect_summaries"]
     with pytest.raises(ValueError, match="exactly when"):
-        validate_fixed_five_exploratory_aggregate(incomplete)
+        validate_fixed_three_exploratory_aggregate(incomplete)
+
+
+def test_historical_fixed_five_aggregate_does_not_validate_as_current() -> None:
+    historical = _aggregate()
+    historical["schema_version"] = "prorm-phase2-fixed-five-exploratory-descriptive-aggregate/v1"
+    historical["analysis_role"] = "fixed_five_exploratory_descriptive_only"
+    historical["seeds"] = [20261001, 20261002, 20261003, 20261004, 20261005]
+
+    with pytest.raises(ValueError, match="schema_version"):
+        validate_fixed_three_exploratory_aggregate(historical)
 
 
 def test_budgeted_normalizer_extracts_the_five_fixed_endpoints() -> None:
     result = _budgeted_result()
     normalized = normalize_budgeted_end_to_end_seed_result(result)
 
-    assert normalized["seed"] == FIXED_FIVE_EXPLORATORY_SEEDS[0]
+    assert normalized["seed"] == FIXED_THREE_EXPLORATORY_SEEDS[0]
     assert normalized["phase2_design_sha256"] == "a" * 64
     assert normalized["phase2_runtime_contract_sha256"] == result["phase2_runtime_contract_sha256"]
     assert normalized["beta_source_aggregate_sha256"] == "c" * 64
@@ -812,6 +832,16 @@ def test_budgeted_normalizer_extracts_the_five_fixed_endpoints() -> None:
         "oracle_probability_mae": {"bt_mle": 0.20, "prorm_plus": 0.15},
         "pairwise_order_accuracy": {"bt_mle": 0.60, "prorm_plus": 0.66},
     }
+
+
+def test_historical_raw_result_evidence_role_is_not_currently_admissible() -> None:
+    result = _budgeted_result()
+    result["evidence_role"] = "budgeted_end_to_end_exploratory_only"
+
+    normalized = normalize_budgeted_end_to_end_seed_result(result)
+
+    assert normalized["admissible"] is False
+    assert "endpoints" not in normalized
 
 
 def test_budgeted_normalizer_accepts_canonical_sorted_json_round_trip() -> None:
@@ -865,7 +895,7 @@ def test_budgeted_normalizer_withholds_all_endpoints_on_gate_or_pcg_tamper(
 
     normalized = normalize_budgeted_end_to_end_seed_result(result)
 
-    assert normalized["seed"] == FIXED_FIVE_EXPLORATORY_SEEDS[0]
+    assert normalized["seed"] == FIXED_THREE_EXPLORATORY_SEEDS[0]
     assert normalized["phase2_design_sha256"] == "a" * 64
     assert normalized["phase2_runtime_contract_sha256"] == result["phase2_runtime_contract_sha256"]
     assert normalized["beta_source_aggregate_sha256"] == "c" * 64
@@ -883,7 +913,7 @@ def test_budgeted_normalizer_rejects_formal_or_nonfixed_raw_results_but_keeps_id
 
     assert normalized["admissible"] is False
     assert "endpoints" not in normalized
-    assert normalized["seed"] == FIXED_FIVE_EXPLORATORY_SEEDS[0]
+    assert normalized["seed"] == FIXED_THREE_EXPLORATORY_SEEDS[0]
 
 
 @pytest.mark.parametrize(
@@ -915,14 +945,14 @@ def test_budgeted_normalizer_rejects_authority_and_endpoint_tampering(
 
     assert normalized["admissible"] is False
     assert "endpoints" not in normalized
-    assert normalized["seed"] == FIXED_FIVE_EXPLORATORY_SEEDS[0]
+    assert normalized["seed"] == FIXED_THREE_EXPLORATORY_SEEDS[0]
 
 
 def test_budgeted_normalizer_rejects_cross_seed_heldout_splice_even_after_rehash() -> None:
     result = _budgeted_result()
     heldout = result["heldout_fixed_beta"]
     frozen = heldout["frozen_state"]
-    frozen["seed"] = FIXED_FIVE_EXPLORATORY_SEEDS[1]
+    frozen["seed"] = FIXED_THREE_EXPLORATORY_SEEDS[1]
     heldout["frozen_state_sha256"] = _canonical_sha256(frozen)
     result["heldout_fixed_beta_sha256"] = heldout_evaluation_sha256(heldout)
 

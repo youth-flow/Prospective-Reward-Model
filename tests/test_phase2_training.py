@@ -229,7 +229,7 @@ def test_budgeted_training_stage_changes_provenance_not_numerical_algorithm(
 
     assert budgeted.stage == PHASE2_BUDGETED_END_TO_END_STAGE
     assert budgeted.formal_eligibility is False
-    assert budgeted.seeds == tuple(range(20261001, 20261006))
+    assert budgeted.seeds == (20261001, 20261002, 20261003)
     assert budgeted.outer_steps == compiled_settings.outer_steps
     assert budgeted.learning_rate == compiled_settings.learning_rate
     assert budgeted.optimizer == compiled_settings.optimizer
@@ -247,6 +247,11 @@ def test_budgeted_training_stage_changes_provenance_not_numerical_algorithm(
 
     with pytest.raises(ValueError, match="exact ordered seed list"):
         replace(budgeted, seeds=tuple(reversed(PHASE2_BUDGETED_END_TO_END_SEEDS)))
+    with pytest.raises(ValueError, match="exact ordered seed list"):
+        replace(
+            budgeted,
+            seeds=(20261001, 20261002, 20261003, 20261004, 20261005),
+        )
     with pytest.raises(ValueError, match="cannot be formally eligible"):
         replace(budgeted, formal_eligibility=True)
     with pytest.raises(ValueError, match="independent exploratory"):

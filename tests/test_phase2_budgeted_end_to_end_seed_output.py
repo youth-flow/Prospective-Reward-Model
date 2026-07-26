@@ -31,7 +31,7 @@ BETA = 2.5
 JOB_ID = "900001"
 ARRAY_JOB_ID = "900000"
 TASK_ID = 0
-EVIDENCE_ROLE = "budgeted_end_to_end_exploratory_only"
+EVIDENCE_ROLE = "budgeted_end_to_end_fixed_three_exploratory_only"
 ARMS = ("zero_b", "bt_mle", "prorm_plus", "oracle_step")
 
 
@@ -561,6 +561,29 @@ def _verify(fixture: dict[str, Any]) -> dict[str, object]:
     )
 
 
+@pytest.mark.parametrize("seed", [20261004, 20261005])
+def test_seed_four_and_five_are_outside_fixed_three(seed: int, tmp_path: Path) -> None:
+    verifier = _module()
+    with pytest.raises(ValueError, match="outside the fixed-three"):
+        verifier.verify_seed_output(
+            tmp_path / "overlay.yaml",
+            tmp_path / "phase2-result.json",
+            tmp_path / "phase2-result.rollouts.jsonl",
+            tmp_path / "verification.json",
+            seed=seed,
+            design_sha256=DESIGN,
+            base_config_hash="0" * 64,
+            git_commit=GIT,
+            image_sha256=IMAGE,
+            hf_inventory_sha256=INVENTORY,
+            artifact_metadata_sha256="3" * 64,
+            freeze_evidence_sha256=FREEZE,
+            slurm_job_id_raw=JOB_ID,
+            array_job_id=ARRAY_JOB_ID,
+            array_task_id=3,
+        )
+
+
 def test_verifies_complete_closure_and_exclusively_writes_canonical_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -568,7 +591,9 @@ def test_verifies_complete_closure_and_exclusively_writes_canonical_json(
     fixture = _fixture(tmp_path, monkeypatch)
     verification = _verify(fixture)
 
-    assert verification["schema_version"] == ("prorm-phase2-budgeted-seed-output-verification/v1")
+    assert verification["schema_version"] == (
+        "prorm-phase2-budgeted-fixed-three-seed-output-verification/v1"
+    )
     assert verification["status"] == "verified"
     assert verification["formal_claim_eligible"] is False
     assert verification["seed"] == SEED

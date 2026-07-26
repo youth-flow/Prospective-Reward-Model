@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticate and publish the fixed-five exploratory descriptive aggregate."""
+"""Authenticate and publish the fixed-three exploratory descriptive aggregate."""
 
 from __future__ import annotations
 
@@ -24,17 +24,17 @@ from types import ModuleType
 from typing import Any
 
 from smart_reward.phase2_exploratory_aggregate import (
-    FIXED_FIVE_EXPLORATORY_SEEDS,
+    FIXED_THREE_EXPLORATORY_SEEDS,
     assert_exploratory_payload_has_no_inferential_fields,
-    build_fixed_five_exploratory_aggregate,
+    build_fixed_three_exploratory_aggregate,
     normalize_budgeted_end_to_end_seed_result,
-    validate_fixed_five_exploratory_aggregate,
+    validate_fixed_three_exploratory_aggregate,
 )
 
-PUBLICATION_SCHEMA = "prorm-phase2-budgeted-end-to-end-descriptive-publication/v1"
-VERIFICATION_SCHEMA = "prorm-phase2-budgeted-seed-output-verification/v1"
-RUN_STATUS_SCHEMA = "prorm-phase2-budgeted-end-to-end-run-status/v1"
-EVIDENCE_ROLE = "budgeted_end_to_end_exploratory_only"
+PUBLICATION_SCHEMA = "prorm-phase2-budgeted-end-to-end-fixed-three-descriptive-publication/v1"
+VERIFICATION_SCHEMA = "prorm-phase2-budgeted-fixed-three-seed-output-verification/v1"
+RUN_STATUS_SCHEMA = "prorm-phase2-budgeted-end-to-end-fixed-three-run-status/v1"
+EVIDENCE_ROLE = "budgeted_end_to_end_fixed_three_exploratory_only"
 STAGE = "budgeted_end_to_end"
 OPTIMIZER_SCHEDULE_SHA256 = "46e0b0fdc70c507b0325c445068326ba7bc30326d70b65fa33803cc3c876c216"
 FIXED_BOOTSTRAP_SEED = 20260801
@@ -795,14 +795,14 @@ def _publish_recoverable_pair(
     if receipt_present and not output_present:
         raise ValueError("publication receipt exists without its aggregate")
     if output_present:
-        _require_exact_existing(output, aggregate_raw, name="fixed-five descriptive aggregate")
+        _require_exact_existing(output, aggregate_raw, name="fixed-three descriptive aggregate")
         if receipt_present:
-            _require_exact_existing(receipt, receipt_raw, name="fixed-five publication receipt")
+            _require_exact_existing(receipt, receipt_raw, name="fixed-three publication receipt")
             return "already_published"
-        _write_exclusive(receipt, receipt_raw, name="fixed-five publication receipt")
+        _write_exclusive(receipt, receipt_raw, name="fixed-three publication receipt")
         return "resumed_after_aggregate"
-    _write_exclusive(output, aggregate_raw, name="fixed-five descriptive aggregate")
-    _write_exclusive(receipt, receipt_raw, name="fixed-five publication receipt")
+    _write_exclusive(output, aggregate_raw, name="fixed-three descriptive aggregate")
+    _write_exclusive(receipt, receipt_raw, name="fixed-three publication receipt")
     return "published"
 
 
@@ -841,8 +841,8 @@ def write_budgeted_end_to_end_aggregate(
         expected_array_job_id=array_id,
     )
     rows = terminal.get("rows")
-    if not isinstance(rows, list) or len(rows) != len(FIXED_FIVE_EXPLORATORY_SEEDS):
-        raise ValueError("terminal scheduler evidence does not contain the fixed five rows")
+    if not isinstance(rows, list) or len(rows) != len(FIXED_THREE_EXPLORATORY_SEEDS):
+        raise ValueError("terminal scheduler evidence does not contain the fixed three rows")
     input_snapshots: list[tuple[_FileSnapshot, str]] = [
         (terminal_snapshot, "terminal scheduler evidence")
     ]
@@ -869,8 +869,8 @@ def write_budgeted_end_to_end_aggregate(
     input_snapshots.append((raw_snapshot, "terminal raw sacct evidence"))
 
     runs = tuple(Path(path).absolute() for path in run_directories)
-    if len(runs) != len(FIXED_FIVE_EXPLORATORY_SEEDS) or len(set(runs)) != len(runs):
-        raise ValueError("exactly five unique run directories are required")
+    if len(runs) != len(FIXED_THREE_EXPLORATORY_SEEDS) or len(set(runs)) != len(runs):
+        raise ValueError("exactly three unique run directories are required")
 
     normalized_records: list[dict[str, object]] = []
     seed_receipts: list[dict[str, object]] = []
@@ -880,7 +880,7 @@ def write_budgeted_end_to_end_aggregate(
     shared_marker: dict[str, str] | None = None
     publication_code: dict[str, object] | None = None
     for task, (seed, raw_run, row) in enumerate(
-        zip(FIXED_FIVE_EXPLORATORY_SEEDS, runs, rows, strict=True)
+        zip(FIXED_THREE_EXPLORATORY_SEEDS, runs, rows, strict=True)
     ):
         if not isinstance(row, Mapping):
             raise ValueError(f"terminal row {task} is invalid")
@@ -1066,12 +1066,14 @@ def write_budgeted_end_to_end_aggregate(
             shared_identity = identity
             shared_marker = marker
         elif identity != shared_identity:
-            raise ValueError("fixed-five runs do not share one design/base/runtime/freeze identity")
+            raise ValueError(
+                "fixed-three runs do not share one design/base/runtime/freeze identity"
+            )
         elif any(
             marker[field] != shared_marker[field]
             for field in ("submission_intent_sha256", "submission_ledger_sha256")
         ):
-            raise ValueError("fixed-five runs do not share one immutable submission ledger")
+            raise ValueError("fixed-three runs do not share one immutable submission ledger")
         normalized_records.append(normalized)
         marker_controls.append(marker)
         seed_receipts.append(
@@ -1120,11 +1122,11 @@ def write_budgeted_end_to_end_aggregate(
         ledger_result.get("status") != "verified"
         or ledger_result.get("array_job_id") != array_id
         or ledger_result.get("phase2_design_sha256") != shared_identity["phase2_design_sha256"]
-        or ledger_result.get("ordered_seeds") != list(FIXED_FIVE_EXPLORATORY_SEEDS)
+        or ledger_result.get("ordered_seeds") != list(FIXED_THREE_EXPLORATORY_SEEDS)
         or ledger_result.get("intent_sha256") != shared_marker["submission_intent_sha256"]
         or ledger_result.get("submission_sha256") != shared_marker["submission_ledger_sha256"]
     ):
-        raise ValueError("submission ledger does not bind the successful fixed-five array")
+        raise ValueError("submission ledger does not bind the successful fixed-three array")
     if any(
         marker["submission_intent_sha256"] != ledger_result["intent_sha256"]
         or marker["submission_ledger_sha256"] != ledger_result["submission_sha256"]
@@ -1138,16 +1140,16 @@ def write_budgeted_end_to_end_aggregate(
 
     assert publication_code is not None
 
-    aggregate = build_fixed_five_exploratory_aggregate(
+    aggregate = build_fixed_three_exploratory_aggregate(
         normalized_records,
         bootstrap_seed=FIXED_BOOTSTRAP_SEED,
         bootstrap_resamples=FIXED_BOOTSTRAP_RESAMPLES,
         confidence_level=FIXED_CONFIDENCE_LEVEL,
     )
-    validate_fixed_five_exploratory_aggregate(aggregate)
+    validate_fixed_three_exploratory_aggregate(aggregate)
     assert_exploratory_payload_has_no_inferential_fields(aggregate)
     if aggregate.get("aggregation_state") != "complete_descriptive_aggregate":
-        raise ValueError("all five admissible seeds are required for descriptive publication")
+        raise ValueError("all three admissible seeds are required for descriptive publication")
 
     output = Path(output_path).absolute()
     if output.suffix != ".json":
@@ -1161,10 +1163,10 @@ def write_budgeted_end_to_end_aggregate(
     receipt = {
         "schema_version": PUBLICATION_SCHEMA,
         "status": "published",
-        "analysis_role": "fixed_five_exploratory_descriptive_only",
+        "analysis_role": "fixed_three_exploratory_descriptive_only",
         "formal_claim_eligible": False,
         "array_job_id": array_id,
-        "ordered_seeds": list(FIXED_FIVE_EXPLORATORY_SEEDS),
+        "ordered_seeds": list(FIXED_THREE_EXPLORATORY_SEEDS),
         "identity": shared_identity,
         "terminal_evidence": {
             "path": terminal_file.relative_to(project).as_posix(),

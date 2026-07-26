@@ -5,20 +5,20 @@
 
 ## 当前执行路线（先读）
 
-当前实际采用的是 **Phase 2 budgeted end-to-end fixed-five exploratory**，不是
+当前实际采用的是 **Phase 2 budgeted end-to-end fixed-three exploratory**，不是
 exact-30 正式实验：
 
 ```text
 recovery 3 seeds（工程修复证据，永久排除）
   -> fresh post-recovery calibration 3 seeds（target-free）
   -> accepted freeze（唯一全局 beta + response horizon）
-  -> fresh fixed-five E2E seeds 20261001..20261005
+  -> fresh fixed-three E2E seeds 20261001..20261003
   -> seed-level strict verification
-  -> fixed-five descriptive aggregate
+  -> fixed-three descriptive aggregate
 ```
 
 这条路线中的数据、候选、重复标签、reward heads、optimizer state 和 policy rollouts
-均按阶段重新生成；recovery 或 pilot head 不会被带入 E2E。五-seed aggregate 只报告
+均按阶段重新生成；recovery 或 pilot head 不会被带入 E2E。三-seed aggregate 只报告
 `ProRM+ - BT-MLE` 的描述性效果、异质性和 paired-seed descriptive interval，
 明确禁止 p-value、显著性标签和正式 claim。exact-30 只保留为未来、需要重新冻结和
 预注册的协议，不能由本轮结果事后激活。
@@ -95,7 +95,7 @@ secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
 | Phase-1 five-seed accepted experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
 | Phase-1 formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
 | “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
-| Current post-Phase-1 route | Recovery 3（排除）→ fresh calibration/freeze（排除）→ accepted global `beta`/horizon → fixed-five `budgeted_end_to_end` exploratory E2E；exact-30 不是当前执行目标 |
+| Current post-Phase-1 route | Recovery 3（排除且不得复用其 head/data/optimizer state）→ fresh calibration/freeze（排除）→ accepted global `beta`/horizon → exactly three fresh `budgeted_end_to_end` exploratory E2E seeds；exact-30 不是当前执行目标 |
 | Post-Phase-1 repair | Pilot calibration/global-`beta` freeze, fresh `R=4` heads, exact/direct/low-dimensional controls, updated-policy KL, real Qwen/Skywork runtime and strict seed normalization/description core implemented; live Phase 2 state is intentionally read from HPC4 evidence, not this README |
 | First Phase-2 calibration pilot | All three excluded pilot seeds fail-closed at the BT first-order gate under constant-`1e-3` AdamW; a train-only diagnostic established a deterministic decay path that passes without held-out access. The one-shot recovery has a separate identity and can only authorize a new full calibration pilot; it cannot produce or enter a beta aggregate |
 | Phase-2 recovery execution | Execution revision 1 (`1648094`) stopped before training when Hugging Face Datasets attempted a runtime lock in the read-only shared cache. Revision 2 is authorized only after exact marker/file/log hashes and absent trainer outputs pass at submission and job time; frozen assets remain read-only, only derived Datasets cache files are isolated per job, and the scientific recovery schedule/identity are unchanged |
@@ -949,7 +949,7 @@ its horizon parent. Exact commands are in [docs/hpc4.md](docs/hpc4.md).
 
 The historical commands above end here. The exact-30 machinery described
 below is a **future formal protocol only**. It is inactive in the current
-budgeted fixed-five route, and the observed five-seed result must not be used
+budgeted fixed-three route, and the observed three-seed result must not be used
 to decide whether to activate it. If a later study independently preregisters
 and refreezes that protocol, retries belong only to outcome-blind pilot design
 selection. Its formal campaign has a different, stricter contract: the exact ordered seeds
@@ -1041,7 +1041,7 @@ schemas, and monitoring commands are in [docs/hpc4.md](docs/hpc4.md).
 | Three-edge closed-form population ordering reversal | [docs/closed_form_example.md](docs/closed_form_example.md) |
 | Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
 | Formal five-seed results and scientific conclusion | [docs/phase1_results.md](docs/phase1_results.md) |
-| **Current Phase 2 fixed-five budgeted route, methods, endpoints and claim boundary** | [docs/phase2_budgeted_end_to_end.md](docs/phase2_budgeted_end_to_end.md) |
+| **Current Phase 2 fixed-three budgeted route, methods, endpoints and claim boundary** | [docs/phase2_budgeted_end_to_end.md](docs/phase2_budgeted_end_to_end.md) |
 | Phase 2 pilot boundary, global-beta decision and formal gates | [docs/phase2_design_decisions.md](docs/phase2_design_decisions.md) |
 | First Phase-2 failure, optimizer diagnosis and one-shot recovery boundary | [docs/phase2_recovery_protocol.md](docs/phase2_recovery_protocol.md) |
 | Recovery terminal evidence and success-authorization boundary | [docs/phase2_recovery_authorization.md](docs/phase2_recovery_authorization.md) |
@@ -1072,7 +1072,7 @@ Smart-Reward-Model/             # retained repository name
 │   ├── phase2_post_recovery_control.py # crash-safe post-recovery control plane
 │   ├── phase2_post_recovery_aggregate.py # calibration/freeze aggregation
 │   ├── phase2_post_recovery_output.py # post-recovery output verification
-│   ├── phase2_exploratory_aggregate.py # fixed-five descriptive-only aggregation
+│   ├── phase2_exploratory_aggregate.py # fixed-three descriptive-only aggregation
 │   ├── phase2_campaign.py      # exact-30 terminal-slot finalization
 │   ├── phase2_sensitivity.py   # frozen ridge/beta sensitivity grid
 │   ├── phase2_mechanism.py     # exact-target and low-dimensional qualifiers
@@ -1102,18 +1102,18 @@ Smart-Reward-Model/             # retained repository name
 6. Bind the accepted freeze aggregate SHA-256, unique global `beta_0`, response
    horizon, optimizer schedule, implementation, image and data inventory into
    one new `budgeted_end_to_end` identity.
-7. Audit and commit the fixed-five materializer, exactly-once held-array
+7. Audit and commit the fixed-three materializer, exactly-once held-array
    submitter, GPU wrapper, per-seed verifier, terminal-evidence capture and
    descriptive publication layer before allocating the E2E jobs.
-8. Submit exactly seeds `20261001`–`20261005` as one `0-4%2` array. There is no
+8. Submit exactly fresh seeds `20261001`–`20261003` as one `0-2%2` array. There is no
    adaptive seed selection, outcome-dependent stopping or substitution.
-9. Require all five canonical run directories and exact Slurm
-   `COMPLETED/0:0/0:0` evidence, then publish only the five preregistered
+9. Require all three canonical run directories and exact Slurm
+   `COMPLETED/0:0/0:0` evidence, then publish only the three frozen
    `ProRM+ - BT-MLE` endpoints with mean/SD/min/median/max and the fixed paired
    descriptive bootstrap interval. No p-value, significance label, efficacy
    gate or formal population claim is permitted.
 10. Preserve exact-30 and the broader sensitivity/robustness matrix only as
-    future, separately authorized studies. The fixed-five outcome cannot
+    future, separately authorized studies. The fixed-three outcome cannot
     trigger them.
 
 With fixed finite labels, CoVal identifies only a truncated logit series. It must be reported as

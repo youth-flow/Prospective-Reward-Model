@@ -300,11 +300,14 @@ def _main_fixture(
     return materializer, repo, aggregate_path, source_path, aggregate_sha256
 
 
-def test_projection_is_exactly_five_seed_nonformal_and_freeze_bound() -> None:
+def test_projection_is_exactly_three_seed_nonformal_and_freeze_bound() -> None:
     materializer = _materializer()
     freeze, base = _freeze_source()
     freeze_sha256 = "d" * 64
-    assert PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE == "budgeted_end_to_end_exploratory_only"
+    assert PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE == (
+        "budgeted_end_to_end_fixed_three_exploratory_only"
+    )
+    assert PHASE2_BUDGETED_END_TO_END_SEEDS == (20261001, 20261002, 20261003)
 
     candidate, candidate_base = materializer._budgeted_projection(
         freeze,
@@ -461,7 +464,7 @@ def test_cli_materializes_exclusive_pair_and_binds_one_freeze_everywhere(
     assert report["supports_formal_claim"] is False
     assert report["evidence_role"] == PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE
     assert report["ordered_seeds"] == list(PHASE2_BUDGETED_END_TO_END_SEEDS)
-    assert report["seed_count"] == 5
+    assert report["seed_count"] == 3
     assert report["accepted_freeze_aggregate_sha256"] == aggregate_sha256
     assert report["beta_source_aggregate_sha256"] == aggregate_sha256
     assert report["horizon_parent_aggregate_sha256"] == aggregate_sha256
@@ -470,6 +473,9 @@ def test_cli_materializes_exclusive_pair_and_binds_one_freeze_everywhere(
     assert report["resumed_publications"] == []
     receipt_output = repo / materializer._BUDGETED_RECEIPT_RELATIVE
     assert receipt_output.is_file()
+    assert json.loads(receipt_output.read_text(encoding="utf-8"))["schema_version"] == (
+        "budgeted-end-to-end-fixed-three-materialization-receipt/v1"
+    )
     assert report["materialization_receipt"] == str(receipt_output)
     assert report["materialization_receipt_sha256"] == materializer._sha256(receipt_output)
 

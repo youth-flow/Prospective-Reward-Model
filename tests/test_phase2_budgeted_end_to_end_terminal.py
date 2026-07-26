@@ -29,7 +29,7 @@ def _load() -> ModuleType:
 
 def _raw(*, mutation: tuple[int, int, str] | None = None) -> bytes:
     rows: list[list[str]] = []
-    for task in range(5):
+    for task in range(3):
         rows.append(
             [
                 f"{ARRAY_JOB_ID}_{task}",
@@ -70,11 +70,11 @@ def _capture(
     output = tmp_path / "terminal.json"
     payload = module.capture_terminal_evidence(ARRAY_JOB_ID, output)
     assert observed == [module.sacct_command(ARRAY_JOB_ID)]
-    assert payload["ordered_seeds"] == list(range(20261001, 20261006))
+    assert payload["ordered_seeds"] == [20261001, 20261002, 20261003]
     return module, output
 
 
-def test_capture_and_verify_exact_fixed_five_terminal_evidence(
+def test_capture_and_verify_exact_fixed_three_terminal_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -87,10 +87,41 @@ def test_capture_and_verify_exact_fixed_five_terminal_evidence(
         expected_array_job_id=ARRAY_JOB_ID,
     )
 
-    assert [row["array_task_id"] for row in payload["rows"]] == list(range(5))
-    assert [row["seed"] for row in payload["rows"]] == list(range(20261001, 20261006))
+    assert [row["array_task_id"] for row in payload["rows"]] == [0, 1, 2]
+    assert [row["seed"] for row in payload["rows"]] == [20261001, 20261002, 20261003]
     assert {row["qos"] for row in payload["rows"]} == {"l20_qos"}
     assert json.loads(output.read_bytes()) == payload
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"".join(_raw().splitlines(keepends=True)[:2]),
+        _raw() + _raw().splitlines(keepends=True)[0],
+    ],
+)
+def test_terminal_requires_exactly_three_rows(raw: bytes) -> None:
+    module = _load()
+    with pytest.raises(ValueError, match="exactly three"):
+        module._parse_sacct(raw, array_job_id=ARRAY_JOB_ID)
+
+
+def test_fixed_five_terminal_schema_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, output = _capture(tmp_path, monkeypatch)
+    value = json.loads(output.read_bytes())
+    value["schema_version"] = "prorm-phase2-budgeted-end-to-end-terminal/v1"
+    output.write_bytes(module._canonical_json(value))
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="identity"):
+        module.verify_terminal_evidence(
+            output,
+            expected_sha256=digest,
+            expected_array_job_id=ARRAY_JOB_ID,
+        )
 
 
 @pytest.mark.parametrize(
@@ -101,12 +132,12 @@ def test_capture_and_verify_exact_fixed_five_terminal_evidence(
         (2, 2, "FAILED"),
         (2, 3, "1:0"),
         (2, 4, "1:0"),
-        (3, 5, "other"),
-        (3, 6, "other"),
-        (3, 7, "amd"),
-        (3, 8, "wrong_qos"),
-        (4, 11, "billing=7,cpu=7,gres/gpu=1,mem=96G,node=1"),
-        (4, 12, "billing=8,cpu=8,gres/gpu=1,mem=96G,node=1"),
+        (1, 5, "other"),
+        (1, 6, "other"),
+        (1, 7, "amd"),
+        (1, 8, "wrong_qos"),
+        (2, 11, "billing=7,cpu=7,gres/gpu=1,mem=96G,node=1"),
+        (2, 12, "billing=8,cpu=8,gres/gpu=1,mem=96G,node=1"),
     ],
 )
 def test_capture_rejects_terminal_or_scheduler_identity_drift(
@@ -138,7 +169,7 @@ def test_raw_tamper_and_cross_array_replay_are_rejected(
     module, output = _capture(tmp_path, monkeypatch)
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     raw_path = tmp_path / "terminal.sacct.psv"
-    raw_path.write_bytes(_raw(mutation=(4, 8, "other_qos")))
+    raw_path.write_bytes(_raw(mutation=(2, 8, "other_qos")))
 
     with pytest.raises(ValueError, match="does not bind its raw bytes"):
         module.verify_terminal_evidence(
@@ -199,7 +230,7 @@ def test_tres_semantics_are_order_independent_but_duplicate_closed() -> None:
             b"node=1,mem=96G,gres/gpu=1,gres/gpu:l20=1,cpu=8,billing=8",
         )
     )
-    assert len(module._parse_sacct(reordered, array_job_id=ARRAY_JOB_ID)) == 5
+    assert len(module._parse_sacct(reordered, array_job_id=ARRAY_JOB_ID)) == 3
 
     duplicated = _raw().replace(
         REQ_TRES.encode(),

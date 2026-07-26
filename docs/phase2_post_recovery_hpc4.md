@@ -3,7 +3,7 @@
 > **Route boundary:** this runbook is authoritative through recovery
 > authorization, fresh calibration/freeze, and accepted-freeze production.
 > After an accepted freeze, the current execution target is the non-formal
-> fixed-five budgeted E2E route in
+> fixed-three budgeted E2E route in
 > [phase2_budgeted_end_to_end.md](phase2_budgeted_end_to_end.md). The
 > confirmatory/exact-30 sections below remain a future protocol, not the
 > currently active campaign.
