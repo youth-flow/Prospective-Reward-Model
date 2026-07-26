@@ -19,6 +19,7 @@ project_root="$(
     "${PRORM_R3_PROJECT_ROOT:-/project/sigroup/smart-reward-model}"
 )"
 image="$(realpath -e -- "${PRORM_R3_IMAGE:?missing PRORM_R3_IMAGE}")"
+hf_cache="$(realpath -e -- "${PRORM_R3_HF_CACHE:?missing PRORM_R3_HF_CACHE}")"
 controls_config="$(
   realpath -e -- "${repo_root}/configs/phase2_recovery_r3_controls.yaml"
 )"
@@ -28,6 +29,8 @@ sbatch_script="${repo_root}/scripts/hpc4/phase2_r3_controls_profile.sbatch"
   || die "unexpected production repository root"
 [[ "${project_root}" == "/project/sigroup/smart-reward-model" ]] \
   || die "unexpected persistent project root"
+[[ -d "${hf_cache}" && "${hf_cache}" == "${project_root}/hf-cache" ]] \
+  || die "Gate-C profile requires the fixed project HF cache"
 [[ -f "${runner}" && -f "${sbatch_script}" ]] \
   || die "Gate-C profile execution surface is incomplete"
 [[ -f "${image}" && ! -L "${image}" && "${image}" == "${project_root}/"* ]] \
@@ -73,6 +76,9 @@ copy_no_overwrite_exact() {
   fi
   cmp --silent -- "${source}" "${destination}" \
     || die "retained Gate-C profile input differs from the clean commit"
+  chmod 0440 -- "${destination}"
+  [[ "$(stat -c '%a' -- "${destination}")" == "440" ]] \
+    || die "retained Gate-C profile input must have mode 0440"
 }
 copy_no_overwrite_exact \
   "${repo_root}/configs/phase2_recovery_r3_science.yaml" \
@@ -122,6 +128,7 @@ export_spec="PATH=/usr/bin:/bin"
 for item in \
   "PRORM_R3_GATEC_PROFILE_REPO_ROOT=${repo_root}" \
   "PRORM_R3_GATEC_PROFILE_PROJECT_ROOT=${project_root}" \
+  "PRORM_R3_GATEC_PROFILE_HF_CACHE=${hf_cache}" \
   "PRORM_R3_GATEC_PROFILE_IMAGE=${image}" \
   "PRORM_R3_GATEC_PROFILE_IMAGE_SHA256=${image_sha256}" \
   "PRORM_R3_GATEC_PROFILE_GIT_COMMIT=${commit}" \

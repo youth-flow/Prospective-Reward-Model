@@ -14,6 +14,7 @@ die() {
 required=(
   PRORM_R3_GATEC_PROFILE_REPO_ROOT
   PRORM_R3_GATEC_PROFILE_PROJECT_ROOT
+  PRORM_R3_GATEC_PROFILE_HF_CACHE
   PRORM_R3_GATEC_PROFILE_IMAGE
   PRORM_R3_GATEC_PROFILE_IMAGE_SHA256
   PRORM_R3_GATEC_PROFILE_GIT_COMMIT
@@ -38,6 +39,7 @@ done
 
 repo_root="$(realpath -e -- "${PRORM_R3_GATEC_PROFILE_REPO_ROOT}")"
 project_root="$(realpath -e -- "${PRORM_R3_GATEC_PROFILE_PROJECT_ROOT}")"
+hf_cache="$(realpath -e -- "${PRORM_R3_GATEC_PROFILE_HF_CACHE}")"
 image="$(realpath -e -- "${PRORM_R3_GATEC_PROFILE_IMAGE}")"
 controls_config="$(realpath -e -- "${PRORM_R3_GATEC_PROFILE_CONTROLS_CONFIG}")"
 submission_root="$(
@@ -47,6 +49,8 @@ submission_root="$(
   || die "unexpected repository root"
 [[ "${project_root}" == "/project/sigroup/smart-reward-model" ]] \
   || die "unexpected project root"
+[[ -d "${hf_cache}" && "${hf_cache}" == "${project_root}/hf-cache" ]] \
+  || die "unexpected Gate-C profile HF cache"
 [[ "$(git -C "${repo_root}" rev-parse HEAD)" == \
   "${PRORM_R3_GATEC_PROFILE_GIT_COMMIT}" ]] || die "Git commit drift"
 [[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]] \
@@ -101,6 +105,10 @@ apptainer exec \
   --env "PYTHONNOUSERSITE=1" \
   --env "PYTHONDONTWRITEBYTECODE=1" \
   --env "PYTHONUNBUFFERED=1" \
+  --env "HF_HOME=${hf_cache}" \
+  --env "TRANSFORMERS_CACHE=${hf_cache}" \
+  --env "HF_HUB_OFFLINE=1" \
+  --env "TRANSFORMERS_OFFLINE=1" \
   --env "SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}" \
   "${image}" \
   "${SIF_PYTHON}" "${runner}" \

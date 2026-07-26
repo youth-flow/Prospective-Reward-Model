@@ -31,6 +31,7 @@ project_root="$(
     "${PRORM_R3_PROJECT_ROOT:-/project/sigroup/smart-reward-model}"
 )"
 image="$(realpath -e -- "${PRORM_R3_IMAGE:?missing PRORM_R3_IMAGE}")"
+hf_cache="$(realpath -e -- "${PRORM_R3_HF_CACHE:?missing PRORM_R3_HF_CACHE}")"
 profile="$(realpath -e -- "${profile_requested}")"
 plan="$(realpath -e -- "${plan_requested}")"
 controls_config="$(
@@ -47,6 +48,8 @@ sbatch_script="${repo_root}/scripts/hpc4/phase2_r3_controls.sbatch"
   || die "unexpected production repository root"
 [[ "${project_root}" == "/project/sigroup/smart-reward-model" ]] \
   || die "unexpected persistent project root"
+[[ -d "${hf_cache}" && "${hf_cache}" == "${project_root}/hf-cache" ]] \
+  || die "Gate-C requires the fixed project HF cache"
 [[ -f "${plan_inspector}" && ! -L "${plan_inspector}" && -f "${sbatch_script}" ]] \
   || die "Gate-C committed execution surface is incomplete"
 # The scientific producer is deliberately a separate fixed API. Until it is
@@ -98,6 +101,9 @@ copy_no_overwrite_exact() {
   fi
   cmp --silent -- "${source}" "${destination}" \
     || die "retained Gate-C input differs from the clean commit"
+  chmod 0440 -- "${destination}"
+  [[ "$(stat -c '%a' -- "${destination}")" == "440" ]] \
+    || die "retained Gate-C input must have mode 0440"
 }
 copy_no_overwrite_exact \
   "${repo_root}/configs/phase2_recovery_r3_science.yaml" \
@@ -213,6 +219,7 @@ export_spec="PATH=/usr/bin:/bin"
 for item in \
   "PRORM_R3_GATEC_REPO_ROOT=${repo_root}" \
   "PRORM_R3_GATEC_PROJECT_ROOT=${project_root}" \
+  "PRORM_R3_GATEC_HF_CACHE=${hf_cache}" \
   "PRORM_R3_GATEC_IMAGE=${image}" \
   "PRORM_R3_GATEC_IMAGE_SHA256=${image_sha256}" \
   "PRORM_R3_GATEC_GIT_COMMIT=${commit}" \

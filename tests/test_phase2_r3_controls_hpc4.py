@@ -616,6 +616,7 @@ def test_submit_surface_is_profile_owned_rolling_and_preflight_fail_closed() -> 
     assert 'export_spec="PATH=/usr/bin:/bin"' in text
     assert "status --porcelain --untracked-files=all" in text
     assert "container SHA-256 mismatch" in text
+    assert "PRORM_R3_GATEC_HF_CACHE" in text
     for forbidden in (
         "--walltime-seconds",
         "--cpus-per-task",
@@ -637,6 +638,11 @@ def test_sbatch_has_independent_task_namespace_and_no_science_overrides() -> Non
     text = SBATCH.read_text(encoding="utf-8")
     assert "#SBATCH" not in text
     assert "--cleanenv" in text
+    assert "PRORM_R3_GATEC_HF_CACHE" in text
+    assert '--env "HF_HOME=${hf_cache}"' in text
+    assert '--env "TRANSFORMERS_CACHE=${hf_cache}"' in text
+    assert '--env "HF_HUB_OFFLINE=1"' in text
+    assert '--env "TRANSFORMERS_OFFLINE=1"' in text
     assert 'task_id="$((PRORM_R3_GATEC_FAMILY_INDEX * 3' in text
     assert 'task_root="${submission_root}/task-${SLURM_ARRAY_TASK_ID}-seed-${seed}"' in text
     assert "task namespace already exists; refusing replacement" in text
@@ -697,11 +703,17 @@ def test_real_control_runners_and_disposable_profile_surface_are_separated() -> 
     assert "not a formal-family walltime source" in submit
     assert "common_beta_pilot_base.yaml" in submit
     assert "common_beta_recovery_pilot.yaml" not in submit
+    assert 'chmod 0440 -- "${destination}"' in submit
+    assert "retained Gate-C profile input must have mode 0440" in submit
+    assert "PRORM_R3_GATEC_PROFILE_HF_CACHE" in submit
     assert 'readonly SIF_PYTHON="/opt/conda/bin/python"' in sbatch
     assert 'python3 "${runner}"' not in sbatch
     assert '"${SIF_PYTHON}" "${runner}"' in sbatch
     assert "common_beta_pilot_base.yaml" in sbatch
     assert "common_beta_recovery_pilot.yaml" not in sbatch
+    assert "PRORM_R3_GATEC_PROFILE_HF_CACHE" in sbatch
+    assert '--env "HF_HOME=${hf_cache}"' in sbatch
+    assert '--env "TRANSFORMERS_CACHE=${hf_cache}"' in sbatch
 
     assert "submit_phase2_r3_controls_profile_finalize.sh" in submit
     assert '--dependency="afterany:${profile_array_job_id}"' in profile_finalize_submit
