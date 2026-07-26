@@ -1,0 +1,64 @@
+# Source this only after replacing every CHANGE_ME value with live captured evidence.
+
+export PRORM_R3_REPO_ROOT="/home/yyangjo/Smart-Reward-Model"
+export PRORM_R3_PROJECT_ROOT="/project/sigroup/smart-reward-model"
+export PRORM_R3_SCRATCH_ROOT="/scratch/yyangjo"
+export PRORM_R3_IMAGE="/project/sigroup/smart-reward-model/images/prorm.sif"
+export PRORM_R3_IMAGE_SHA256="d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb"
+export PRORM_R3_HF_CACHE="/project/sigroup/smart-reward-model/hf-cache"
+
+export PRORM_R3_SCIENCE_CONFIG="${PRORM_R3_REPO_ROOT}/configs/phase2_recovery_r3_science.yaml"
+# Replace this with the exact clean commit that will be submitted.  The Gate-P
+# submitter atomically publishes no-overwrite mode-0440 copies from that commit
+# and verifies each retained file against the tracked source by SHA-256.
+export PRORM_R3_INPUT_GIT_COMMIT="CHANGE_ME"
+export PRORM_R3_INPUT_ROOT="${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/inputs/${PRORM_R3_INPUT_GIT_COMMIT}"
+export PRORM_R3_SOURCE_CONFIG="${PRORM_R3_INPUT_ROOT}/common_beta_recovery_pilot.yaml"
+export PRORM_R3_PARENT_REGISTRY="${PRORM_R3_INPUT_ROOT}/phase2_recovery_parent_failures.json"
+export PRORM_R3_PARENT_REGISTRY_FILE_SHA256="7be4ee90b1f494d32f96214f407a57cbee54be86a77dacc1206d2acd527857dc"
+
+# Produced after the final clean commit by capture_phase2_r3_gate0.py and
+# capture_phase2_r3_gate1.py.  Their paths are fixed under the project root.
+export PRORM_R3_GATE0_FILE_SHA256="CHANGE_ME"
+export PRORM_R3_GATE1_FILE_SHA256="CHANGE_ME"
+export PRORM_R3_SOURCE_TEST_RECEIPT_FILE_SHA256="CHANGE_ME"
+
+# Raw, immutable login-node preflight captures.  These values must be refreshed
+# immediately before Gate P; old documentation is not a substitute.
+export PRORM_R3_SCHEDULER_RAW_EVIDENCE="${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/preflight/CHANGE_ME/scheduler.txt"
+export PRORM_R3_SCHEDULER_RAW_EVIDENCE_SHA256="CHANGE_ME"
+export PRORM_R3_RESOURCE_RAW_EVIDENCE="${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/preflight/CHANGE_ME/resources.txt"
+export PRORM_R3_RESOURCE_RAW_EVIDENCE_SHA256="CHANGE_ME"
+
+export PRORM_R3_CLUSTER="hpc4"
+export PRORM_R3_PARTITION="gpu-l20"
+export PRORM_R3_GPU_NAME="NVIDIA L20"
+# Prior probe observed 46,068 MiB; verify this against the new live allocation.
+export PRORM_R3_GPU_TOTAL_MEMORY_BYTES="48305799168"
+export PRORM_R3_MAX_ALLOCATION_WALL_SECONDS="CHANGE_ME"
+export PRORM_R3_MAX_ARRAY_CONCURRENCY="2"
+export PRORM_R3_MAX_SCHEDULER_SEGMENTS="4"
+export PRORM_R3_MAX_GPUS_PER_TASK="1"
+export PRORM_R3_MAX_CPUS_PER_TASK="CHANGE_ME"
+export PRORM_R3_MAX_MEMORY_BYTES="CHANGE_ME"
+
+# Engineering policy frozen before profiling.  Audits remain every 20 updates;
+# only the heavy full-state checkpoint cadence is 200.
+export PRORM_R3_WALLTIME_MARGIN_FRACTION="0.25"
+export PRORM_R3_FIXED_WALLTIME_MARGIN_SECONDS="1800"
+export PRORM_R3_MEMORY_MARGIN_FRACTION="0.25"
+export PRORM_R3_SIGNAL_MARGIN_SECONDS="120"
+export PRORM_R3_CHECKPOINT_CADENCE_UPDATES="200"
+
+# Candidate primary request.  Gate P must reject it if its measured projection
+# cannot fit; these values never change scientific constants.
+export PRORM_R3_PRIMARY_WALLTIME_SECONDS="43200"
+export PRORM_R3_PRIMARY_ARRAY_CONCURRENCY="2"
+export PRORM_R3_PRIMARY_CPUS_PER_TASK="8"
+export PRORM_R3_PRIMARY_MEMORY_BYTES="68719476736"
+
+# Gate-P itself is one non-array profiling allocation.
+export PRORM_R3_PROFILE_WALLTIME_SECONDS="21600"
+export PRORM_R3_PROFILE_CPUS_PER_TASK="8"
+export PRORM_R3_PROFILE_MEMORY_MIB="65536"
+export PRORM_R3_GATEP_ATTEMPT_ROOT="${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/gatep/CHANGE_ME/gatep-attempt-001"

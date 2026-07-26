@@ -232,6 +232,7 @@ def test_one_prorm_envelope_step_matches_exact_quadratic_gradient() -> None:
         diagnostic.dual_loss, rel=1.0e-12, abs=1.0e-14
     )
     assert diagnostic.pcg_converged
+    assert trainer.last_pcg_reason == "converged"
     assert trainer.dual_direction is not None
     assert not trainer.dual_direction.requires_grad
 
@@ -428,6 +429,8 @@ def test_in_memory_checkpoint_roundtrip_has_deterministic_continuation(kind: str
     assert checkpoint["trainer"] == ("bt_mle" if kind == "bt" else "prorm_plus")
     untouched_checkpoint = copy.deepcopy(checkpoint)
     restored.load_state_dict(checkpoint)
+    if kind == "prorm_plus":
+        assert restored.last_pcg_reason is None
     first.step()
     restored.step()
 
@@ -437,6 +440,7 @@ def test_in_memory_checkpoint_roundtrip_has_deterministic_continuation(kind: str
     # Loading and subsequent optimization must not mutate the caller-owned dict.
     assert torch.equal(checkpoint["model"]["weight"], untouched_checkpoint["model"]["weight"])
     if kind == "prorm_plus":
+        assert first.last_pcg_reason == restored.last_pcg_reason == "converged"
         assert first.dual_refreshes == restored.dual_refreshes == 5
         assert torch.equal(first.dual_direction, restored.dual_direction)
 

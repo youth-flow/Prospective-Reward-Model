@@ -47,6 +47,7 @@ from .objective import (
     envelope_weights,
 )
 from .optimization_audit import evaluate_saved_head_optimization
+from .phase2_checkpoint import CheckpointInterruption, PlannedSegmentBoundary
 from .phase2_config import (
     PHASE1_MAIN_SEEDS,
     PHASE2_BUDGETED_END_TO_END_SEEDS,
@@ -93,6 +94,10 @@ EXACT_SOFT_BT_ROLE = "noise_free_positive_control_and_secondary_misspecification
 EXACT_SOFT_BT_INPUT = "sigmoid_of_train_transformed_oracle_margin"
 LABEL_RNG_NAMESPACE = "prorm-common-beta-r4-labels-v1"
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_SERIALIZED_HEAD_DTYPES = {
+    "torch.float32": torch.float32,
+    "torch.float64": torch.float64,
+}
 _RECOVERY_TIE_BREAK = "exact_zero_initialized_deterministic_adamw_lr_decay_path"
 _LEGACY_TIE_BREAK = "zero_initialized_adamw_implicit_bias"
 
@@ -1023,10 +1028,26 @@ class TrainedHeadEvidence:
             )
         ):
             raise ValueError("head_weight must be a finite non-empty tuple")
-        if not isinstance(self.head_dtype, str) or not self.head_dtype:
-            raise ValueError("head_dtype must be a non-empty string")
+        if not isinstance(self.head_dtype, str) or self.head_dtype not in _SERIALIZED_HEAD_DTYPES:
+            raise ValueError("head_dtype must be exactly 'torch.float32' or 'torch.float64'")
         _validate_digest(self.initial_head_sha256, name="initial_head_sha256")
         _validate_digest(self.head_sha256, name="head_sha256")
+        reconstructed_head = torch.tensor(
+            self.head_weight,
+            dtype=_SERIALIZED_HEAD_DTYPES[self.head_dtype],
+            device="cpu",
+        )
+        if reconstructed_head.ndim != 1 or reconstructed_head.shape != (len(self.head_weight),):
+            raise ValueError("head_weight must reconstruct to an exact 1-D tensor")
+        if not bool(torch.isfinite(reconstructed_head).all()):
+            raise ValueError("head_weight must remain finite in its declared head_dtype")
+        if _tensor_sha256(reconstructed_head) != self.head_sha256:
+            raise ValueError("head_sha256 does not match the serialized head_weight and head_dtype")
+        zero_head = torch.zeros_like(reconstructed_head)
+        if _tensor_sha256(zero_head) != self.initial_head_sha256:
+            raise ValueError(
+                "initial_head_sha256 does not match the same-shape, same-dtype exact-zero tensor"
+            )
         for name in ("initial_objective", "final_objective"):
             value = _finite_float(getattr(self, name), name=name)
             if value < -1.0e-10:
@@ -1842,6 +1863,60 @@ def _history_summary(
     return _strict_json_copy(summary, name="history_summary")
 
 
+_TRAINING_STEP_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "step",
+        "objective",
+        "gradient_norm",
+        "dual_loss",
+        "dual_saddle_value",
+        "dual_refresh",
+        "pcg_iterations",
+        "pcg_residual_norm",
+        "pcg_relative_residual",
+        "pcg_converged",
+    }
+)
+
+
+def _diagnostic_history_checkpoint(
+    history: Sequence[TrainingStepDiagnostics],
+) -> list[dict[str, object]]:
+    """Encode trainer diagnostics using only weights-only-safe primitives."""
+
+    encoded: list[dict[str, object]] = []
+    for expected_step, item in enumerate(history, start=1):
+        if not isinstance(item, TrainingStepDiagnostics):
+            raise TypeError("checkpoint history must contain TrainingStepDiagnostics")
+        if item.step != expected_step:
+            raise ValueError("checkpoint history steps must be consecutive and one-indexed")
+        encoded.append(asdict(item))
+    return encoded
+
+
+def _diagnostic_history_from_checkpoint(
+    value: object,
+    *,
+    completed_steps: int,
+    name: str,
+) -> list[TrainingStepDiagnostics]:
+    """Decode and validate a primitive diagnostic history."""
+
+    if not isinstance(value, list):
+        raise TypeError(f"{name} must be a list")
+    if len(value) != completed_steps:
+        raise ValueError(f"{name} length does not match completed_steps")
+    history: list[TrainingStepDiagnostics] = []
+    for expected_step, raw in enumerate(value, start=1):
+        if not isinstance(raw, Mapping) or set(raw) != _TRAINING_STEP_DIAGNOSTIC_FIELDS:
+            raise ValueError(f"{name} entry is malformed")
+        item = TrainingStepDiagnostics(**dict(raw))
+        if item.step != expected_step:
+            raise ValueError(f"{name} steps must be consecutive and one-indexed")
+        history.append(item)
+    return history
+
+
 @dataclass(frozen=True, slots=True)
 class _FirstOrderMeasurement:
     """One immutable full-data, unclipped objective/gradient measurement."""
@@ -1890,6 +1965,7 @@ class _ConvergedTrainingRun:
     initial: _FirstOrderMeasurement
     final: _FirstOrderMeasurement
     evidence: Mapping[str, object]
+    selected_terminal_checkpoint: Mapping[str, object] | None = None
 
 
 def _gradient_ratio(
@@ -1998,6 +2074,8 @@ def _recovery_adamw_moment_descriptor(
         raise RuntimeError(f"recovery AdamW state[{name!r}] must be a dense strided tensor")
     if value.requires_grad or value.grad_fn is not None:
         raise RuntimeError(f"recovery AdamW state[{name!r}] must be detached")
+    if not bool(torch.isfinite(value).all()):
+        raise RuntimeError(f"recovery AdamW state[{name!r}] must be finite")
     return {
         "shape": list(value.shape),
         "dtype": str(value.dtype),
@@ -2156,6 +2234,11 @@ def _checkpoint_value_fingerprint(value: object) -> object:
             "dtype": str(value.dtype),
             "device": str(value.device),
         }
+    if isinstance(value, TrainingStepDiagnostics):
+        return {
+            "kind": "training_step_diagnostics",
+            "value": _checkpoint_value_fingerprint(asdict(value)),
+        }
     if isinstance(value, Mapping):
         entries: list[dict[str, object]] = []
         for key, item in value.items():
@@ -2202,6 +2285,1366 @@ def _checkpoint_value_sha256(value: object) -> str:
     )
 
 
+_FIRST_ORDER_CONTROLLER_CHECKPOINT_SCHEMA = "phase2-first-order-controller-checkpoint/v2"
+_FIRST_ORDER_CONTROLLER_IDENTITY_SCHEMA = "phase2-first-order-controller-identity/v1"
+_SELECTED_PRIMARY_TERMINAL_CHECKPOINT_SCHEMA = "phase2-selected-primary-terminal-checkpoint/v1"
+# This matches the already-published recovery-aggregate arithmetic replay
+# tolerance for recomputed first-order quantities.
+_CHECKPOINT_BOUNDARY_AUDIT_RELATIVE_TOLERANCE = 1.0e-10
+_CHECKPOINT_BOUNDARY_AUDIT_ABSOLUTE_TOLERANCE = 1.0e-14
+_FIRST_ORDER_CONTROLLER_EXECUTION_ROLES = frozenset(
+    {
+        "phase2_training",
+        "phase2_primary_core_unclaimed",
+        "phase2_recovery_r3_primary",
+        "phase2_recovery_r3_profile_nonreusable",
+        "phase2_recovery_r3_mechanism_control",
+    }
+)
+
+
+def _measurement_checkpoint_payload(
+    measurement: _FirstOrderMeasurement,
+) -> dict[str, object]:
+    return {
+        "objective": measurement.objective,
+        "gradient_l2_norm": measurement.gradient_l2_norm,
+        "inner_solver": (
+            None
+            if measurement.inner_solver is None
+            else _strict_json_copy(measurement.inner_solver, name="inner_solver")
+        ),
+        "audit_dtype": measurement.audit_dtype,
+    }
+
+
+def _measurement_from_checkpoint(
+    value: object,
+    *,
+    name: str,
+) -> _FirstOrderMeasurement:
+    if not isinstance(value, Mapping) or set(value) != {
+        "objective",
+        "gradient_l2_norm",
+        "inner_solver",
+        "audit_dtype",
+    }:
+        raise ValueError(f"{name} is malformed")
+    inner_solver = value["inner_solver"]
+    if inner_solver is not None and not isinstance(inner_solver, Mapping):
+        raise TypeError(f"{name}.inner_solver must be a mapping or None")
+    audit_dtype = value["audit_dtype"]
+    if audit_dtype is not None and not isinstance(audit_dtype, str):
+        raise TypeError(f"{name}.audit_dtype must be a string or None")
+    return _FirstOrderMeasurement(
+        objective=_finite_float(value["objective"], name=f"{name}.objective"),
+        gradient_l2_norm=_finite_float(
+            value["gradient_l2_norm"],
+            name=f"{name}.gradient_l2_norm",
+            minimum=0.0,
+        ),
+        inner_solver=(
+            None
+            if inner_solver is None
+            else _strict_json_copy(inner_solver, name=f"{name}.inner_solver")
+        ),
+        audit_dtype=audit_dtype,
+    )
+
+
+def _measurement_from_controller_evidence(
+    value: object,
+    *,
+    name: str,
+    require_audit_dtype: bool,
+) -> _FirstOrderMeasurement:
+    required = {
+        "objective",
+        "gradient_l2_norm",
+        "inner_solver",
+    }
+    if require_audit_dtype:
+        required.add("audit_dtype")
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError(f"{name} is malformed")
+    inner_solver = value["inner_solver"]
+    if inner_solver is not None and not isinstance(inner_solver, Mapping):
+        raise TypeError(f"{name}.inner_solver must be a mapping or None")
+    return _FirstOrderMeasurement(
+        objective=_finite_float(value["objective"], name=f"{name}.objective"),
+        gradient_l2_norm=_finite_float(
+            value["gradient_l2_norm"],
+            name=f"{name}.gradient_l2_norm",
+            minimum=0.0,
+        ),
+        inner_solver=(
+            None
+            if inner_solver is None
+            else _strict_json_copy(inner_solver, name=f"{name}.inner_solver")
+        ),
+        audit_dtype=(value.get("audit_dtype") if require_audit_dtype else None),
+    )
+
+
+def _checkpoint_numeric_payloads_close(expected: object, observed: object) -> bool:
+    """Compare a deterministic audit while tolerating only frozen FP drift."""
+
+    if isinstance(expected, bool) or isinstance(observed, bool):
+        return type(expected) is type(observed) and expected == observed
+    if isinstance(expected, float) or isinstance(observed, float):
+        if not isinstance(expected, float) or not isinstance(observed, float):
+            return False
+        return math.isclose(
+            float(expected),
+            float(observed),
+            rel_tol=_CHECKPOINT_BOUNDARY_AUDIT_RELATIVE_TOLERANCE,
+            abs_tol=_CHECKPOINT_BOUNDARY_AUDIT_ABSOLUTE_TOLERANCE,
+        )
+    if isinstance(expected, (str, bytes)) or isinstance(observed, (str, bytes)):
+        return type(expected) is type(observed) and expected == observed
+    if isinstance(expected, Mapping) or isinstance(observed, Mapping):
+        if not isinstance(expected, Mapping) or not isinstance(observed, Mapping):
+            return False
+        return set(expected) == set(observed) and all(
+            _checkpoint_numeric_payloads_close(expected[key], observed[key]) for key in expected
+        )
+    if isinstance(expected, Sequence) or isinstance(observed, Sequence):
+        if (
+            isinstance(expected, (str, bytes))
+            or isinstance(observed, (str, bytes))
+            or not isinstance(expected, Sequence)
+            or not isinstance(observed, Sequence)
+            or len(expected) != len(observed)
+        ):
+            return False
+        return all(
+            _checkpoint_numeric_payloads_close(left, right)
+            for left, right in zip(expected, observed, strict=True)
+        )
+    return type(expected) is type(observed) and expected == observed
+
+
+def _validate_checkpoint_boundary_audit(
+    *,
+    expected: _FirstOrderMeasurement,
+    observed: _FirstOrderMeasurement,
+) -> None:
+    expected_payload = _measurement_checkpoint_payload(expected)
+    observed_payload = _measurement_checkpoint_payload(observed)
+    if not _checkpoint_numeric_payloads_close(expected_payload, observed_payload):
+        raise RuntimeError(
+            "fresh post-resume safe-boundary audit differs from the committed checkpoint"
+        )
+
+
+def _first_order_controller_identity(
+    *,
+    objective_name: str,
+    execution_role: str,
+    spec: FirstOrderConvergenceSpec,
+    fixed_snapshot_steps: int,
+    rank_diagnostic: Mapping[str, object] | None,
+) -> dict[str, object]:
+    return {
+        "schema_version": _FIRST_ORDER_CONTROLLER_IDENTITY_SCHEMA,
+        "objective": objective_name,
+        "execution_role": execution_role,
+        "spec": spec.to_dict(),
+        "fixed_snapshot_steps": fixed_snapshot_steps,
+        "rank_diagnostic": (
+            None
+            if rank_diagnostic is None
+            else _strict_json_copy(rank_diagnostic, name="rank_diagnostic")
+        ),
+        "checkpoint_boundary_audit": {
+            "fresh_post_resume_audit_required": True,
+            "relative_tolerance": _CHECKPOINT_BOUNDARY_AUDIT_RELATIVE_TOLERANCE,
+            "absolute_tolerance": _CHECKPOINT_BOUNDARY_AUDIT_ABSOLUTE_TOLERANCE,
+            "does_not_enter_convergence_gate_history": True,
+        },
+    }
+
+
+def _recovery_state_check_record_bytes(record: Mapping[str, object]) -> bytes:
+    return json.dumps(
+        dict(record),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _expected_recovery_parameter_group(
+    protocol: AdamWRecoveryProtocol,
+    *,
+    learning_rate: float,
+) -> dict[str, object]:
+    return {
+        "learning_rate": learning_rate,
+        "betas": [float(value) for value in protocol.betas],
+        "eps": protocol.eps,
+        "weight_decay": 0.0,
+        "amsgrad": protocol.amsgrad,
+        "maximize": protocol.maximize,
+        "foreach": protocol.foreach,
+        "capturable": protocol.capturable,
+        "differentiable": protocol.differentiable,
+        "fused": protocol.fused,
+        "parameter_count": 1,
+        "parameter_is_reward_head": True,
+    }
+
+
+def _validated_recovery_state_check_observation(
+    value: object,
+    *,
+    phase: Literal["before_update", "after_update"],
+    update: int,
+    protocol: AdamWRecoveryProtocol,
+    head: torch.Tensor,
+) -> dict[str, object]:
+    required = {
+        "expected_completed_updates",
+        "optimizer_state_empty",
+        "scalar_step",
+        "exp_avg",
+        "exp_avg_sq",
+        "parameter_group",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("recovery state-check observation is malformed")
+    observation = _strict_json_copy(
+        value,
+        name="recovery_state_check_observation",
+    )
+    expected_completed = update - 1 if phase == "before_update" else update
+    if (
+        type(observation["expected_completed_updates"]) is not int
+        or observation["expected_completed_updates"] != expected_completed
+    ):
+        raise ValueError("recovery state-check expected_completed_updates is inconsistent")
+    expected_learning_rate = protocol.learning_rate_for_update(max(1, expected_completed))
+    if observation["parameter_group"] != _expected_recovery_parameter_group(
+        protocol,
+        learning_rate=expected_learning_rate,
+    ):
+        raise ValueError("recovery state-check parameter group is inconsistent")
+    if expected_completed == 0:
+        if (
+            observation["optimizer_state_empty"] is not True
+            or observation["scalar_step"] is not None
+            or observation["exp_avg"] is not None
+            or observation["exp_avg_sq"] is not None
+        ):
+            raise ValueError("recovery first pre-update state is not exactly empty")
+        return observation
+    if observation["optimizer_state_empty"] is not False:
+        raise ValueError("recovery non-empty optimizer state is marked empty")
+    scalar_step = observation["scalar_step"]
+    if (
+        not isinstance(scalar_step, Mapping)
+        or set(scalar_step) != {"value", "shape", "dtype", "device"}
+        or type(scalar_step["value"]) is not int
+        or scalar_step["value"] != expected_completed
+        or scalar_step["shape"] != []
+        or scalar_step["dtype"]
+        not in {"torch.float32", "torch.float64", "torch.int32", "torch.int64"}
+        or scalar_step["device"] != "cpu"
+    ):
+        raise ValueError("recovery state-check scalar AdamW step is inconsistent")
+    expected_moment = {
+        "shape": list(head.shape),
+        "dtype": str(head.dtype),
+        "device": str(head.device),
+        "layout": str(torch.strided),
+        "detached": True,
+    }
+    if observation["exp_avg"] != expected_moment or observation["exp_avg_sq"] != expected_moment:
+        raise ValueError("recovery state-check AdamW moment descriptor is inconsistent")
+    return observation
+
+
+def _replay_recovery_state_check_transcript(
+    value: object,
+    *,
+    completed_steps: int,
+    protocol: AdamWRecoveryProtocol,
+    head: torch.Tensor,
+) -> tuple[list[dict[str, object]], Any, dict[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise TypeError("recovery state-check transcript must be a sequence")
+    if len(value) != 2 * completed_steps:
+        raise ValueError(
+            "recovery state-check transcript must contain one before/after record per update"
+        )
+    transcript: list[dict[str, object]] = []
+    digest = hashlib.sha256()
+    for index, raw_record in enumerate(value):
+        if not isinstance(raw_record, Mapping) or set(raw_record) != {
+            "phase",
+            "update",
+            "observation",
+        }:
+            raise ValueError("recovery state-check transcript record is malformed")
+        expected_update = index // 2 + 1
+        expected_phase = "before_update" if index % 2 == 0 else "after_update"
+        if (
+            raw_record["phase"] != expected_phase
+            or type(raw_record["update"]) is not int
+            or raw_record["update"] != expected_update
+        ):
+            raise ValueError("recovery state-check transcript ordering is invalid")
+        observation = _validated_recovery_state_check_observation(
+            raw_record["observation"],
+            phase=expected_phase,
+            update=expected_update,
+            protocol=protocol,
+            head=head,
+        )
+        record = {
+            "phase": expected_phase,
+            "update": expected_update,
+            "observation": observation,
+        }
+        transcript.append(record)
+        digest.update(_recovery_state_check_record_bytes(record))
+    summary: dict[str, object] = {
+        "schema_version": "recovery-adamw-per-update-state-checks/v1",
+        "before_update_checks": completed_steps,
+        "after_update_checks": completed_steps,
+        "first_pre_update_state_empty": completed_steps > 0,
+        "completed_updates_covered": None,
+        "check_sequence_sha256": None,
+        "all_updates_checked_before_and_after": False,
+        "all_subsequent_pre_update_scalar_steps_exact": False,
+        "all_post_update_scalar_steps_exact": False,
+        "exp_avg_and_exp_avg_sq_shape_dtype_device_valid": False,
+    }
+    return transcript, digest, summary
+
+
+def _validated_recovery_execution_checkpoint(
+    value: object,
+    *,
+    protocol: AdamWRecoveryProtocol,
+    completed_steps: int,
+    replayed_summary: Mapping[str, object],
+    head: torch.Tensor,
+) -> dict[str, object]:
+    required = {
+        "schema_version",
+        "protocol",
+        "optimizer_class",
+        "parameter_count",
+        "fresh_optimizer_state_before_first_update",
+        "reward_head_dtype_observed",
+        "first_order_audit_dtype_required",
+        "microbatch_order",
+        "one_optimizer_update_per_step",
+        "learning_rate_set_immediately_before_every_update",
+        "single_optimizer_instance_for_all_updates",
+        "optimizer_state_reset_at_lr_milestone",
+        "adamw_moments_preserved_at_learning_rate_boundaries",
+        "boundary_transitions",
+        "completed_updates_observed",
+        "per_update_state_checks",
+        "selected_primary_optimizer_state_restored_and_verified",
+        "selected_optimizer_object_identity_preserved",
+        "selected_optimizer_moments_restored_and_verified",
+        "selected_head_sha256",
+        "restored_head_sha256",
+        "selected_optimizer_state_sha256",
+        "restored_optimizer_state_sha256",
+        "selected_checkpoint_optimizer_state_dict_sha256",
+        "restored_optimizer_state_dict_sha256",
+        "selected_checkpoint_sha256",
+        "test_or_validation_data_accessed",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("recovery controller checkpoint execution state is malformed")
+    execution = _strict_json_copy(
+        value,
+        name="controller_checkpoint.optimizer_protocol_execution",
+    )
+    exact_values = {
+        "schema_version": "deterministic-adamw-lr-decay-execution/v2",
+        "protocol": protocol.to_dict(),
+        "optimizer_class": "torch.optim.AdamW",
+        "parameter_count": 1,
+        "fresh_optimizer_state_before_first_update": True,
+        "reward_head_dtype_observed": str(head.dtype),
+        "first_order_audit_dtype_required": protocol.first_order_audit_dtype,
+        "microbatch_order": protocol.microbatch_order,
+        "one_optimizer_update_per_step": True,
+        "learning_rate_set_immediately_before_every_update": True,
+        "single_optimizer_instance_for_all_updates": True,
+        "optimizer_state_reset_at_lr_milestone": False,
+        "adamw_moments_preserved_at_learning_rate_boundaries": True,
+        "completed_updates_observed": None,
+        "per_update_state_checks": dict(replayed_summary),
+        "selected_primary_optimizer_state_restored_and_verified": False,
+        "selected_optimizer_object_identity_preserved": False,
+        "selected_optimizer_moments_restored_and_verified": False,
+        "selected_head_sha256": None,
+        "restored_head_sha256": None,
+        "selected_optimizer_state_sha256": None,
+        "restored_optimizer_state_sha256": None,
+        "selected_checkpoint_optimizer_state_dict_sha256": None,
+        "restored_optimizer_state_dict_sha256": None,
+        "selected_checkpoint_sha256": None,
+        "test_or_validation_data_accessed": False,
+    }
+    for name, expected in exact_values.items():
+        if execution[name] != expected:
+            raise ValueError(
+                f"recovery controller checkpoint execution field {name!r} is inconsistent"
+            )
+    raw_transitions = execution["boundary_transitions"]
+    expected_stages = [
+        stage for stage in protocol.stages[1:] if stage.first_update <= completed_steps
+    ]
+    if not isinstance(raw_transitions, list) or len(raw_transitions) != len(expected_stages):
+        raise ValueError("recovery checkpoint learning-rate transitions are incomplete")
+    transitions: list[dict[str, object]] = []
+    transition_keys = {
+        "next_update",
+        "previous_learning_rate",
+        "new_learning_rate",
+        "moment_state_sha256_before_lr_assignment",
+        "moment_state_sha256_after_lr_assignment",
+        "same_optimizer_instance",
+        "moments_preserved",
+    }
+    for raw_transition, stage in zip(
+        raw_transitions,
+        expected_stages,
+        strict=True,
+    ):
+        if not isinstance(raw_transition, Mapping) or set(raw_transition) != transition_keys:
+            raise ValueError("recovery checkpoint learning-rate transition is malformed")
+        transition = _strict_json_copy(
+            raw_transition,
+            name="controller_checkpoint.boundary_transition",
+        )
+        before_hash = _validate_digest(
+            transition["moment_state_sha256_before_lr_assignment"],
+            name="recovery transition moment hash before assignment",
+        )
+        after_hash = _validate_digest(
+            transition["moment_state_sha256_after_lr_assignment"],
+            name="recovery transition moment hash after assignment",
+        )
+        if (
+            type(transition["next_update"]) is not int
+            or transition["next_update"] != stage.first_update
+            or transition["previous_learning_rate"]
+            != protocol.learning_rate_for_update(stage.first_update - 1)
+            or transition["new_learning_rate"]
+            != protocol.learning_rate_for_update(stage.first_update)
+            or before_hash != after_hash
+            or transition["same_optimizer_instance"] is not True
+            or transition["moments_preserved"] is not True
+        ):
+            raise ValueError("recovery checkpoint learning-rate transition is inconsistent")
+        transitions.append(transition)
+    execution["boundary_transitions"] = transitions
+    if not isinstance(replayed_summary, dict):
+        raise TypeError("replayed recovery state-check summary must be mutable")
+    execution["per_update_state_checks"] = replayed_summary
+    return execution
+
+
+def _build_first_order_controller_checkpoint(
+    trainer: Any,
+    *,
+    identity: Mapping[str, object],
+    initial: _FirstOrderMeasurement,
+    checkpoint_boundary_measurement: _FirstOrderMeasurement,
+    checks: Sequence[Mapping[str, object]],
+    consecutive_passes: int,
+    selected_state: Mapping[str, object] | None,
+    selected_measurement: _FirstOrderMeasurement | None,
+    selected_step: int | None,
+    selected_head_sha256: str | None,
+    selected_optimizer_state_sha256: str | None,
+    selected_checkpoint_optimizer_state_dict_sha256: str | None,
+    selected_checkpoint_sha256: str | None,
+    fixed_snapshot: Mapping[str, object] | None,
+    legacy_boundary_snapshot: Mapping[str, object] | None,
+    optimizer_protocol_execution: Mapping[str, object] | None,
+    recovery_state_check_transcript: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    trainer_state = trainer.state_dict()
+    if not isinstance(trainer_state, Mapping):
+        raise TypeError("checkpoint trainer state_dict() must return a mapping")
+    completed_steps = getattr(trainer, "completed_steps", None)
+    if isinstance(completed_steps, bool) or not isinstance(completed_steps, int):
+        raise TypeError("checkpoint trainer completed_steps must be an integer")
+    trainer_state_sha256 = _checkpoint_value_sha256(trainer_state)
+    head_sha256 = _tensor_sha256(
+        _checkpoint_trainer_weight(
+            trainer_state,
+            name="checkpoint trainer_state",
+        )
+    )
+    optimizer_state = trainer_state.get("optimizer")
+    if optimizer_state is None:
+        optimizer_state_dict_sha256 = None
+    elif not isinstance(optimizer_state, Mapping):
+        raise TypeError("checkpoint trainer optimizer state must be a mapping")
+    else:
+        optimizer_state_dict_sha256 = _checkpoint_value_sha256(optimizer_state)
+    controller_state: dict[str, object] = {
+        "completed_steps": completed_steps,
+        "initial": _measurement_checkpoint_payload(initial),
+        "checkpoint_boundary_step": completed_steps,
+        "checkpoint_boundary_measurement": _measurement_checkpoint_payload(
+            checkpoint_boundary_measurement
+        ),
+        "checkpoint_boundary_trainer_state_sha256": trainer_state_sha256,
+        "checkpoint_boundary_head_sha256": head_sha256,
+        "checkpoint_boundary_optimizer_state_dict_sha256": (optimizer_state_dict_sha256),
+        "checks": [copy.deepcopy(dict(check)) for check in checks],
+        "consecutive_passes": consecutive_passes,
+        "selected_state": (None if selected_state is None else copy.deepcopy(dict(selected_state))),
+        "selected_measurement": (
+            None
+            if selected_measurement is None
+            else _measurement_checkpoint_payload(selected_measurement)
+        ),
+        "selected_step": selected_step,
+        "selected_head_sha256": selected_head_sha256,
+        "selected_optimizer_state_sha256": selected_optimizer_state_sha256,
+        "selected_checkpoint_optimizer_state_dict_sha256": (
+            selected_checkpoint_optimizer_state_dict_sha256
+        ),
+        "selected_checkpoint_sha256": selected_checkpoint_sha256,
+        "fixed_snapshot": (None if fixed_snapshot is None else copy.deepcopy(dict(fixed_snapshot))),
+        "legacy_boundary_snapshot": (
+            None
+            if legacy_boundary_snapshot is None
+            else copy.deepcopy(dict(legacy_boundary_snapshot))
+        ),
+        "optimizer_protocol_execution": (
+            None
+            if optimizer_protocol_execution is None
+            else copy.deepcopy(dict(optimizer_protocol_execution))
+        ),
+        "recovery_state_check_transcript": [
+            copy.deepcopy(dict(record)) for record in recovery_state_check_transcript
+        ],
+    }
+    payload: dict[str, object] = {
+        "schema_version": _FIRST_ORDER_CONTROLLER_CHECKPOINT_SCHEMA,
+        "identity": copy.deepcopy(dict(identity)),
+        "identity_sha256": _canonical_sha256(dict(identity)),
+        "trainer_state": copy.deepcopy(dict(trainer_state)),
+        "controller_state": controller_state,
+    }
+    payload["checkpoint_sha256"] = _checkpoint_value_sha256(payload)
+    return payload
+
+
+def _build_selected_primary_terminal_checkpoint(
+    trainer: Any,
+    *,
+    identity: Mapping[str, object],
+    selected_primary_step: int,
+    controller_updates_executed: int,
+    initial: _FirstOrderMeasurement,
+    final: _FirstOrderMeasurement,
+    evidence: Mapping[str, object],
+) -> dict[str, object]:
+    """Serialize only the restored, freshly audited selected primary iterate."""
+
+    selected_step = _positive_integer(
+        selected_primary_step,
+        name="selected_primary_step",
+    )
+    controller_updates = _positive_integer(
+        controller_updates_executed,
+        name="controller_updates_executed",
+    )
+    if controller_updates < selected_step:
+        raise ValueError("controller_updates_executed cannot precede selected_primary_step")
+    trainer_state = trainer.state_dict()
+    if not isinstance(trainer_state, Mapping):
+        raise TypeError("selected terminal trainer state must be a mapping")
+    if trainer_state.get("completed_steps") != selected_step:
+        raise RuntimeError("selected terminal trainer state does not bind selected_primary_step")
+    head = _checkpoint_trainer_weight(
+        trainer_state,
+        name="selected terminal trainer_state",
+    )
+    optimizer = trainer_state.get("optimizer")
+    if optimizer is not None and not isinstance(optimizer, Mapping):
+        raise TypeError("selected terminal optimizer state must be a mapping or None")
+    identity_copy = _strict_json_copy(
+        identity,
+        name="selected_terminal.identity",
+    )
+    evidence_copy = _strict_json_copy(
+        evidence,
+        name="selected_terminal.convergence_evidence",
+    )
+    payload: dict[str, object] = {
+        "schema_version": _SELECTED_PRIMARY_TERMINAL_CHECKPOINT_SCHEMA,
+        "identity": identity_copy,
+        "identity_sha256": _canonical_sha256(identity_copy),
+        "selected_primary_step": selected_step,
+        "controller_updates_executed": controller_updates,
+        "trainer_state": copy.deepcopy(dict(trainer_state)),
+        "trainer_state_sha256": _checkpoint_value_sha256(trainer_state),
+        "selected_head_sha256": _tensor_sha256(head),
+        "selected_optimizer_state_dict_sha256": (
+            None if optimizer is None else _checkpoint_value_sha256(optimizer)
+        ),
+        "initial_measurement": _measurement_checkpoint_payload(initial),
+        "final_measurement": _measurement_checkpoint_payload(final),
+        "convergence_evidence": evidence_copy,
+        "convergence_evidence_sha256": _canonical_sha256(evidence_copy),
+    }
+    payload["terminal_checkpoint_sha256"] = _checkpoint_value_sha256(payload)
+    return payload
+
+
+def _validated_selected_primary_terminal_checkpoint(
+    value: Mapping[str, object],
+    *,
+    expected_identity: Mapping[str, object],
+) -> dict[str, object]:
+    """Strictly validate a selected-primary terminal payload and its cross-links."""
+
+    required = {
+        "schema_version",
+        "identity",
+        "identity_sha256",
+        "selected_primary_step",
+        "controller_updates_executed",
+        "trainer_state",
+        "trainer_state_sha256",
+        "selected_head_sha256",
+        "selected_optimizer_state_dict_sha256",
+        "initial_measurement",
+        "final_measurement",
+        "convergence_evidence",
+        "convergence_evidence_sha256",
+        "terminal_checkpoint_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("selected-primary terminal checkpoint keys are malformed")
+    if value["schema_version"] != _SELECTED_PRIMARY_TERMINAL_CHECKPOINT_SCHEMA:
+        raise ValueError("unsupported selected-primary terminal checkpoint schema")
+    identity = value["identity"]
+    if not isinstance(identity, Mapping):
+        raise TypeError("selected-primary terminal identity must be a mapping")
+    identity_copy = _strict_json_copy(identity, name="selected_terminal.identity")
+    expected_copy = _strict_json_copy(
+        expected_identity,
+        name="expected_selected_terminal.identity",
+    )
+    if identity_copy != expected_copy:
+        raise ValueError("selected-primary terminal identity mismatch")
+    if _validate_digest(
+        value["identity_sha256"],
+        name="selected-primary terminal identity hash",
+    ) != _canonical_sha256(identity_copy):
+        raise ValueError("selected-primary terminal identity hash mismatch")
+    terminal_sha = _validate_digest(
+        value["terminal_checkpoint_sha256"],
+        name="selected-primary terminal checkpoint hash",
+    )
+    unhashed = {key: value[key] for key in required if key != "terminal_checkpoint_sha256"}
+    if terminal_sha != _checkpoint_value_sha256(unhashed):
+        raise ValueError("selected-primary terminal checkpoint hash mismatch")
+
+    selected_step = value["selected_primary_step"]
+    controller_updates = value["controller_updates_executed"]
+    if (
+        isinstance(selected_step, bool)
+        or not isinstance(selected_step, int)
+        or selected_step < 1
+        or isinstance(controller_updates, bool)
+        or not isinstance(controller_updates, int)
+        or controller_updates < selected_step
+    ):
+        raise ValueError("selected-primary terminal update counts are invalid")
+    trainer_state = value["trainer_state"]
+    if not isinstance(trainer_state, Mapping):
+        raise TypeError("selected-primary terminal trainer_state must be a mapping")
+    if trainer_state.get("completed_steps") != selected_step:
+        raise ValueError("selected-primary terminal trainer state is not the selected iterate")
+    _checkpoint_trainer_history(
+        trainer_state,
+        completed_steps=selected_step,
+    )
+    if _validate_digest(
+        value["trainer_state_sha256"],
+        name="selected-primary terminal trainer-state hash",
+    ) != _checkpoint_value_sha256(trainer_state):
+        raise ValueError("selected-primary terminal trainer-state hash mismatch")
+    head = _checkpoint_trainer_weight(
+        trainer_state,
+        name="selected-primary terminal trainer_state",
+    )
+    if _validate_digest(
+        value["selected_head_sha256"],
+        name="selected-primary terminal head hash",
+    ) != _tensor_sha256(head):
+        raise ValueError("selected-primary terminal head hash mismatch")
+    optimizer = trainer_state.get("optimizer")
+    optimizer_sha = value["selected_optimizer_state_dict_sha256"]
+    if optimizer is None:
+        if optimizer_sha is not None:
+            raise ValueError("selected-primary terminal optimizer hash is spurious")
+    else:
+        if not isinstance(optimizer, Mapping):
+            raise TypeError("selected-primary terminal optimizer state is malformed")
+        if _validate_digest(
+            optimizer_sha,
+            name="selected-primary terminal optimizer-state hash",
+        ) != _checkpoint_value_sha256(optimizer):
+            raise ValueError("selected-primary terminal optimizer-state hash mismatch")
+
+    initial = _measurement_from_checkpoint(
+        value["initial_measurement"],
+        name="selected_terminal.initial_measurement",
+    )
+    final = _measurement_from_checkpoint(
+        value["final_measurement"],
+        name="selected_terminal.final_measurement",
+    )
+    evidence = value["convergence_evidence"]
+    if not isinstance(evidence, Mapping):
+        raise TypeError("selected-primary terminal convergence evidence must be a mapping")
+    evidence_copy = _strict_json_copy(
+        evidence,
+        name="selected_terminal.convergence_evidence",
+    )
+    if _validate_digest(
+        value["convergence_evidence_sha256"],
+        name="selected-primary terminal convergence-evidence hash",
+    ) != _canonical_sha256(evidence_copy):
+        raise ValueError("selected-primary terminal convergence-evidence hash mismatch")
+    final_gate = evidence_copy.get("final_gate")
+    evidence_declares_audit_dtype = (
+        evidence_copy.get("schema_version") == "objective-first-order-convergence/v2"
+    )
+    if (
+        evidence_copy.get("converged") is not True
+        or evidence_copy.get("fail_closed") is not True
+        or evidence_copy.get("selected_primary_step") != selected_step
+        or evidence_copy.get("selected_primary_head_sha256") != value["selected_head_sha256"]
+        or not isinstance(final_gate, Mapping)
+        or final_gate.get("step") != selected_step
+        or final_gate.get("fresh_post_restore_audit") is not True
+        or final_gate.get("threshold_passed") is not True
+        or final_gate.get("measurement")
+        != final.to_dict(include_audit_dtype=evidence_declares_audit_dtype)
+        or evidence_copy.get("initial_zero_head_measurement")
+        != initial.to_dict(include_audit_dtype=evidence_declares_audit_dtype)
+        or evidence_copy.get("test_or_validation_data_accessed") is not False
+    ):
+        raise ValueError("selected-primary terminal convergence evidence is inconsistent")
+    optimizer_execution = evidence_copy.get("optimizer_protocol_execution")
+    if optimizer_execution is not None and (
+        not isinstance(optimizer_execution, Mapping)
+        or optimizer_execution.get("completed_updates_observed") != controller_updates
+        or optimizer_execution.get("selected_primary_optimizer_state_restored_and_verified")
+        is not True
+    ):
+        raise ValueError("selected-primary terminal controller update evidence is inconsistent")
+    return copy.deepcopy(dict(value))
+
+
+def _validated_controller_convergence_checks(
+    value: object,
+    *,
+    initial: _FirstOrderMeasurement,
+    completed_steps: int,
+    selected_step: int | None,
+    spec: FirstOrderConvergenceSpec,
+    protocol: AdamWRecoveryProtocol | None,
+) -> tuple[list[dict[str, object]], int, _FirstOrderMeasurement | None]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise TypeError("controller checkpoint checks must be a sequence")
+    last_required_step = completed_steps if selected_step is None else selected_step
+    expected_count = last_required_step // spec.check_interval
+    if len(value) != expected_count:
+        raise ValueError("controller checkpoint checks do not cover every required scheduled step")
+    required_keys = {
+        "step",
+        "post_update",
+        "full_data",
+        "gradient_clipping_applied",
+        "measurement",
+        "gradient_ratio_to_zero_initialization",
+        "eligible_after_min_steps",
+        "threshold_passed",
+        "consecutive_threshold_passes",
+    }
+    if protocol is not None:
+        required_keys.update(
+            {
+                "learning_rate_used_for_update",
+                "learning_rate_schedule_sha256",
+            }
+        )
+    checks: list[dict[str, object]] = []
+    consecutive = 0
+    last_measurement: _FirstOrderMeasurement | None = None
+    for index, raw_check in enumerate(value, start=1):
+        if not isinstance(raw_check, Mapping) or set(raw_check) != required_keys:
+            raise ValueError("controller checkpoint convergence check is malformed")
+        check = _strict_json_copy(raw_check, name="controller_checkpoint.check")
+        step = index * spec.check_interval
+        measurement = _measurement_from_controller_evidence(
+            check["measurement"],
+            name=f"controller_checkpoint.checks[{index - 1}].measurement",
+            require_audit_dtype=protocol is not None,
+        )
+        ratio = _gradient_ratio(
+            measurement.gradient_l2_norm,
+            initial.gradient_l2_norm,
+            spec,
+        )
+        serialized_ratio = _finite_float(
+            check["gradient_ratio_to_zero_initialization"],
+            name="controller checkpoint gradient ratio",
+            minimum=0.0,
+        )
+        eligible = step >= spec.min_steps
+        passed = eligible and ratio <= spec.gradient_ratio_tolerance
+        consecutive = consecutive + 1 if passed else 0
+        if (
+            type(check["step"]) is not int
+            or check["step"] != step
+            or check["post_update"] is not True
+            or check["full_data"] is not True
+            or check["gradient_clipping_applied"] is not False
+            or not math.isclose(
+                serialized_ratio,
+                ratio,
+                rel_tol=1.0e-10,
+                abs_tol=1.0e-14,
+            )
+            or check["eligible_after_min_steps"] is not eligible
+            or check["threshold_passed"] is not passed
+            or type(check["consecutive_threshold_passes"]) is not int
+            or check["consecutive_threshold_passes"] != consecutive
+        ):
+            raise ValueError("controller checkpoint convergence check semantics are invalid")
+        if protocol is not None and (
+            not isinstance(check["learning_rate_used_for_update"], float)
+            or check["learning_rate_used_for_update"] != protocol.learning_rate_for_update(step)
+            or check["learning_rate_schedule_sha256"] != protocol.schedule_sha256
+        ):
+            raise ValueError(
+                "controller checkpoint convergence check optimizer schedule is invalid"
+            )
+        crossing = consecutive >= spec.consecutive_checks
+        if crossing and (selected_step is None or step != selected_step):
+            raise ValueError(
+                "controller checkpoint did not preserve the first sustained gate crossing"
+            )
+        checks.append(check)
+        last_measurement = measurement
+    if selected_step is not None and consecutive != spec.consecutive_checks:
+        raise ValueError("selected trainer checkpoint lacks the sustained convergence gate")
+    if selected_step is None and consecutive >= spec.consecutive_checks:
+        raise ValueError("controller checkpoint omits a reached convergence selection")
+    return checks, consecutive, last_measurement
+
+
+def _checkpoint_trainer_weight(
+    trainer_state: Mapping[str, object],
+    *,
+    name: str,
+) -> torch.Tensor:
+    model_state = trainer_state.get("model")
+    value = (
+        model_state.get("weight")
+        if isinstance(model_state, Mapping)
+        else trainer_state.get("weight")
+    )
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{name} does not contain a tensor reward head")
+    if value.requires_grad or value.grad_fn is not None or not bool(torch.isfinite(value).all()):
+        raise ValueError(f"{name} reward head must be finite and detached")
+    return value
+
+
+def _checkpoint_trainer_history(
+    trainer_state: Mapping[str, object],
+    *,
+    completed_steps: int,
+) -> list[TrainingStepDiagnostics]:
+    raw_history = trainer_state.get("history")
+    if not isinstance(raw_history, Sequence) or isinstance(raw_history, (str, bytes)):
+        raise TypeError("controller checkpoint trainer history must be a sequence")
+    if len(raw_history) != completed_steps:
+        raise ValueError("controller checkpoint trainer history length is inconsistent")
+    history: list[TrainingStepDiagnostics] = []
+    for expected_step, raw in enumerate(raw_history, start=1):
+        if isinstance(raw, TrainingStepDiagnostics):
+            item = raw
+        elif isinstance(raw, Mapping) and set(raw) == _TRAINING_STEP_DIAGNOSTIC_FIELDS:
+            item = TrainingStepDiagnostics(**dict(raw))
+        else:
+            raise ValueError("controller checkpoint trainer history entry is malformed")
+        if item.step != expected_step:
+            raise ValueError(
+                "controller checkpoint trainer history is not consecutive and one-indexed"
+            )
+        history.append(item)
+    return history
+
+
+def _validated_controller_snapshot(
+    value: object,
+    *,
+    name: str,
+    expected_step: int,
+    completed_steps: int,
+    selected_step: int | None,
+    initial: _FirstOrderMeasurement,
+    spec: FirstOrderConvergenceSpec,
+    protocol: AdamWRecoveryProtocol | None,
+    trainer_state: Mapping[str, object],
+    trainer_history: Sequence[TrainingStepDiagnostics],
+    legacy_boundary: bool,
+) -> dict[str, object] | None:
+    if value is None:
+        if completed_steps >= expected_step:
+            raise ValueError(f"controller checkpoint is missing {name}")
+        return None
+    fixed_keys = {
+        "schema_version",
+        "step",
+        "head_sha256",
+        "measurement",
+        "gradient_ratio_to_zero_initialization",
+        "history_summary",
+        "role",
+        "used_as_primary_selection_rule",
+        "coincides_with_selected_primary_iterate",
+    }
+    required = set(fixed_keys)
+    if legacy_boundary:
+        required.update(
+            {
+                "learning_rate_used_for_update",
+                "learning_rate_schedule_sha256",
+                "test_or_validation_data_accessed",
+            }
+        )
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError(f"controller checkpoint {name} is malformed")
+    snapshot = _strict_json_copy(value, name=f"controller_checkpoint.{name}")
+    if (
+        type(snapshot["step"]) is not int
+        or snapshot["step"] != expected_step
+        or expected_step > completed_steps
+    ):
+        raise ValueError(f"controller checkpoint {name} step is inconsistent")
+    _validate_digest(
+        snapshot["head_sha256"],
+        name=f"controller checkpoint {name} head hash",
+    )
+    measurement = _measurement_from_controller_evidence(
+        snapshot["measurement"],
+        name=f"controller_checkpoint.{name}.measurement",
+        require_audit_dtype=protocol is not None,
+    )
+    ratio = _gradient_ratio(
+        measurement.gradient_l2_norm,
+        initial.gradient_l2_norm,
+        spec,
+    )
+    serialized_ratio = _finite_float(
+        snapshot["gradient_ratio_to_zero_initialization"],
+        name=f"controller checkpoint {name} gradient ratio",
+        minimum=0.0,
+    )
+    if not math.isclose(
+        serialized_ratio,
+        ratio,
+        rel_tol=1.0e-10,
+        abs_tol=1.0e-14,
+    ):
+        raise ValueError(f"controller checkpoint {name} gradient ratio is inconsistent")
+    if snapshot["history_summary"] != _history_summary(trainer_history[:expected_step]):
+        raise ValueError(f"controller checkpoint {name} history summary is inconsistent")
+    if completed_steps == expected_step and snapshot["head_sha256"] != _tensor_sha256(
+        _checkpoint_trainer_weight(
+            trainer_state,
+            name=f"controller checkpoint {name} trainer_state",
+        )
+    ):
+        raise ValueError(f"controller checkpoint {name} head hash is inconsistent")
+    if snapshot["used_as_primary_selection_rule"] is not False or snapshot[
+        "coincides_with_selected_primary_iterate"
+    ] is not (selected_step == expected_step):
+        raise ValueError(f"controller checkpoint {name} selection role is inconsistent")
+    if legacy_boundary:
+        if protocol is None:
+            raise ValueError("legacy-boundary snapshot requires a recovery protocol")
+        if (
+            snapshot["schema_version"] != "legacy-constant-lr-boundary-snapshot/v1"
+            or snapshot["role"] != "immutable_legacy_constant_lr_failure_boundary_diagnostic"
+            or snapshot["learning_rate_used_for_update"]
+            != protocol.learning_rate_for_update(expected_step)
+            or snapshot["learning_rate_schedule_sha256"] != protocol.schedule_sha256
+            or snapshot["test_or_validation_data_accessed"] is not False
+        ):
+            raise ValueError("controller checkpoint legacy-boundary snapshot semantics are invalid")
+    elif (
+        snapshot["schema_version"] != "fixed-step-compute-matched-snapshot/v1"
+        or snapshot["role"] != "compute_matched_and_pilot_diagnostic_only"
+    ):
+        raise ValueError("controller checkpoint fixed snapshot semantics are invalid")
+    return snapshot
+
+
+def _validated_first_order_controller_checkpoint(
+    value: Mapping[str, object],
+    *,
+    expected_identity: Mapping[str, object],
+    spec: FirstOrderConvergenceSpec,
+    protocol: AdamWRecoveryProtocol | None,
+    fixed_snapshot_steps: int,
+) -> dict[str, object]:
+    required = {
+        "schema_version",
+        "identity",
+        "identity_sha256",
+        "trainer_state",
+        "controller_state",
+        "checkpoint_sha256",
+    }
+    if set(value) != required:
+        raise ValueError("first-order controller checkpoint keys are malformed")
+    if value["schema_version"] != _FIRST_ORDER_CONTROLLER_CHECKPOINT_SCHEMA:
+        raise ValueError("unsupported first-order controller checkpoint schema")
+    identity = value["identity"]
+    if not isinstance(identity, Mapping):
+        raise TypeError("first-order controller checkpoint identity must be a mapping")
+    identity_copy = _strict_json_copy(identity, name="controller_checkpoint_identity")
+    expected_copy = _strict_json_copy(
+        expected_identity,
+        name="expected_controller_checkpoint_identity",
+    )
+    if identity_copy != expected_copy:
+        raise ValueError("first-order controller checkpoint identity mismatch")
+    identity_sha = _validate_digest(
+        value["identity_sha256"],
+        name="controller checkpoint identity_sha256",
+    )
+    if identity_sha != _canonical_sha256(identity_copy):
+        raise ValueError("first-order controller checkpoint identity hash mismatch")
+    checkpoint_sha = _validate_digest(
+        value["checkpoint_sha256"],
+        name="controller checkpoint checkpoint_sha256",
+    )
+    unhashed = {key: value[key] for key in required if key != "checkpoint_sha256"}
+    if checkpoint_sha != _checkpoint_value_sha256(unhashed):
+        raise ValueError("first-order controller checkpoint state hash mismatch")
+
+    trainer_state = value["trainer_state"]
+    controller = value["controller_state"]
+    if not isinstance(trainer_state, Mapping):
+        raise TypeError("first-order controller trainer_state must be a mapping")
+    if not isinstance(controller, Mapping):
+        raise TypeError("first-order controller controller_state must be a mapping")
+    controller_keys = {
+        "completed_steps",
+        "initial",
+        "checkpoint_boundary_step",
+        "checkpoint_boundary_measurement",
+        "checkpoint_boundary_trainer_state_sha256",
+        "checkpoint_boundary_head_sha256",
+        "checkpoint_boundary_optimizer_state_dict_sha256",
+        "checks",
+        "consecutive_passes",
+        "selected_state",
+        "selected_measurement",
+        "selected_step",
+        "selected_head_sha256",
+        "selected_optimizer_state_sha256",
+        "selected_checkpoint_optimizer_state_dict_sha256",
+        "selected_checkpoint_sha256",
+        "fixed_snapshot",
+        "legacy_boundary_snapshot",
+        "optimizer_protocol_execution",
+        "recovery_state_check_transcript",
+    }
+    if set(controller) != controller_keys:
+        raise ValueError("first-order controller state keys are malformed")
+    completed_steps = controller["completed_steps"]
+    if (
+        isinstance(completed_steps, bool)
+        or not isinstance(completed_steps, int)
+        or not 0 <= completed_steps <= spec.max_steps
+    ):
+        raise ValueError("controller checkpoint completed_steps is invalid")
+    if trainer_state.get("completed_steps") != completed_steps:
+        raise ValueError("trainer and controller checkpoint steps differ")
+    if (
+        type(controller["checkpoint_boundary_step"]) is not int
+        or controller["checkpoint_boundary_step"] != completed_steps
+    ):
+        raise ValueError("controller checkpoint safe-boundary step is inconsistent")
+    boundary_trainer_state_sha256 = _validate_digest(
+        controller["checkpoint_boundary_trainer_state_sha256"],
+        name="controller checkpoint boundary trainer-state hash",
+    )
+    if boundary_trainer_state_sha256 != _checkpoint_value_sha256(trainer_state):
+        raise ValueError("controller checkpoint boundary trainer-state hash is inconsistent")
+    boundary_head_sha256 = _validate_digest(
+        controller["checkpoint_boundary_head_sha256"],
+        name="controller checkpoint boundary head hash",
+    )
+    if boundary_head_sha256 != _tensor_sha256(
+        _checkpoint_trainer_weight(
+            trainer_state,
+            name="controller checkpoint trainer_state",
+        )
+    ):
+        raise ValueError("controller checkpoint boundary head hash is inconsistent")
+    optimizer_state = trainer_state.get("optimizer")
+    boundary_optimizer_state_dict_sha256 = controller[
+        "checkpoint_boundary_optimizer_state_dict_sha256"
+    ]
+    if optimizer_state is None:
+        if boundary_optimizer_state_dict_sha256 is not None or protocol is not None:
+            raise ValueError("controller checkpoint boundary optimizer-state hash is inconsistent")
+    else:
+        if not isinstance(optimizer_state, Mapping):
+            raise TypeError("controller checkpoint trainer optimizer state must be a mapping")
+        validated_optimizer_sha256 = _validate_digest(
+            boundary_optimizer_state_dict_sha256,
+            name="controller checkpoint boundary optimizer-state hash",
+        )
+        if validated_optimizer_sha256 != _checkpoint_value_sha256(optimizer_state):
+            raise ValueError("controller checkpoint boundary optimizer-state hash is inconsistent")
+    initial = _measurement_from_checkpoint(
+        controller["initial"],
+        name="controller_checkpoint.initial",
+    )
+    if protocol is not None and initial.audit_dtype != protocol.first_order_audit_dtype:
+        raise ValueError("recovery checkpoint initial audit dtype is invalid")
+    checkpoint_boundary_measurement = _measurement_from_checkpoint(
+        controller["checkpoint_boundary_measurement"],
+        name="controller_checkpoint.checkpoint_boundary_measurement",
+    )
+    if (
+        protocol is not None
+        and checkpoint_boundary_measurement.audit_dtype != protocol.first_order_audit_dtype
+    ):
+        raise ValueError("recovery checkpoint boundary audit dtype is invalid")
+
+    selected_step_raw = controller["selected_step"]
+    selected_step: int | None
+    if selected_step_raw is None:
+        selected_step = None
+    elif (
+        isinstance(selected_step_raw, bool)
+        or not isinstance(selected_step_raw, int)
+        or selected_step_raw <= 0
+        or selected_step_raw > completed_steps
+        or selected_step_raw % spec.check_interval != 0
+    ):
+        raise ValueError("controller checkpoint selected_step is invalid")
+    else:
+        selected_step = selected_step_raw
+    checks, replayed_consecutive, last_check_measurement = _validated_controller_convergence_checks(
+        controller["checks"],
+        initial=initial,
+        completed_steps=completed_steps,
+        selected_step=selected_step,
+        spec=spec,
+        protocol=protocol,
+    )
+    consecutive_passes = controller["consecutive_passes"]
+    if (
+        isinstance(consecutive_passes, bool)
+        or not isinstance(consecutive_passes, int)
+        or not 0 <= consecutive_passes <= spec.consecutive_checks
+    ):
+        raise ValueError("controller checkpoint consecutive_passes is invalid")
+    if consecutive_passes != replayed_consecutive:
+        raise ValueError("controller checkpoint consecutive-pass state is inconsistent")
+
+    selected_state = controller["selected_state"]
+    selected_measurement_raw = controller["selected_measurement"]
+    selection_hash_names = (
+        "selected_head_sha256",
+        "selected_optimizer_state_sha256",
+        "selected_checkpoint_optimizer_state_dict_sha256",
+        "selected_checkpoint_sha256",
+    )
+    if selected_step is None:
+        if selected_state is not None or selected_measurement_raw is not None:
+            raise ValueError("controller checkpoint contains a partial selected state")
+        if any(controller[name] is not None for name in selection_hash_names):
+            raise ValueError("controller checkpoint contains hashes without a selected state")
+        selected_measurement = None
+    else:
+        if (
+            isinstance(selected_step, bool)
+            or not isinstance(selected_step, int)
+            or selected_step <= 0
+            or selected_step > completed_steps
+        ):
+            raise ValueError("controller checkpoint selected_step is invalid")
+        if not isinstance(selected_state, Mapping):
+            raise TypeError("controller checkpoint selected_state must be a mapping")
+        if selected_state.get("completed_steps") != selected_step:
+            raise ValueError("selected trainer checkpoint step is inconsistent")
+        selected_measurement = _measurement_from_checkpoint(
+            selected_measurement_raw,
+            name="controller_checkpoint.selected_measurement",
+        )
+        if (
+            not checks
+            or checks[-1].get("step") != selected_step
+            or last_check_measurement is None
+            or _measurement_checkpoint_payload(selected_measurement)
+            != _measurement_checkpoint_payload(last_check_measurement)
+        ):
+            raise ValueError("selected trainer checkpoint must match the final convergence check")
+        if consecutive_passes != spec.consecutive_checks:
+            raise ValueError("selected trainer checkpoint lacks the sustained convergence gate")
+        if protocol is None:
+            if any(controller[name] is not None for name in selection_hash_names):
+                raise ValueError("legacy controller checkpoint must not contain recovery hashes")
+        else:
+            for name in selection_hash_names:
+                _validate_digest(controller[name], name=f"controller checkpoint {name}")
+            selected_weight = _checkpoint_trainer_weight(
+                selected_state,
+                name="controller checkpoint selected_state",
+            )
+            if _tensor_sha256(selected_weight) != controller["selected_head_sha256"]:
+                raise ValueError("controller checkpoint selected head hash is inconsistent")
+            selected_optimizer_state = _checkpoint_optimizer_state_dict(selected_state)
+            if (
+                _checkpoint_value_sha256(selected_optimizer_state)
+                != controller["selected_checkpoint_optimizer_state_dict_sha256"]
+            ):
+                raise ValueError(
+                    "controller checkpoint selected optimizer state_dict hash is inconsistent"
+                )
+            expected_selection_binding = _canonical_sha256(
+                {
+                    "schema_version": "selected-recovery-state-binding/v1",
+                    "completed_updates": selected_step,
+                    "head_sha256": controller["selected_head_sha256"],
+                    "optimizer_state_sha256": controller["selected_optimizer_state_sha256"],
+                    "optimizer_state_dict_sha256": controller[
+                        "selected_checkpoint_optimizer_state_dict_sha256"
+                    ],
+                }
+            )
+            if expected_selection_binding != controller["selected_checkpoint_sha256"]:
+                raise ValueError(
+                    "controller checkpoint selected recovery binding hash is inconsistent"
+                )
+
+    trainer_history = _checkpoint_trainer_history(
+        trainer_state,
+        completed_steps=completed_steps,
+    )
+    fixed_snapshot = _validated_controller_snapshot(
+        controller["fixed_snapshot"],
+        name="fixed_snapshot",
+        expected_step=fixed_snapshot_steps,
+        completed_steps=completed_steps,
+        selected_step=selected_step,
+        initial=initial,
+        spec=spec,
+        protocol=protocol,
+        trainer_state=trainer_state,
+        trainer_history=trainer_history,
+        legacy_boundary=False,
+    )
+    legacy_boundary_snapshot = None
+    if protocol is None:
+        if controller["legacy_boundary_snapshot"] is not None:
+            raise ValueError("legacy controller checkpoint cannot contain a recovery snapshot")
+    else:
+        legacy_boundary_snapshot = _validated_controller_snapshot(
+            controller["legacy_boundary_snapshot"],
+            name="legacy_boundary_snapshot",
+            expected_step=protocol.legacy_boundary_snapshot_steps,
+            completed_steps=completed_steps,
+            selected_step=selected_step,
+            initial=initial,
+            spec=spec,
+            protocol=protocol,
+            trainer_state=trainer_state,
+            trainer_history=trainer_history,
+            legacy_boundary=True,
+        )
+
+    optimizer_protocol_execution = controller["optimizer_protocol_execution"]
+    raw_transcript = controller["recovery_state_check_transcript"]
+    if protocol is None:
+        if optimizer_protocol_execution is not None:
+            raise ValueError("legacy controller checkpoint cannot contain recovery execution state")
+        if raw_transcript not in ([], ()):
+            raise ValueError("legacy controller checkpoint cannot contain recovery state checks")
+        transcript: list[dict[str, object]] = []
+        recovery_digest = None
+        recovery_summary = None
+    else:
+        recovery_head = _checkpoint_trainer_weight(
+            trainer_state,
+            name="recovery controller checkpoint trainer_state",
+        )
+        transcript, recovery_digest, recovery_summary = _replay_recovery_state_check_transcript(
+            raw_transcript,
+            completed_steps=completed_steps,
+            protocol=protocol,
+            head=recovery_head,
+        )
+        optimizer_protocol_execution = _validated_recovery_execution_checkpoint(
+            optimizer_protocol_execution,
+            protocol=protocol,
+            completed_steps=completed_steps,
+            replayed_summary=recovery_summary,
+            head=recovery_head,
+        )
+
+    return {
+        "trainer_state": copy.deepcopy(dict(trainer_state)),
+        "completed_steps": completed_steps,
+        "checkpoint_boundary_trainer_state_sha256": boundary_trainer_state_sha256,
+        "checkpoint_boundary_head_sha256": boundary_head_sha256,
+        "checkpoint_boundary_optimizer_state_dict_sha256": (boundary_optimizer_state_dict_sha256),
+        "initial": initial,
+        "checkpoint_boundary_measurement": checkpoint_boundary_measurement,
+        "checks": checks,
+        "consecutive_passes": consecutive_passes,
+        "selected_state": (None if selected_state is None else copy.deepcopy(dict(selected_state))),
+        "selected_measurement": selected_measurement,
+        "selected_step": selected_step,
+        "selected_head_sha256": controller["selected_head_sha256"],
+        "selected_optimizer_state_sha256": controller["selected_optimizer_state_sha256"],
+        "selected_checkpoint_optimizer_state_dict_sha256": controller[
+            "selected_checkpoint_optimizer_state_dict_sha256"
+        ],
+        "selected_checkpoint_sha256": controller["selected_checkpoint_sha256"],
+        "fixed_snapshot": fixed_snapshot,
+        "legacy_boundary_snapshot": legacy_boundary_snapshot,
+        "optimizer_protocol_execution": optimizer_protocol_execution,
+        "recovery_state_check_summary": recovery_summary,
+        "recovery_state_check_transcript": transcript,
+        "recovery_state_check_digest": recovery_digest,
+    }
+
+
 def _checkpoint_optimizer_state_dict(
     trainer_state: Mapping[str, object],
 ) -> Mapping[str, object]:
@@ -2218,6 +3661,7 @@ def _record_recovery_state_check(
     phase: Literal["before_update", "after_update"],
     update: int,
     observation: Mapping[str, object],
+    transcript: list[dict[str, object]] | None = None,
 ) -> None:
     counter = f"{phase}_checks"
     current = summary.get(counter)
@@ -2228,19 +3672,17 @@ def _record_recovery_state_check(
         if observation.get("optimizer_state_empty") is not True:
             raise RuntimeError("the first recovery pre-update state check was not empty")
         summary["first_pre_update_state_empty"] = True
-    digest.update(
-        json.dumps(
-            {
-                "phase": phase,
-                "update": update,
-                "observation": dict(observation),
-            },
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    )
+    record = {
+        "phase": phase,
+        "update": update,
+        "observation": _strict_json_copy(
+            observation,
+            name="recovery_state_check_observation",
+        ),
+    }
+    if transcript is not None:
+        transcript.append(copy.deepcopy(record))
+    digest.update(_recovery_state_check_record_bytes(record))
 
 
 def _finalize_recovery_state_checks(
@@ -2466,6 +3908,16 @@ def _run_trainer_to_first_order_convergence(
     fixed_snapshot_steps: int,
     objective_name: str,
     rank_diagnostic: Mapping[str, object] | None = None,
+    resume_state: Mapping[str, object] | None = None,
+    checkpoint_hook: Callable[[Mapping[str, object], str], None] | None = None,
+    checkpoint_interval_steps: int | None = None,
+    stop_requested: Callable[[], str | None] | None = None,
+    begin_update: Callable[[int], bool] | None = None,
+    end_update: Callable[[int], None] | None = None,
+    execution_step_cap: int | None = None,
+    after_resume_state_restored: Callable[[], None] | None = None,
+    progress_hook: Callable[[Mapping[str, object]], None] | None = None,
+    execution_role: str = "phase2_training",
 ) -> _ConvergedTrainingRun:
     """Train one objective to its own gate and retain a diagnostic fixed path.
 
@@ -2486,46 +3938,410 @@ def _run_trainer_to_first_order_convergence(
         raise ValueError("fixed_snapshot_steps must not exceed convergence max_steps")
     if not isinstance(objective_name, str) or not objective_name:
         raise ValueError("objective_name must be non-empty")
+    if (
+        not isinstance(execution_role, str)
+        or execution_role not in _FIRST_ORDER_CONTROLLER_EXECUTION_ROLES
+    ):
+        raise ValueError(
+            f"execution_role must be one of {sorted(_FIRST_ORDER_CONTROLLER_EXECUTION_ROLES)!r}"
+        )
+    if resume_state is not None and not isinstance(resume_state, Mapping):
+        raise TypeError("resume_state must be a mapping or None")
+    if checkpoint_hook is not None and not callable(checkpoint_hook):
+        raise TypeError("checkpoint_hook must be callable or None")
+    if checkpoint_interval_steps is not None:
+        checkpoint_interval_steps = _positive_integer(
+            checkpoint_interval_steps,
+            name="checkpoint_interval_steps",
+        )
+        if checkpoint_hook is None:
+            raise ValueError("checkpoint_interval_steps requires checkpoint_hook")
+    if stop_requested is not None and not callable(stop_requested):
+        raise TypeError("stop_requested must be callable or None")
+    if stop_requested is not None and checkpoint_hook is None:
+        raise ValueError("stop_requested requires checkpoint_hook")
+    if (begin_update is None) != (end_update is None):
+        raise ValueError("begin_update and end_update must be configured together")
+    if begin_update is not None and not callable(begin_update):
+        raise TypeError("begin_update must be callable or None")
+    if end_update is not None and not callable(end_update):
+        raise TypeError("end_update must be callable or None")
+    if execution_step_cap is not None:
+        execution_step_cap = _positive_integer(
+            execution_step_cap,
+            name="execution_step_cap",
+        )
+        if execution_step_cap < spec.max_steps and checkpoint_hook is None:
+            raise ValueError("a bounded execution slice requires checkpoint_hook")
+    if after_resume_state_restored is not None and not callable(after_resume_state_restored):
+        raise TypeError("after_resume_state_restored must be callable or None")
+    if after_resume_state_restored is not None and resume_state is None:
+        raise ValueError("after_resume_state_restored requires resume_state")
+    if progress_hook is not None and not callable(progress_hook):
+        raise TypeError("progress_hook must be callable or None")
     if getattr(trainer, "completed_steps", None) != 0:
-        raise ValueError("convergence training requires a fresh zero-step trainer")
+        raise ValueError("convergence training requires a fresh zero-step trainer carrier")
     model = getattr(trainer, "model", None)
     weight = getattr(model, "weight", None)
     if not isinstance(weight, torch.Tensor) or bool(torch.count_nonzero(weight.detach())):
-        raise ValueError("convergence training requires an exact zero-initialized head")
+        raise ValueError("convergence training requires an exact zero-initialized head carrier")
 
     protocol = spec.optimizer_protocol
+    identity = _first_order_controller_identity(
+        objective_name=objective_name,
+        execution_role=execution_role,
+        spec=spec,
+        fixed_snapshot_steps=fixed_steps,
+        rank_diagnostic=rank_diagnostic,
+    )
+
+    def live_trainer_state_sha256() -> str:
+        state = trainer.state_dict()
+        if not isinstance(state, Mapping):
+            raise TypeError("trainer state_dict() must return a mapping")
+        return _checkpoint_value_sha256(state)
+
+    def audited_without_trainer_mutation(
+        *,
+        context: str,
+        force_state_integrity: bool = False,
+    ) -> tuple[_FirstOrderMeasurement, str | None]:
+        before_sha256 = live_trainer_state_sha256() if force_state_integrity else None
+        result = audit()
+        if not isinstance(result, _FirstOrderMeasurement):
+            raise TypeError(f"{context} must return _FirstOrderMeasurement")
+        if before_sha256 is not None and live_trainer_state_sha256() != before_sha256:
+            raise RuntimeError(f"{context} mutated trainer state")
+        return result, before_sha256
+
     recovery_optimizer: torch.optim.AdamW | None = None
     optimizer_protocol_execution: dict[str, object] | None = None
     recovery_state_check_digest: Any | None = None
     recovery_state_check_summary: dict[str, object] | None = None
+    recovery_state_check_transcript: list[dict[str, object]] | None = (
+        [] if resume_state is not None or checkpoint_hook is not None else None
+    )
     if protocol is not None:
-        recovery_optimizer, optimizer_protocol_execution = _install_recovery_optimizer(
+        recovery_optimizer, fresh_optimizer_protocol_execution = _install_recovery_optimizer(
             trainer,
             protocol,
         )
-        raw_summary = optimizer_protocol_execution.get("per_update_state_checks")
-        if not isinstance(raw_summary, dict):
-            raise RuntimeError("recovery per-update state-check summary was not initialized")
-        recovery_state_check_summary = raw_summary
-        recovery_state_check_digest = hashlib.sha256()
+    else:
+        fresh_optimizer_protocol_execution = None
 
-    initial = audit()
-    if protocol is not None and initial.audit_dtype != protocol.first_order_audit_dtype:
-        raise RuntimeError("recovery initial first-order audit did not execute in float64")
-    checks: list[dict[str, object]] = []
-    consecutive_passes = 0
-    selected_state: Mapping[str, object] | None = None
-    selected_measurement: _FirstOrderMeasurement | None = None
-    selected_step: int | None = None
-    selected_head_sha256: str | None = None
-    selected_optimizer_state_sha256: str | None = None
-    selected_checkpoint_optimizer_state_dict_sha256: str | None = None
-    selected_checkpoint_sha256: str | None = None
-    fixed_snapshot: dict[str, object] | None = None
-    legacy_boundary_snapshot: dict[str, object] | None = None
+    if resume_state is None:
+        optimizer_protocol_execution = fresh_optimizer_protocol_execution
+        if optimizer_protocol_execution is not None:
+            raw_summary = optimizer_protocol_execution.get("per_update_state_checks")
+            if not isinstance(raw_summary, dict):
+                raise RuntimeError("recovery per-update state-check summary was not initialized")
+            recovery_state_check_summary = raw_summary
+            recovery_state_check_digest = hashlib.sha256()
+        initial, _ = audited_without_trainer_mutation(context="initial first-order audit")
+        if protocol is not None and initial.audit_dtype != protocol.first_order_audit_dtype:
+            raise RuntimeError("recovery initial first-order audit did not execute in float64")
+        checks: list[dict[str, object]] = []
+        consecutive_passes = 0
+        selected_state: Mapping[str, object] | None = None
+        selected_measurement: _FirstOrderMeasurement | None = None
+        selected_step: int | None = None
+        selected_head_sha256: str | None = None
+        selected_optimizer_state_sha256: str | None = None
+        selected_checkpoint_optimizer_state_dict_sha256: str | None = None
+        selected_checkpoint_sha256: str | None = None
+        fixed_snapshot: dict[str, object] | None = None
+        legacy_boundary_snapshot: dict[str, object] | None = None
+    else:
+        restored = _validated_first_order_controller_checkpoint(
+            resume_state,
+            expected_identity=identity,
+            spec=spec,
+            protocol=protocol,
+            fixed_snapshot_steps=fixed_steps,
+        )
+        trainer.load_state_dict(restored["trainer_state"])
+        completed_steps = restored["completed_steps"]
+        if trainer.completed_steps != completed_steps:
+            raise RuntimeError("restored trainer step does not match controller checkpoint")
+        history = getattr(trainer, "history", None)
+        if not isinstance(history, Sequence) or len(history) != completed_steps:
+            raise RuntimeError("restored trainer history does not match controller checkpoint")
+        restored_trainer_state = trainer.state_dict()
+        if not isinstance(restored_trainer_state, Mapping):
+            raise TypeError("restored trainer state_dict() must return a mapping")
+        if _checkpoint_value_sha256(restored_trainer_state) != _checkpoint_value_sha256(
+            restored["trainer_state"]
+        ):
+            raise RuntimeError(
+                "live trainer state differs from the validated controller checkpoint"
+            )
+        if protocol is not None:
+            if recovery_optimizer is None or trainer.optimizer is not recovery_optimizer:
+                raise RuntimeError(
+                    "recovery resume replaced the newly installed AdamW optimizer instance"
+                )
+            restored_learning_rate = protocol.learning_rate_for_update(max(1, completed_steps))
+            _validate_recovery_adamw_state(
+                recovery_optimizer,
+                weight,
+                protocol,
+                expected_completed_updates=completed_steps,
+                expected_learning_rate=restored_learning_rate,
+            )
+        initial = restored["initial"]
+        checks = restored["checks"]
+        consecutive_passes = restored["consecutive_passes"]
+        selected_state = restored["selected_state"]
+        selected_measurement = restored["selected_measurement"]
+        selected_step = restored["selected_step"]
+        selected_head_sha256 = restored["selected_head_sha256"]
+        selected_optimizer_state_sha256 = restored["selected_optimizer_state_sha256"]
+        selected_checkpoint_optimizer_state_dict_sha256 = restored[
+            "selected_checkpoint_optimizer_state_dict_sha256"
+        ]
+        selected_checkpoint_sha256 = restored["selected_checkpoint_sha256"]
+        fixed_snapshot = restored["fixed_snapshot"]
+        legacy_boundary_snapshot = restored["legacy_boundary_snapshot"]
+        optimizer_protocol_execution = restored["optimizer_protocol_execution"]
+        recovery_state_check_summary = restored["recovery_state_check_summary"]
+        recovery_state_check_transcript = restored["recovery_state_check_transcript"]
+        recovery_state_check_digest = restored["recovery_state_check_digest"]
+        if after_resume_state_restored is not None:
+            after_resume_state_restored()
+        if (
+            live_trainer_state_sha256() != restored["checkpoint_boundary_trainer_state_sha256"]
+            or _tensor_sha256(weight) != restored["checkpoint_boundary_head_sha256"]
+        ):
+            raise RuntimeError("post-resume callback mutated restored trainer state")
+        resumed_boundary_measurement, resumed_state_sha256 = audited_without_trainer_mutation(
+            context="post-resume safe-boundary audit",
+            force_state_integrity=True,
+        )
+        if resumed_state_sha256 != restored["checkpoint_boundary_trainer_state_sha256"]:
+            raise RuntimeError("restored trainer state differs from the committed safe boundary")
+        if (
+            protocol is not None
+            and resumed_boundary_measurement.audit_dtype != protocol.first_order_audit_dtype
+        ):
+            raise RuntimeError(
+                "recovery post-resume safe-boundary audit did not execute in float64"
+            )
+        _validate_checkpoint_boundary_audit(
+            expected=restored["checkpoint_boundary_measurement"],
+            observed=resumed_boundary_measurement,
+        )
 
-    while trainer.completed_steps < spec.max_steps:
+    effective_step_cap = min(
+        spec.max_steps,
+        spec.max_steps if execution_step_cap is None else execution_step_cap,
+    )
+    if int(trainer.completed_steps) > effective_step_cap:
+        raise ValueError("execution_step_cap precedes the restored safe-boundary step")
+
+    def poll_stop_request() -> str | None:
+        requested = None if stop_requested is None else stop_requested()
+        if requested is not None and (not isinstance(requested, str) or not requested):
+            raise TypeError("stop_requested() must return a non-empty string or None")
+        return requested
+
+    def publish_controller_checkpoint(
+        *,
+        requested_reason: str,
+        known_measurement: _FirstOrderMeasurement | None = None,
+        known_measurement_state_sha256: str | None = None,
+    ) -> tuple[str, _FirstOrderMeasurement, str | None]:
+        """Audit, publish, then poll again so commit-time signals are not lost."""
+
+        if checkpoint_hook is None:
+            raise RuntimeError("controller checkpoint hook was not configured")
+        if recovery_state_check_transcript is None:
+            raise RuntimeError("controller checkpoint transcript was not initialized")
+        checkpoint_reason = requested_reason
+        measurement = known_measurement
+        state_sha256 = known_measurement_state_sha256
+        if (
+            measurement is None
+            or state_sha256 is None
+            or state_sha256 != live_trainer_state_sha256()
+        ):
+            measurement, state_sha256 = audited_without_trainer_mutation(
+                context="safe-boundary checkpoint audit",
+                force_state_integrity=True,
+            )
+        if state_sha256 != live_trainer_state_sha256():
+            raise RuntimeError(
+                "safe-boundary checkpoint audit is not bound to current trainer state"
+            )
+        if protocol is not None and measurement.audit_dtype != protocol.first_order_audit_dtype:
+            raise RuntimeError("recovery safe-boundary checkpoint audit did not execute in float64")
+        requested_stop = poll_stop_request()
+        if requested_stop is not None:
+            checkpoint_reason = "signal"
+        checkpoint = _build_first_order_controller_checkpoint(
+            trainer,
+            identity=identity,
+            initial=initial,
+            checkpoint_boundary_measurement=measurement,
+            checks=checks,
+            consecutive_passes=consecutive_passes,
+            selected_state=selected_state,
+            selected_measurement=selected_measurement,
+            selected_step=selected_step,
+            selected_head_sha256=selected_head_sha256,
+            selected_optimizer_state_sha256=selected_optimizer_state_sha256,
+            selected_checkpoint_optimizer_state_dict_sha256=(
+                selected_checkpoint_optimizer_state_dict_sha256
+            ),
+            selected_checkpoint_sha256=selected_checkpoint_sha256,
+            fixed_snapshot=fixed_snapshot,
+            legacy_boundary_snapshot=legacy_boundary_snapshot,
+            optimizer_protocol_execution=optimizer_protocol_execution,
+            recovery_state_check_transcript=recovery_state_check_transcript,
+        )
+        checkpoint_hook(checkpoint, reason=checkpoint_reason)
+        post_commit_stop = poll_stop_request()
+        if post_commit_stop is not None:
+            requested_stop = post_commit_stop
+        return checkpoint_reason, measurement, requested_stop
+
+    def emit_safe_progress(
+        *,
+        step: int,
+        diagnostic: TrainingStepDiagnostics | None,
+        measurement: _FirstOrderMeasurement | None,
+        scheduled: bool,
+        checkpoint_reason: str | None,
+        complete: bool,
+        interruption_requested: bool,
+        planned_segment_boundary: bool,
+    ) -> None:
+        if progress_hook is None:
+            return
+        latest_check = checks[-1] if checks else None
+        gradient_ratio = (
+            _gradient_ratio(
+                measurement.gradient_l2_norm,
+                initial.gradient_l2_norm,
+                spec,
+            )
+            if scheduled and measurement is not None
+            else (
+                None
+                if latest_check is None
+                else latest_check.get("gradient_ratio_to_zero_initialization")
+            )
+        )
+        if gradient_ratio is not None and not isinstance(gradient_ratio, float):
+            raise TypeError("controller progress gradient ratio must be a float")
+        pcg: dict[str, object] | None = None
+        if diagnostic is not None and diagnostic.pcg_iterations is not None:
+            reason = getattr(trainer, "last_pcg_reason", None)
+            if not isinstance(reason, str) or not reason:
+                raise RuntimeError("ProRM+ progress requires the raw PCG convergence reason")
+            if diagnostic.pcg_relative_residual is None or diagnostic.pcg_converged is None:
+                raise RuntimeError("ProRM+ progress lacks PCG residual evidence")
+            pcg = {
+                "iterations": diagnostic.pcg_iterations,
+                "relative_residual": diagnostic.pcg_relative_residual,
+                "reason": reason,
+                "converged": diagnostic.pcg_converged,
+            }
+        next_progress_update = None if complete or step >= spec.max_steps else step + 1
+        next_learning_rate = (
+            None
+            if next_progress_update is None or protocol is None
+            else protocol.learning_rate_for_update(next_progress_update)
+        )
+        progress_hook(
+            {
+                "schema_version": "phase2-first-order-safe-boundary-progress/v1",
+                "objective": objective_name,
+                "execution_role": execution_role,
+                "completed_steps": step,
+                "next_update": next_progress_update,
+                "next_learning_rate": next_learning_rate,
+                "gradient_ratio": gradient_ratio,
+                "consecutive_passes": consecutive_passes,
+                "pcg": pcg,
+                "scheduled_audit": scheduled,
+                "checkpoint_reason": checkpoint_reason,
+                "controller_complete": complete,
+                "interruption_requested": interruption_requested,
+                "planned_segment_boundary": planned_segment_boundary,
+                "test_or_validation_data_accessed": False,
+            }
+        )
+
+    all_required_snapshots_observed = fixed_snapshot is not None and (
+        protocol is None or legacy_boundary_snapshot is not None
+    )
+    controller_complete = selected_state is not None and all_required_snapshots_observed
+    if int(trainer.completed_steps) == effective_step_cap and not controller_complete:
+        if effective_step_cap >= spec.max_steps:
+            raise RuntimeError("controller entered an exhausted convergence budget")
+        checkpoint_reason, boundary_measurement, requested_stop = publish_controller_checkpoint(
+            requested_reason="stage_boundary"
+        )
+        emit_safe_progress(
+            step=int(trainer.completed_steps),
+            diagnostic=None,
+            measurement=boundary_measurement,
+            scheduled=False,
+            checkpoint_reason=checkpoint_reason,
+            complete=False,
+            interruption_requested=requested_stop is not None,
+            planned_segment_boundary=requested_stop is None,
+        )
+        if requested_stop is not None:
+            raise CheckpointInterruption(
+                f"{objective_name} checkpointed after scheduler request {requested_stop!r}"
+            )
+        raise PlannedSegmentBoundary(
+            f"{objective_name} exhausted its frozen segment execution slice"
+        )
+
+    while trainer.completed_steps < effective_step_cap and not controller_complete:
+        pre_update_stop = poll_stop_request()
+        if pre_update_stop is not None:
+            checkpoint_reason, boundary_measurement, requested_stop = publish_controller_checkpoint(
+                requested_reason="signal"
+            )
+            emit_safe_progress(
+                step=int(trainer.completed_steps),
+                diagnostic=None,
+                measurement=boundary_measurement,
+                scheduled=False,
+                checkpoint_reason=checkpoint_reason,
+                complete=False,
+                interruption_requested=True,
+                planned_segment_boundary=False,
+            )
+            raise CheckpointInterruption(
+                f"{objective_name} checkpointed after scheduler request "
+                f"{(requested_stop or pre_update_stop)!r}"
+            )
         next_update = int(trainer.completed_steps) + 1
+        if begin_update is not None and not begin_update(next_update):
+            refused_stop = poll_stop_request()
+            if refused_stop is None:
+                raise RuntimeError("begin_update refused an update without a checkpoint request")
+            checkpoint_reason, boundary_measurement, requested_stop = publish_controller_checkpoint(
+                requested_reason="signal"
+            )
+            emit_safe_progress(
+                step=int(trainer.completed_steps),
+                diagnostic=None,
+                measurement=boundary_measurement,
+                scheduled=False,
+                checkpoint_reason=checkpoint_reason,
+                complete=False,
+                interruption_requested=True,
+                planned_segment_boundary=False,
+            )
+            raise CheckpointInterruption(
+                f"{objective_name} checkpointed after scheduler request "
+                f"{(requested_stop or refused_stop)!r}"
+            )
         learning_rate_used: float | None = None
         if protocol is not None:
             if (
@@ -2555,6 +4371,7 @@ def _run_trainer_to_first_order_convergence(
                 phase="before_update",
                 update=next_update,
                 observation=before_update_state,
+                transcript=recovery_state_check_transcript,
             )
             groups = recovery_optimizer.param_groups
             if len(groups) != 1:
@@ -2635,9 +4452,12 @@ def _run_trainer_to_first_order_convergence(
                 phase="after_update",
                 update=next_update,
                 observation=after_update_state,
+                transcript=recovery_state_check_transcript,
             )
         if diagnostic.step != step:
             raise RuntimeError("trainer diagnostic step does not match trainer state")
+        if end_update is not None:
+            end_update(next_update)
 
         scheduled = step % spec.check_interval == 0
         needs_snapshot = step == fixed_steps
@@ -2645,17 +4465,24 @@ def _run_trainer_to_first_order_convergence(
             protocol is not None and step == protocol.legacy_boundary_snapshot_steps
         )
         measurement: _FirstOrderMeasurement | None = None
+        measurement_state_sha256: str | None = None
         if (
-            (scheduled and selected_state is None)
+            (
+                scheduled
+                and (selected_state is None or execution_role == "phase2_recovery_r3_primary")
+            )
             or needs_snapshot
             or needs_legacy_boundary_snapshot
         ):
-            measurement = audit()
+            measurement, measurement_state_sha256 = audited_without_trainer_mutation(
+                context="scheduled first-order audit",
+            )
             if protocol is not None and measurement.audit_dtype != protocol.first_order_audit_dtype:
                 raise RuntimeError(
                     "recovery scheduled first-order audit did not execute in float64"
                 )
 
+        selected_step_before_audit = selected_step
         if scheduled and selected_state is None:
             if measurement is None:
                 raise RuntimeError("scheduled convergence audit was not evaluated")
@@ -2728,6 +4555,7 @@ def _run_trainer_to_first_order_convergence(
                 selected_state = candidate_state
                 selected_measurement = measurement
                 selected_step = step
+        selected_at_this_boundary = selected_step_before_audit is None and selected_step is not None
 
         if needs_snapshot:
             if measurement is None:
@@ -2777,7 +4605,100 @@ def _run_trainer_to_first_order_convergence(
         all_required_snapshots_observed = fixed_snapshot is not None and (
             protocol is None or legacy_boundary_snapshot is not None
         )
-        if selected_state is not None and all_required_snapshots_observed:
+        controller_complete = selected_state is not None and all_required_snapshots_observed
+        requested_stop = poll_stop_request()
+        planned_segment_boundary = (
+            not controller_complete
+            and step >= effective_step_cap
+            and effective_step_cap < spec.max_steps
+        )
+        at_optimizer_stage_boundary = protocol is not None and any(
+            stage.last_update == step for stage in protocol.stages
+        )
+        checkpoint_reason = (
+            "signal"
+            if requested_stop is not None
+            else (
+                "interval"
+                if checkpoint_interval_steps is not None and step % checkpoint_interval_steps == 0
+                else (
+                    "stage_boundary"
+                    if checkpoint_hook is not None
+                    and (
+                        needs_snapshot
+                        or needs_legacy_boundary_snapshot
+                        or (
+                            execution_role == "phase2_recovery_r3_primary"
+                            and selected_at_this_boundary
+                        )
+                        or at_optimizer_stage_boundary
+                        or controller_complete
+                        or planned_segment_boundary
+                    )
+                    else None
+                )
+            )
+        )
+        interruption_requested = False
+        checkpoint_boundary_measurement = measurement
+        if checkpoint_reason is not None:
+            (
+                checkpoint_reason,
+                checkpoint_boundary_measurement,
+                checkpoint_stop,
+            ) = publish_controller_checkpoint(
+                requested_reason=checkpoint_reason,
+                known_measurement=measurement,
+                known_measurement_state_sha256=measurement_state_sha256,
+            )
+            if checkpoint_stop is not None:
+                requested_stop = checkpoint_stop
+            if requested_stop is not None:
+                interruption_requested = True
+        if progress_hook is not None and (
+            scheduled or checkpoint_reason is not None or controller_complete
+        ):
+            emit_safe_progress(
+                step=step,
+                diagnostic=diagnostic,
+                measurement=(
+                    measurement if measurement is not None else checkpoint_boundary_measurement
+                ),
+                scheduled=scheduled,
+                checkpoint_reason=checkpoint_reason,
+                complete=controller_complete,
+                interruption_requested=interruption_requested,
+                planned_segment_boundary=planned_segment_boundary,
+            )
+        post_progress_stop = poll_stop_request()
+        if post_progress_stop is not None and requested_stop is None:
+            requested_stop = post_progress_stop
+            interruption_requested = True
+            if checkpoint_reason is None:
+                (
+                    checkpoint_reason,
+                    checkpoint_boundary_measurement,
+                    _,
+                ) = publish_controller_checkpoint(requested_reason="signal")
+            emit_safe_progress(
+                step=step,
+                diagnostic=diagnostic,
+                measurement=checkpoint_boundary_measurement,
+                scheduled=False,
+                checkpoint_reason=checkpoint_reason,
+                complete=controller_complete,
+                interruption_requested=True,
+                planned_segment_boundary=False,
+            )
+        if interruption_requested:
+            raise CheckpointInterruption(
+                f"{objective_name} checkpointed after scheduler request {requested_stop!r}"
+            )
+        if planned_segment_boundary:
+            raise PlannedSegmentBoundary(
+                f"{objective_name} exhausted its frozen segment execution slice"
+            )
+        if controller_complete:
             break
 
     if fixed_snapshot is None:
@@ -2877,9 +4798,13 @@ def _run_trainer_to_first_order_convergence(
                 "selected_checkpoint_sha256": selected_checkpoint_sha256,
             }
         )
-    final = audit()
+    final, _ = audited_without_trainer_mutation(context="final first-order audit")
     if protocol is not None and final.audit_dtype != protocol.first_order_audit_dtype:
         raise RuntimeError("recovery final first-order audit did not execute in float64")
+    # A signal received during the potentially long final audit is latched now.
+    # No further optimizer update is permitted; the caller will first publish
+    # the independently validated selected terminal payload, then service it.
+    poll_stop_request()
     final_ratio = _gradient_ratio(
         final.gradient_l2_norm,
         initial.gradient_l2_norm,
@@ -2959,11 +4884,28 @@ def _run_trainer_to_first_order_convergence(
     history = tuple(trainer.history)
     if len(history) != selected_step:
         raise RuntimeError("restored primary history does not match selected step")
+    selected_terminal_checkpoint = _build_selected_primary_terminal_checkpoint(
+        trainer,
+        identity=identity,
+        selected_primary_step=selected_step,
+        controller_updates_executed=controller_updates_executed,
+        initial=initial,
+        final=final,
+        evidence=evidence,
+    )
+    _validated_selected_primary_terminal_checkpoint(
+        selected_terminal_checkpoint,
+        expected_identity=identity,
+    )
+    # Poll once more after terminal serialization so publication begins with a
+    # stable signal decision and no optimizer state transition in between.
+    poll_stop_request()
     return _ConvergedTrainingRun(
         history=history,
         initial=initial,
         final=final,
         evidence=_strict_json_copy(evidence, name="first_order_convergence"),
+        selected_terminal_checkpoint=selected_terminal_checkpoint,
     )
 
 
@@ -3224,14 +5166,14 @@ class _ExactSoftLabelBTTrainer:
         return diagnostic
 
     def state_dict(self) -> dict[str, object]:
-        """Return an in-memory checkpoint used only by the convergence controller."""
+        """Return a weights-only-safe checkpoint for the convergence controller."""
 
         return {
-            "schema_version": "exact-soft-label-bt-checkpoint/v1",
+            "schema_version": "exact-soft-label-bt-checkpoint/v2",
             "model": copy.deepcopy(self.model.state_dict()),
             "optimizer": copy.deepcopy(self.optimizer.state_dict()),
             "completed_steps": self.completed_steps,
-            "history": tuple(self.history),
+            "history": _diagnostic_history_checkpoint(self.history),
         }
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
@@ -3243,7 +5185,7 @@ class _ExactSoftLabelBTTrainer:
             "history",
         }:
             raise ValueError("invalid exact soft-label BT checkpoint keys")
-        if state["schema_version"] != "exact-soft-label-bt-checkpoint/v1":
+        if state["schema_version"] != "exact-soft-label-bt-checkpoint/v2":
             raise ValueError("invalid exact soft-label BT checkpoint schema")
         model_state = state["model"]
         optimizer_state = state["optimizer"]
@@ -3252,17 +5194,15 @@ class _ExactSoftLabelBTTrainer:
         completed_steps = state["completed_steps"]
         if isinstance(completed_steps, bool) or not isinstance(completed_steps, int):
             raise TypeError("exact soft-label BT checkpoint step must be an integer")
-        history = state["history"]
-        if not isinstance(history, tuple) or not all(
-            isinstance(item, TrainingStepDiagnostics) for item in history
-        ):
-            raise TypeError("exact soft-label BT checkpoint history is invalid")
-        if len(history) != completed_steps:
-            raise ValueError("exact soft-label BT checkpoint history does not match its step")
+        history = _diagnostic_history_from_checkpoint(
+            state["history"],
+            completed_steps=completed_steps,
+            name="exact soft-label BT checkpoint history",
+        )
         self.model.load_state_dict(model_state, strict=True)
         self.optimizer.load_state_dict(dict(optimizer_state))
         self.completed_steps = completed_steps
-        self.history = list(history)
+        self.history = history
         if not bool(torch.isfinite(self.model.weight).all()):
             raise FloatingPointError("restored exact soft-label BT head is non-finite")
 
@@ -3742,31 +5682,44 @@ class _DensePseudoinverseProRMTrainer:
 
     def state_dict(self) -> dict[str, object]:
         return {
+            "schema_version": "dense-pseudoinverse-prorm-checkpoint/v2",
             "model": copy.deepcopy(self.model.state_dict()),
             "optimizer": copy.deepcopy(self.optimizer.state_dict()),
             "completed_steps": self.completed_steps,
-            "history": copy.deepcopy(tuple(self.history)),
+            "history": _diagnostic_history_checkpoint(self.history),
         }
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
-        if set(state) != {"model", "optimizer", "completed_steps", "history"}:
+        if set(state) != {
+            "schema_version",
+            "model",
+            "optimizer",
+            "completed_steps",
+            "history",
+        }:
             raise ValueError("invalid low-dimensional trainer checkpoint")
+        if state["schema_version"] != "dense-pseudoinverse-prorm-checkpoint/v2":
+            raise ValueError("invalid low-dimensional trainer checkpoint schema")
         model_state = state["model"]
         optimizer_state = state["optimizer"]
-        history = state["history"]
         completed_steps = state["completed_steps"]
         if not isinstance(model_state, Mapping) or not isinstance(optimizer_state, Mapping):
             raise TypeError("invalid low-dimensional model/optimizer checkpoint")
-        if isinstance(completed_steps, bool) or not isinstance(completed_steps, int):
+        if (
+            isinstance(completed_steps, bool)
+            or not isinstance(completed_steps, int)
+            or completed_steps < 0
+        ):
             raise TypeError("invalid low-dimensional completed_steps")
-        if not isinstance(history, tuple) or len(history) != completed_steps:
-            raise ValueError("invalid low-dimensional history checkpoint")
-        if not all(isinstance(item, TrainingStepDiagnostics) for item in history):
-            raise TypeError("invalid low-dimensional diagnostics checkpoint")
+        history = _diagnostic_history_from_checkpoint(
+            state["history"],
+            completed_steps=completed_steps,
+            name="low-dimensional checkpoint history",
+        )
         self.model.load_state_dict(model_state, strict=True)
         self.optimizer.load_state_dict(dict(optimizer_state))
         self.completed_steps = completed_steps
-        self.history = list(copy.deepcopy(history))
+        self.history = history
 
 
 def _train_low_dimensional_control(

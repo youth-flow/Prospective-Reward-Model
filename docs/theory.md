@@ -80,10 +80,13 @@ $D_{\mathrm{KL}}(\pi_0\Vert\pi_{\theta_0+\delta})$。两者在 `theta_0` 处具�
 Fisher 展开，但在有限步长下不是同一个量。为避免“forward/reverse KL”的命名歧义，本文
 凡涉及有限更新都显式写出两个分布的顺序。
 
-令
+全局定义把 downstream optimizer 本身也视为决策问题的一部分。对所讨论的每个 reward，
+假设下式的 `argmax` 非空，并预先固定一个确定的 selection map
+$\mathsf S(r)\in\arg\max_\theta J(\theta;r)$，其中包括 optimizer initialization 与多解时的
+tie-break。令
 
 $$
-\theta_r\in\arg\max_\theta J(\theta;r)
+\theta_r:=\mathsf S(r)\in\arg\max_\theta J(\theta;r)
 $$
 
 表示把 `r` 交给下游 optimizer 后得到的 policy。reward model 的真实价值不能由它自己的
@@ -105,6 +108,10 @@ $$
 理想问题是 `min_{r in R} Reg_G(r)`。这个定义回答“哪个 reward 会诱导更正确的 policy”，
 而 BT-MLE likelihood 回答“哪个 reward 更能解释 preference observations”。当 reward class
 misspecified 时，两者没有理由选择同一个近似。
+
+若不固定 selection map，候选 reward 的不同最优 policy 可能在 `r*` 下具有不同效用，
+`Reg_G(r)` 就是 set-valued 而不是单个标量。后文的 local Taylor 结论使用趋近 `theta_0`
+的局部解分支；它不自动等同于这里任意远处的 global selection。
 
 ### 1.2 为什么不能直接训练全局目标
 
@@ -231,11 +238,16 @@ $$
 =C(r)+g_r^\top\delta+\frac12\delta^\top H_r\delta+O(\|\delta\|^3),
 $$
 
-不能把 `H_r` 默认为零。若限制在 identifiable tangent space，并假设：
+不能把 `H_r` 默认为零。这里的
+`Reg_{G,local}` 明确比较随 `beta -> infinity` 趋近 `theta_0` 的 local-maximizer
+branches；它不是第 1 节任意 global selection 的无条件展开。先固定
+`r*` 与 `r_phi`。若限制在 identifiable tangent space，并假设：
 
-- `F_0` 在该空间的最小特征值严格为正；
-- reward expectation 与 KL 在 `theta_0` 邻域三阶连续且导数一致有界；
-- downstream solver 选择留在 `O(1/beta)` 邻域内的 local maximizer；
+- `theta_0` 位于该坐标域内部，且 `F_0` 在该空间的最小特征值至少为某个 `kappa>0`；
+- 对 `r in {r*,r_phi}`，reward expectation 与 KL 在 `theta_0` 的同一邻域三阶连续，
+  相应导数与 `g_r` 有共同有限界；
+- 对充分大的 `beta`，相应 stationary branch 存在，downstream solver 选择其中留在
+  `O(1/beta)` 邻域内的 local maximizer；
 
 则在 `beta -> infinity` 时
 
@@ -259,6 +271,10 @@ $$
 常数依赖于 Fisher conditioning、reward/KL derivative bounds 与 moment bounds。若 leading
 term 本身为零，只能使用 absolute `O(beta^-2)` statement，不能声称相对误差趋零。若 optimizer
 跳到远处另一个 mode，上述 local branch 结论不适用。
+
+上述 statement 首先是对固定 `r*`,`r_phi` 的逐点展开。若 `r_phi=r_phi(beta)`，或要对整个
+reward class 作统一 remainder claim，则上面的邻域、`kappa`、三阶导数界、moment 界与
+`O(1/beta)` branch bound 都必须在该序列或函数类上一致成立。
 
 pilot calibration candidate 中 `beta` 与 `K_cal^{-1/2}` 同阶，所以 leading regret 为
 `O(sqrt(K_cal))`，remainder 为 `O(K_cal)`，非退化情形的相对误差为
@@ -377,6 +393,19 @@ $$
 
 ### 3.2 两个精确 pair identities
 
+以下 identity 需要标准 score regularity：对 `rho`-几乎处处的 `x`，`pi_theta(.|x)` 在
+`theta_0` 邻域有不随 `theta` 改变的支持，且允许把参数微分移入归一化积分/求和。另假设
+
+$$
+\mathbb E\|s_0\|_2^2<\infty,\qquad
+\mathbb E[r^2]<\infty.
+$$
+
+于是 score identity 成立，且由 Cauchy--Schwarz 有
+$\mathbb E\|s_0r\|_2<\infty$。使用 repeated-label signal 时还需
+$\mathbb E\|z_0h\|_2<\infty$；第 4.3 节的 bounded-probability、有限二阶矩设计与
+$\mathbb E\|z_0\|_2^2<\infty$ 足以保证这一点。
+
 Score identity 给出
 
 $$
@@ -469,7 +498,9 @@ h
 $$
 
 条件于 `N>=k`，两个 U-statistics 分别无偏估计 `p^k` 与 `(1-p)^k`；`1/q_k` 校正第
-`k` 项被计算的生存概率。因此
+`k` 项被计算的生存概率。对 `p in (0,1)`，正、负两部分的期望级数分别为
+`sum_k p^k/k` 与 `sum_k (1-p)^k/k`，均有限；因此可分别用 Tonelli theorem 交换期望与
+求和，得到
 
 $$
 \boxed{
@@ -480,6 +511,11 @@ $$
 $$
 
 实现只使用 `(S_N,N)` 的组合计数，不枚举 label 子集。
+
+这里以及后文“严格无偏”均指具有所声明、真正无界 support 的理想随机变量 `N`。有限精度
+PRNG 的单次 inverse-CDF 实现只有有限个可表示状态，因此是该 geometric law 的数值实现，
+不是 bit-level 的无限支持分布。这个数值限定不允许人为 hard cap、clip、重采样或丢弃；
+后几种操作会引入可观测的设计性截断，必须继续 fail closed。
 
 ### 4.3 主实验的随机截断常数
 
@@ -496,6 +532,65 @@ $$
 因此 `E[N]=1/(1-gamma)=10`。oracle transform 保证
 `p* in [0.25,0.75]`，并且 `gamma > max(p*,1-p*)`，即 `0.9>0.75`；这满足本实验采用的
 有限二阶矩充分条件。
+
+**引理 4.1（geometric truncation 的矩条件）.**
+固定一条 edge 及其 `p in (0,1)`，令 `q_k=gamma^(k-1)`。若
+
+$$
+\gamma>\max(p,1-p),
+$$
+
+则 $\mathbb E[h^2\mid e]<\infty$。此外，只要
+
+$$
+\frac{p}{\gamma^3}>1
+\quad\text{或}\quad
+\frac{1-p}{\gamma^3}>1,
+$$
+
+就有 $\mathbb E[|h|^4\mid e]=\infty$。
+
+证明：记
+
+$$
+T_k^+
+=\frac{\mathbf 1\{N\ge k\}U^+_{k,N}}{kq_k}.
+$$
+
+由 $0\le U^+_{k,N}\le1$ 和 U-statistic 无偏性，
+
+$$
+\mathbb E[(T_k^+)^2\mid e]
+\le \frac{p^k}{k^2q_k}.
+$$
+
+所以当 $p<\gamma$ 时，
+
+$$
+\sum_{k\ge1}\|T_k^+\|_{L_2}
+\le
+\sqrt{\gamma}\sum_{k\ge1}
+\frac{(p/\gamma)^{k/2}}{k}
+<\infty.
+$$
+
+对 $T_k^-$ 用 $1-p<\gamma$ 得到同样结论；Minkowski inequality 因而给出
+$h=\sum_k(T_k^+-T_k^-)\in L_2$。另一方面，在事件
+$\{N=n,S_N=n\}$ 上，
+
+$$
+h\ge \frac1{n\gamma^{n-1}},
+\qquad
+\Pr(N=n,S_N=n\mid e)=(1-\gamma)\gamma^{n-1}p^n.
+$$
+
+因此四阶矩至少包含常数倍的
+
+$$
+\sum_{n\ge1}\frac{(p/\gamma^3)^n}{n^4},
+$$
+
+当 $p/\gamma^3>1$ 时发散；all-losses 事件给出 $1-p$ 的情形。证毕。
 
 无偏与低方差不是同一件事。对当前 estimator 作高精度条件枚举可得：
 
@@ -672,8 +767,8 @@ $$
 \right\}.
 $$
 
-在 natural `Q_0`、条件 iid repeated labels、reward/score 可积、局部二阶近似和无阻尼 Fisher
-条件下：
+在 natural `Q_0`、条件 iid repeated labels、第 3.2 节的 score regularity 与乘积矩条件、
+$\mathbb E\|z_0h\|_2<\infty$、局部二阶近似和无阻尼 Fisher 条件下：
 
 $$
 \boxed{
@@ -720,8 +815,14 @@ $$
 
 $$
 \lambda
-=c\,\operatorname{mean}(\operatorname{diag}\widehat F_0)>0.
+=c\,\operatorname{mean}(\operatorname{diag}\widehat F_0),
+\qquad
+c>0,\qquad
+\operatorname{mean}(\operatorname{diag}\widehat F_0)>0.
 $$
+
+最后一个条件排除所有 empirical scores 都为零的退化 tangent；若不满足，不能把 `lambda`
+写成严格正数，也不能继续内层 solve，实验必须 fail closed。于是受控路径中 `lambda>0`。
 
 内层唯一解与报告值为
 
@@ -748,12 +849,21 @@ $$
 不得把 empirical ridge objective 称为 population identity 的“精确实现”。
 
 还有一个必须写清楚的对应关系：把
-$H_\lambda=\widehat F_0+\lambda I$ 当作下游局部 optimizer 的 metric 时，
-$\widehat m^\top H_\lambda^{-1}\widehat m/(2\beta)$ 才是该
+$H_\lambda=\widehat F_0+\lambda I$ 当作下游局部 optimizer 的 metric 时，对应的局部
+objective 必须是
+
+$$
+g^\top\delta
+-\frac{\beta}{2}\delta^\top\widehat F_0\delta
+-\frac{\beta\lambda}{2}\|\delta\|_2^2
+=g^\top\delta-\frac{\beta}{2}\delta^\top H_\lambda\delta.
+$$
+
+此时 $\widehat m^\top H_\lambda^{-1}\widehat m/(2\beta)$ 才是该
 **ridge-regularized local optimizer** 的精确 quadratic target。若有限 policy endpoint
 仍只报告
 $\mathbb E[r^*]-\beta D_{\rm KL}(\pi\Vert\pi_0)$、不把
-$\lambda\|\delta\|_2^2/2$ 计入 utility，那么 damped oracle direction 只是一个共同的
+$\beta\lambda\|\delta\|_2^2/2$ 计入 utility，那么 damped oracle direction 只是一个共同的
 算法正控，不是该无 ridge utility 的解析最优解。下一实验因此：
 
 1. 对所有 learner 与 oracle arm 使用完全相同的 $H_\lambda$；
@@ -1213,8 +1323,9 @@ validity; they cannot replace the fixed-global-beta controlled mechanism test.
 
 ## 12. Paper claim boundary
 
-1. Exact equality holds for the population, local, undamped pseudoinverse target. Finite-sample ridge is a
-   regularized surrogate and requires damping sensitivity.
+1. Exact equality holds for the population, local, undamped pseudoinverse target. Its connection to the
+   nonlinear problem is the local-branch expansion of Section 2.3.1, not an arbitrary-global-optimizer
+   theorem. Finite-sample ridge is a regularized surrogate and requires damping sensitivity.
 2. Phase 1 uses a restricted reward class and an operational oracle. It does not establish human utility.
 3. A capacity bottleneck does not prove misspecification. The train-only projection residual is descriptive.
 4. If real annotators violate homogeneous conditionally iid BTL, `h` identifies a different object.

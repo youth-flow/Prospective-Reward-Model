@@ -824,11 +824,26 @@ class ProRMPlusTrainer:
         self.completed_steps = 0
         self.dual_refreshes = 0
         self.dual_direction: torch.Tensor | None = None
+        self._last_pcg_reason: Literal["converged", "zero_rhs", "max_iterations"] | None = None
         self.history: list[TrainingStepDiagnostics] = []
+
+    @property
+    def last_pcg_reason(
+        self,
+    ) -> Literal["converged", "zero_rhs", "max_iterations"] | None:
+        """Return the raw PCG stop reason for the latest successful update.
+
+        The value is transient diagnostic evidence rather than future-update
+        state, so it is intentionally absent from :meth:`state_dict`.  Loading
+        a checkpoint clears it until the resumed trainer completes an update.
+        """
+
+        return self._last_pcg_reason
 
     def step(self) -> TrainingStepDiagnostics:
         """Refresh the full dual direction, detach it, and update exactly once."""
 
+        self._last_pcg_reason = None
         # This no-grad pass is intentionally complete before any outer graph is built.
         margins = _full_margins(self.model, self.batch, self.config.microbatch_size)
         moment, operator, result = _solve_prorm_dual(
@@ -879,6 +894,7 @@ class ProRMPlusTrainer:
         self.optimizer.step()
         _check_updated_model(self.model)
 
+        self._last_pcg_reason = result.reason
         self.completed_steps += 1
         diagnostic = TrainingStepDiagnostics(
             step=self.completed_steps,
@@ -995,6 +1011,7 @@ class ProRMPlusTrainer:
         self.history = common["history"]
         self.dual_refreshes = refreshes
         self.dual_direction = restored_direction
+        self._last_pcg_reason = None
         _validate_model_batch(self.model, self.batch)
 
 

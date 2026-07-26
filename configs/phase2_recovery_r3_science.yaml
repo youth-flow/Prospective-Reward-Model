@@ -1,0 +1,202 @@
+schema_version: phase2-recovery-r3-science-config/v1
+
+campaign:
+  name: phase2-recovery-r3-primary-only
+  campaign_kind: phase2_recovery_revision3_primary_only
+  execution_revision: 3
+  execution_scope: primary_only
+  evidence_role: train_only_nonconfirmatory_recovery
+  confirmatory: false
+  formal_eligibility: false
+  inherited_r2_design: false
+  primary_heads: [bt_mle, prorm_plus]
+
+materialization:
+  source_config_hash: 81ccbd3bc9d745d3792d1834116ba2480d34a7201d6f4e463a61d8d8ab0baefa
+  reuse_scope: immutable_parent_materialization_only
+  reward_or_label_artifact_reuse: false
+  optimizer_state_reuse: false
+
+run:
+  seeds: [20260801, 20260802, 20260803]
+
+annotations:
+  scheme: geometric_randomized_truncation
+  gamma: 0.9
+  independent_replicates_per_edge: 4
+  replicate_reduction: arithmetic_mean
+  prohibit_clipping: true
+  bt_label_use: all_underlying_bernoulli_labels
+  replicate_rng: single_named_generator_sequential_independent_draws_with_preserved_boundaries
+  named_rng_namespace: prorm-common-beta-r4-labels-v1
+  decision_gates:
+    action: fail_closed
+    require_all:
+      - exactly_four_replicate_boundaries
+      - single_generator_initial_final_state_and_draw_count
+      - replicate_tensor_hashes_preserve_boundaries
+      - no_label_clipping
+      - bt_uses_all_raw_bernoulli_labels
+      - prorm_uses_arithmetic_mean_of_four_unclipped_estimators
+
+reward_model:
+  dtype: float32
+  outer_steps: 720
+  refresh_dual_every_steps: 1
+  optimizer: adamw
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  microbatch_size: 64
+  max_grad_norm: 1.0
+  optimizer_protocol:
+    schema_version: deterministic-adamw-lr-decay-recovery/v1
+    one_time_recovery: true
+    scope: every_phase2_first_order_convergence_trainer
+    initialization: exact_zero_head_and_fresh_optimizer_state
+    learning_rate_schedule:
+      update_indexing: one_indexed_inclusive
+      application: set_learning_rate_immediately_before_optimizer_update
+      stages:
+        - {first_update: 1, last_update: 5760, learning_rate: 1.0e-3}
+        - {first_update: 5761, last_update: 6760, learning_rate: 3.0e-4}
+        - {first_update: 6761, last_update: 8760, learning_rate: 1.0e-4}
+        - {first_update: 8761, last_update: 10760, learning_rate: 3.0e-5}
+        - {first_update: 10761, last_update: 12760, learning_rate: 1.0e-5}
+      schedule_sha256: 46e0b0fdc70c507b0325c445068326ba7bc30326d70b65fa33803cc3c876c216
+    legacy_constant_lr_boundary_snapshot_steps: 5760
+    state_transition: preserve_all_adamw_moments_across_learning_rate_boundaries
+    adamw:
+      betas: [0.9, 0.999]
+      eps: 1.0e-8
+      amsgrad: false
+      maximize: false
+      foreach: false
+      fused: false
+      capturable: false
+      differentiable: false
+    reward_head_dtype: float32
+    first_order_audit_dtype: float64
+    microbatch_order: canonical_edge_order_contiguous_ascending_no_shuffle
+    optimizer_state_reset_at_lr_milestone: false
+    one_optimizer_update_per_step: true
+    tie_break: exact_zero_initialized_deterministic_adamw_lr_decay_path
+    validation_or_test_selection: false
+  adaptive_convergence:
+    relative_gradient_ratio_tolerance: 1.0e-3
+    minimum_steps: 100
+    maximum_steps: 12760
+    check_interval_steps: 20
+    consecutive_passing_checks: 3
+    compute_matched_checkpoint_steps: 720
+    gradient_measurement: post_update_full_data_unclipped
+    denominator: exact_zero_initialization_gradient_l2_norm
+    denominator_floor: 1.0e-30
+    prorm_pcg_audit_initialization: cold_start_zero
+    fail_closed: true
+    solution_tie_break: exact_zero_initialized_deterministic_adamw_lr_decay_path
+    unique_solution_claim: false
+    validation_or_test_selection: false
+    primary_heads_required_to_converge: [bt_mle, prorm_plus]
+  identifiability:
+    design_matrix: reward_feature_difference_design_matrix
+    split: train
+    relative_rank_tolerance: 1.0e-10
+    role: pilot_measure_only
+    require_full_column_rank: false
+    algorithmic_tie_break: exact_zero_initialized_deterministic_adamw_lr_decay_path
+    minimum_norm_claim: false
+    confirmatory_freeze_requirement: decide_gate_from_train_only_pilot_then_issue_new_identity
+
+objective:
+  training_beta: 1.0
+  probability_floor: 0.25
+  full_tangent_ridge:
+    enabled: true
+    rule: relative_to_mean_fisher_diagonal
+    relative_coefficient: 0.001
+    sensitivity_multipliers: [0.1, 1.0, 10.0]
+    primary_execution_role: pilot_candidate_primary
+    sensitivity_execution_role: required_separate_pilot_sensitivity
+    sensitivity_executed_separately: true
+    sensitivity_eligible_for_primary_claim: false
+    solver_dtype: float64
+    pcg_tolerance: 1.0e-5
+    pcg_max_iterations: 8192
+  pcg_absolute_tolerance: 0.0
+  pcg_residual_recompute_interval: 20
+  require_pcg_convergence: true
+
+diagnostics:
+  snapshots:
+    - {update: 720, role: compute_matched_diagnostic_only}
+    - {update: 5760, role: legacy_boundary_diagnostic_only}
+  may_select_primary_iterate: false
+  may_change_science_config: false
+
+execution_boundary:
+  execution_scope: train_only
+  policy_rollout_allowed: false
+  validation_or_test_access_allowed: false
+  final_oracle_allowed: false
+  downstream_utility_allowed: false
+  controls_executed_in_primary_run: false
+  profile_evidence_reusable: false
+
+settings_type_contract:
+  role: nonexecuted_phase2_training_settings_compatibility
+  low_dimensional_tangent:
+    enabled: true
+    construction: seeded_orthonormal_projection
+    dimension: 256
+    seed_namespace: prorm-common-beta-low-dimensional-tangent-v1
+    regularization: moore_penrose_pseudoinverse
+    relative_eigenvalue_tolerance: 1.0e-10
+    eligible_for_primary_claim: false
+  exact_soft_label_bt:
+    enabled: true
+    role: noise_free_positive_control_and_secondary_misspecification_diagnostic
+    noise_free: true
+    input: sigmoid_of_train_transformed_oracle_margin
+    eligible_for_primary_claim: false
+  low_dimensional_source_layout_id: training-policy-score-flatten-order/v1
+  max_total_annotations: null
+
+migration_equality:
+  source_path: configs/common_beta_recovery_pilot.yaml
+  source_schema_version: prorm-common-beta-recovery-config/v1
+  mode: explicit_field_equality_only_no_inheritance
+  r2_design_identity_part_of_r3_semantic_identity: false
+  field_pairs:
+    run.seeds: run.seeds
+    campaign.primary_heads: reward_model.adaptive_convergence.primary_heads_required_to_converge
+    campaign.confirmatory: run.confirmatory
+    campaign.formal_eligibility: run.formal_eligibility
+    materialization.source_config_hash: design.source_config_hash
+    annotations.scheme: annotations.scheme
+    annotations.gamma: annotations.gamma
+    annotations.independent_replicates_per_edge: annotations.independent_replicates_per_edge
+    annotations.replicate_reduction: annotations.replicate_reduction
+    annotations.prohibit_clipping: annotations.prohibit_clipping
+    annotations.bt_label_use: annotations.bt_label_use
+    annotations.replicate_rng: annotations.replicate_rng
+    annotations.decision_gates: annotations.decision_gates
+    reward_model.dtype: reward_model.dtype
+    reward_model.outer_steps: reward_model.outer_steps
+    reward_model.refresh_dual_every_steps: reward_model.refresh_dual_every_steps
+    reward_model.optimizer: reward_model.optimizer
+    reward_model.learning_rate: reward_model.learning_rate
+    reward_model.weight_decay: reward_model.weight_decay
+    reward_model.microbatch_size: reward_model.microbatch_size
+    reward_model.max_grad_norm: reward_model.max_grad_norm
+    reward_model.optimizer_protocol: reward_model.optimizer_protocol
+    reward_model.adaptive_convergence: reward_model.adaptive_convergence
+    reward_model.identifiability: reward_model.identifiability
+    objective.probability_floor: oracle.probability_floor
+    objective.full_tangent_ridge: objective.full_tangent.ridge
+    execution_boundary.execution_scope: recovery_control.execution_scope
+    execution_boundary.policy_rollout_allowed: recovery_control.policy_rollout_allowed
+    execution_boundary.validation_or_test_access_allowed: recovery_control.validation_or_test_access_allowed
+    execution_boundary.final_oracle_allowed: recovery_control.final_oracle_allowed
+    execution_boundary.downstream_utility_allowed: recovery_control.downstream_utility_allowed
+    settings_type_contract.low_dimensional_tangent: positive_controls.low_dimensional_tangent
+    settings_type_contract.exact_soft_label_bt: positive_controls.exact_soft_label_bt

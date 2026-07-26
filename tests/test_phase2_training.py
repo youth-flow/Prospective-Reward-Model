@@ -4,6 +4,7 @@ import copy
 import inspect
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,11 @@ import smart_reward.phase2_training as phase2_training
 from smart_reward.config import load_config
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.experiment import TrainingTensorData
+from smart_reward.phase2_checkpoint import (
+    CheckpointSignal,
+    DurableCheckpointStore,
+    PlannedSegmentBoundary,
+)
 from smart_reward.phase2_config import (
     PHASE2_BUDGETED_END_TO_END_SEEDS,
     PHASE2_BUDGETED_END_TO_END_STAGE,
@@ -26,8 +32,10 @@ from smart_reward.phase2_config import (
     load_phase2_config_bundle,
 )
 from smart_reward.phase2_controls import (
+    TangentCoordinateLayout,
     build_exact_margin_canonical_arm,
     sample_canonical_r4_noisy_arm,
+    select_seeded_orthonormal_tangent,
 )
 from smart_reward.phase2_rollout import Phase2HeadTrainingResult
 from smart_reward.phase2_training import (
@@ -473,6 +481,38 @@ def test_primary_training_is_fresh_r4_and_runner_compatible(trained_result) -> N
     assert adapted.training_design_sha256 == result.training_design_sha256
     assert adapted.training_arm == PRIMARY_TRAINING_ARM
     assert adapted.test_data_accessed is False
+
+
+def test_trained_head_evidence_binds_weight_dtype_and_zero_initialization(
+    trained_result,
+) -> None:
+    _, _, result = trained_result
+    head = result.bt_mle
+
+    # Re-running construction through dataclasses.replace exercises __post_init__
+    # and proves that the unmodified generation path is self-consistent.
+    assert replace(head) == head
+
+    altered_weight = (head.head_weight[0] + 1.0, *head.head_weight[1:])
+    with pytest.raises(ValueError, match="head_sha256 does not match"):
+        replace(head, head_weight=altered_weight)
+
+    altered_dtype = "torch.float64" if head.head_dtype == "torch.float32" else "torch.float32"
+    with pytest.raises(ValueError, match="head_sha256 does not match"):
+        replace(head, head_dtype=altered_dtype)
+
+    changed_head_sha = ("0" if head.head_sha256[0] != "0" else "1") + head.head_sha256[1:]
+    with pytest.raises(ValueError, match="head_sha256 does not match"):
+        replace(head, head_sha256=changed_head_sha)
+
+    changed_initial_sha = (
+        "0" if head.initial_head_sha256[0] != "0" else "1"
+    ) + head.initial_head_sha256[1:]
+    with pytest.raises(ValueError, match="initial_head_sha256 does not match"):
+        replace(head, initial_head_sha256=changed_initial_sha)
+
+    with pytest.raises(ValueError, match="head_dtype must be exactly"):
+        replace(head, head_dtype="torch.float16")
 
 
 def test_named_label_stream_records_rng_hash_routing_and_cost(trained_result) -> None:
@@ -925,6 +965,117 @@ def test_low_dimensional_positive_control_is_fresh_ridge_free_and_deployable(
     assert convergence["fixed_step_compute_matched_snapshot"]["history_summary"]["num_steps"] == 720
 
 
+def test_exact_soft_bt_real_trainer_weights_only_disk_continuation(
+    tmp_path: Path,
+    toy_settings: Phase2TrainingSettings,
+) -> None:
+    exact_training = build_exact_margin_canonical_arm(
+        _training(),
+        _oracle_rewards(_training()),
+    ).training
+    batch = phase2_training._ExactSoftLabelBTBatch.from_exact_margin_training(exact_training)
+    source = phase2_training._ExactSoftLabelBTTrainer(
+        phase2_training._zero_model(exact_training),
+        batch,
+        phase2_training._bt_config(toy_settings),
+    )
+    source.step()
+    checkpoint_state = source.state_dict()
+    assert isinstance(checkpoint_state["history"], list)
+    assert isinstance(checkpoint_state["history"][0], dict)
+
+    store = DurableCheckpointStore(
+        tmp_path,
+        objective="exact_soft_bt",
+        binding={"schema_version": "test-real-trainer-binding/v1", "seed": 20260801},
+    )
+    store.save(
+        {"trainer_state": checkpoint_state},
+        completed_steps=1,
+        reason="interval",
+    )
+    loaded = store.load()
+    assert loaded is not None
+    resumed = phase2_training._ExactSoftLabelBTTrainer(
+        phase2_training._zero_model(exact_training),
+        batch,
+        phase2_training._bt_config(toy_settings),
+    )
+    resumed.load_state_dict(loaded["trainer_state"])
+    store.restore_pending_rng_state()
+
+    assert phase2_training._checkpoint_value_sha256(resumed.state_dict()) == (
+        phase2_training._checkpoint_value_sha256(checkpoint_state)
+    )
+    assert resumed.step() == source.step()
+    assert phase2_training._checkpoint_value_sha256(resumed.state_dict()) == (
+        phase2_training._checkpoint_value_sha256(source.state_dict())
+    )
+
+
+def test_dense_prorm_real_trainer_weights_only_disk_continuation(
+    tmp_path: Path,
+    toy_settings: Phase2TrainingSettings,
+) -> None:
+    training = build_exact_margin_canonical_arm(
+        _training(),
+        _oracle_rewards(_training()),
+    ).training
+    projection = select_seeded_orthonormal_tangent(
+        training,
+        selected_dimension=toy_settings.low_dimensional_selected_dimension,
+        coordinate_layout=TangentCoordinateLayout(
+            layout_id=toy_settings.low_dimensional_source_layout_id,
+            coordinate_ids=tuple(range(training.policy_dimension)),
+        ),
+        seed=20260801,
+        namespace=toy_settings.low_dimensional_namespace,
+    )
+    batch, geometry = phase2_training._build_dense_pseudoinverse_geometry(
+        projection.training,
+        toy_settings,
+    )
+    source = phase2_training._DensePseudoinverseProRMTrainer(
+        phase2_training._zero_model(projection.training),
+        batch,
+        geometry,
+        toy_settings,
+    )
+    source.step()
+    checkpoint_state = source.state_dict()
+    assert isinstance(checkpoint_state["history"], list)
+    assert isinstance(checkpoint_state["history"][0], dict)
+
+    store = DurableCheckpointStore(
+        tmp_path,
+        objective="dense_prorm",
+        binding={"schema_version": "test-real-trainer-binding/v1", "seed": 20260801},
+    )
+    store.save(
+        {"trainer_state": checkpoint_state},
+        completed_steps=1,
+        reason="interval",
+    )
+    loaded = store.load()
+    assert loaded is not None
+    resumed = phase2_training._DensePseudoinverseProRMTrainer(
+        phase2_training._zero_model(projection.training),
+        batch,
+        geometry,
+        toy_settings,
+    )
+    resumed.load_state_dict(loaded["trainer_state"])
+    store.restore_pending_rng_state()
+
+    assert phase2_training._checkpoint_value_sha256(resumed.state_dict()) == (
+        phase2_training._checkpoint_value_sha256(checkpoint_state)
+    )
+    assert resumed.step() == source.step()
+    assert phase2_training._checkpoint_value_sha256(resumed.state_dict()) == (
+        phase2_training._checkpoint_value_sha256(source.state_dict())
+    )
+
+
 def test_real_low_dimensional_training_path_emits_aggregate_valid_projected_rank(
     trained_result,
     config_bundle,
@@ -1232,6 +1383,15 @@ class _FakeFirstOrderTrainer:
         self.history = list(state["history"])
 
 
+class _FakeCorruptRestoreTrainer(_FakeFirstOrderTrainer):
+    """Failure injection: claim the right step while restoring the wrong head."""
+
+    def load_state_dict(self, state):
+        super().load_state_dict(state)
+        with torch.no_grad():
+            self.model.weight.add_(1.0)
+
+
 class _RecoveryFirstOrderTrainer:
     """One-parameter trainer whose recorded LR exposes controller ordering."""
 
@@ -1381,6 +1541,445 @@ def test_first_order_controller_early_stops_restores_and_keeps_snapshot() -> Non
     assert snapshot["used_as_primary_selection_rule"] is False
 
 
+def _small_checkpointable_controller_spec() -> FirstOrderConvergenceSpec:
+    return FirstOrderConvergenceSpec(
+        gradient_ratio_tolerance=0.1,
+        min_steps=1,
+        max_steps=4,
+        check_interval=1,
+        consecutive_checks=2,
+    )
+
+
+def _fake_checkpoint_audit(
+    trainer: _FakeFirstOrderTrainer,
+) -> phase2_training._FirstOrderMeasurement:
+    gradients = {0: 10.0, 1: 3.0, 2: 1.0, 3: 0.5, 4: 0.25}
+    return phase2_training._FirstOrderMeasurement(
+        objective=float(10 - trainer.completed_steps),
+        gradient_l2_norm=gradients[trainer.completed_steps],
+    )
+
+
+def test_first_order_controller_resume_matches_uninterrupted_fake_trainer() -> None:
+    direct_trainer = _FakeFirstOrderTrainer()
+    checkpoints: list[tuple[Mapping[str, object], str]] = []
+
+    def save_checkpoint(state, *, reason):
+        checkpoints.append((copy.deepcopy(state), reason))
+
+    direct = phase2_training._run_trainer_to_first_order_convergence(
+        direct_trainer,
+        audit=lambda: _fake_checkpoint_audit(direct_trainer),
+        spec=_small_checkpointable_controller_spec(),
+        fixed_snapshot_steps=4,
+        objective_name="fake_checkpointable_objective",
+        checkpoint_hook=save_checkpoint,
+        checkpoint_interval_steps=2,
+    )
+    assert [reason for _, reason in checkpoints] == ["interval", "interval"]
+    assert checkpoints[0][0]["controller_state"]["completed_steps"] == 2
+
+    for checkpoint, _ in checkpoints:
+        resumed_trainer = _FakeFirstOrderTrainer()
+        resumed = phase2_training._run_trainer_to_first_order_convergence(
+            resumed_trainer,
+            audit=lambda trainer=resumed_trainer: _fake_checkpoint_audit(trainer),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="fake_checkpointable_objective",
+            resume_state=checkpoint,
+        )
+
+        assert resumed.evidence == direct.evidence
+        assert phase2_training._checkpoint_value_sha256(resumed_trainer.state_dict()) == (
+            phase2_training._checkpoint_value_sha256(direct_trainer.state_dict())
+        )
+
+
+def test_after_resume_callback_runs_after_state_restore_before_audit_or_update() -> None:
+    source = _FakeFirstOrderTrainer()
+    checkpoints: list[Mapping[str, object]] = []
+
+    def save_checkpoint(state, *, reason):
+        if reason == "interval":
+            checkpoints.append(copy.deepcopy(state))
+
+    phase2_training._run_trainer_to_first_order_convergence(
+        source,
+        audit=lambda: _fake_checkpoint_audit(source),
+        spec=_small_checkpointable_controller_spec(),
+        fixed_snapshot_steps=4,
+        objective_name="resume_callback_ordering",
+        checkpoint_hook=save_checkpoint,
+        checkpoint_interval_steps=2,
+    )
+
+    resumed = _FakeFirstOrderTrainer()
+    events: list[str] = []
+    original_step = resumed.step
+
+    def guarded_step():
+        if "step" not in events:
+            assert events == ["callback", "audit"]
+        events.append("step")
+        return original_step()
+
+    resumed.step = guarded_step
+
+    def after_restore():
+        assert resumed.completed_steps == 2
+        assert float(resumed.model.weight.item()) == 2.0
+        assert len(resumed.history) == 2
+        events.append("callback")
+
+    def audit():
+        events.append("audit")
+        return _fake_checkpoint_audit(resumed)
+
+    phase2_training._run_trainer_to_first_order_convergence(
+        resumed,
+        audit=audit,
+        spec=_small_checkpointable_controller_spec(),
+        fixed_snapshot_steps=4,
+        objective_name="resume_callback_ordering",
+        resume_state=checkpoints[0],
+        after_resume_state_restored=after_restore,
+    )
+
+    assert events[:3] == ["callback", "audit", "step"]
+    assert events.count("callback") == 1
+
+
+def test_first_order_controller_rejects_identity_and_state_tampering() -> None:
+    trainer = _FakeFirstOrderTrainer()
+    checkpoints: list[Mapping[str, object]] = []
+
+    def save_checkpoint(state, *, reason):
+        assert reason == "interval"
+        checkpoints.append(copy.deepcopy(state))
+
+    phase2_training._run_trainer_to_first_order_convergence(
+        trainer,
+        audit=lambda: _fake_checkpoint_audit(trainer),
+        spec=_small_checkpointable_controller_spec(),
+        fixed_snapshot_steps=4,
+        objective_name="tamper_checked_objective",
+        checkpoint_hook=save_checkpoint,
+        checkpoint_interval_steps=2,
+        execution_role="phase2_recovery_r3_profile_nonreusable",
+    )
+    checkpoint = checkpoints[0]
+
+    with pytest.raises(ValueError, match="execution_role must be one of"):
+        fresh = _FakeFirstOrderTrainer()
+        phase2_training._run_trainer_to_first_order_convergence(
+            fresh,
+            audit=lambda: _fake_checkpoint_audit(fresh),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            execution_role="arbitrary_unregistered_role",
+        )
+
+    with pytest.raises(ValueError, match="identity mismatch"):
+        fresh = _FakeFirstOrderTrainer()
+        phase2_training._run_trainer_to_first_order_convergence(
+            fresh,
+            audit=lambda: _fake_checkpoint_audit(fresh),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            resume_state=checkpoint,
+            execution_role="phase2_recovery_r3_primary",
+        )
+
+    identity_tampered = copy.deepcopy(checkpoint)
+    identity_tampered["identity"]["objective"] = "different_objective"
+    with pytest.raises(ValueError, match="identity mismatch"):
+        fresh = _FakeFirstOrderTrainer()
+        phase2_training._run_trainer_to_first_order_convergence(
+            fresh,
+            audit=lambda: _fake_checkpoint_audit(fresh),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            resume_state=identity_tampered,
+            execution_role="phase2_recovery_r3_profile_nonreusable",
+        )
+
+    state_tampered = copy.deepcopy(checkpoint)
+    with torch.no_grad():
+        state_tampered["trainer_state"]["weight"].add_(1.0)
+    with pytest.raises(ValueError, match="state hash mismatch"):
+        fresh = _FakeFirstOrderTrainer()
+        phase2_training._run_trainer_to_first_order_convergence(
+            fresh,
+            audit=lambda: _fake_checkpoint_audit(fresh),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            resume_state=state_tampered,
+            execution_role="phase2_recovery_r3_profile_nonreusable",
+        )
+
+    semantic_tampered = copy.deepcopy(checkpoint)
+    semantic_tampered["controller_state"]["checks"].pop()
+    semantic_tampered["controller_state"]["consecutive_passes"] = 0
+    semantic_tampered["checkpoint_sha256"] = phase2_training._checkpoint_value_sha256(
+        {key: value for key, value in semantic_tampered.items() if key != "checkpoint_sha256"}
+    )
+    with pytest.raises(ValueError, match="every required scheduled step"):
+        fresh = _FakeFirstOrderTrainer()
+        phase2_training._run_trainer_to_first_order_convergence(
+            fresh,
+            audit=lambda: _fake_checkpoint_audit(fresh),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            resume_state=semantic_tampered,
+            execution_role="phase2_recovery_r3_profile_nonreusable",
+        )
+
+    boundary_tampered = copy.deepcopy(checkpoint)
+    boundary_tampered["controller_state"]["checkpoint_boundary_measurement"]["gradient_l2_norm"] = (
+        0.9
+    )
+    boundary_tampered["checkpoint_sha256"] = phase2_training._checkpoint_value_sha256(
+        {key: value for key, value in boundary_tampered.items() if key != "checkpoint_sha256"}
+    )
+    before_step = _FakeFirstOrderTrainer()
+    with pytest.raises(RuntimeError, match="safe-boundary audit differs"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            before_step,
+            audit=lambda: _fake_checkpoint_audit(before_step),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            resume_state=boundary_tampered,
+            execution_role="phase2_recovery_r3_profile_nonreusable",
+        )
+    assert before_step.completed_steps == 2
+
+    callback_mutated = _FakeFirstOrderTrainer()
+
+    def mutate_after_restore() -> None:
+        with torch.no_grad():
+            callback_mutated.model.weight.add_(1.0)
+
+    with pytest.raises(RuntimeError, match="callback mutated"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            callback_mutated,
+            audit=lambda: _fake_checkpoint_audit(callback_mutated),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            resume_state=checkpoint,
+            after_resume_state_restored=mutate_after_restore,
+            execution_role="phase2_recovery_r3_profile_nonreusable",
+        )
+    assert callback_mutated.completed_steps == 2
+
+    corrupt_restore = _FakeCorruptRestoreTrainer()
+    with pytest.raises(RuntimeError, match="live trainer state differs"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            corrupt_restore,
+            audit=lambda: _fake_checkpoint_audit(corrupt_restore),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="tamper_checked_objective",
+            resume_state=checkpoint,
+            execution_role="phase2_recovery_r3_profile_nonreusable",
+        )
+
+
+def test_first_order_controller_signal_checkpoints_after_complete_bookkeeping() -> None:
+    trainer = _FakeFirstOrderTrainer()
+    observed: list[tuple[Mapping[str, object], str]] = []
+
+    def save_checkpoint(state, *, reason):
+        observed.append((copy.deepcopy(state), reason))
+
+    with pytest.raises(phase2_training.CheckpointInterruption, match="SIGUSR1"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=lambda: _fake_checkpoint_audit(trainer),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="signal_checkpointable_objective",
+            checkpoint_hook=save_checkpoint,
+            stop_requested=lambda: "SIGUSR1" if trainer.completed_steps == 2 else None,
+        )
+
+    assert trainer.completed_steps == 2
+    assert len(observed) == 1
+    checkpoint, reason = observed[0]
+    assert reason == "signal"
+    controller = checkpoint["controller_state"]
+    assert controller["completed_steps"] == 2
+    assert controller["checks"][-1]["step"] == 2
+    assert controller["consecutive_passes"] == 1
+    assert checkpoint["trainer_state"]["completed_steps"] == 2
+    assert len(checkpoint["trainer_state"]["history"]) == 2
+
+    resumed_trainer = _FakeFirstOrderTrainer()
+    resumed = phase2_training._run_trainer_to_first_order_convergence(
+        resumed_trainer,
+        audit=lambda: _fake_checkpoint_audit(resumed_trainer),
+        spec=_small_checkpointable_controller_spec(),
+        fixed_snapshot_steps=4,
+        objective_name="signal_checkpointable_objective",
+        resume_state=checkpoint,
+    )
+    assert resumed.evidence["selected_primary_step"] == 3
+    assert resumed_trainer.completed_steps == 3
+
+
+def test_first_order_controller_pre_poll_prevents_the_next_update() -> None:
+    trainer = _FakeFirstOrderTrainer()
+    signal = CheckpointSignal()
+    signal._handle(15, None)
+    observed: list[tuple[Mapping[str, object], str]] = []
+
+    with pytest.raises(phase2_training.CheckpointInterruption):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=lambda: _fake_checkpoint_audit(trainer),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="pre_update_signal",
+            checkpoint_hook=lambda state, *, reason: observed.append(
+                (copy.deepcopy(state), reason)
+            ),
+            stop_requested=lambda: signal.signal_name if signal.requested else None,
+            begin_update=signal.begin_update,
+            end_update=signal.end_update,
+        )
+
+    assert trainer.completed_steps == 0
+    assert signal.received_in_flight_update is None
+    assert signal.active_update is None
+    assert len(observed) == 1
+    assert observed[0][0]["controller_state"]["completed_steps"] == 0
+    assert observed[0][1] == "signal"
+
+
+def test_first_order_controller_completes_and_attributes_in_flight_update() -> None:
+    trainer = _FakeFirstOrderTrainer()
+    signal = CheckpointSignal()
+    original_step = trainer.step
+    observed: list[tuple[Mapping[str, object], str]] = []
+
+    def signalled_step():
+        signal._handle(15, None)
+        return original_step()
+
+    trainer.step = signalled_step  # type: ignore[method-assign]
+    with pytest.raises(phase2_training.CheckpointInterruption):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=lambda: _fake_checkpoint_audit(trainer),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="in_flight_signal",
+            checkpoint_hook=lambda state, *, reason: observed.append(
+                (copy.deepcopy(state), reason)
+            ),
+            stop_requested=lambda: signal.signal_name if signal.requested else None,
+            begin_update=signal.begin_update,
+            end_update=signal.end_update,
+        )
+
+    assert trainer.completed_steps == 1
+    assert signal.received_in_flight_update == 1
+    assert signal.active_update is None
+    assert len(observed) == 1
+    assert observed[0][0]["controller_state"]["completed_steps"] == 1
+    assert observed[0][1] == "signal"
+
+
+def test_first_order_controller_post_commit_poll_reuses_committed_generation() -> None:
+    trainer = _FakeFirstOrderTrainer()
+    signal = CheckpointSignal()
+    observed: list[tuple[Mapping[str, object], str]] = []
+
+    def save_then_signal(state, *, reason):
+        observed.append((copy.deepcopy(state), reason))
+        signal._handle(15, None)
+
+    with pytest.raises(phase2_training.CheckpointInterruption):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=lambda: _fake_checkpoint_audit(trainer),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="post_commit_signal",
+            checkpoint_hook=save_then_signal,
+            checkpoint_interval_steps=1,
+            stop_requested=lambda: signal.signal_name if signal.requested else None,
+            begin_update=signal.begin_update,
+            end_update=signal.end_update,
+        )
+
+    assert trainer.completed_steps == 1
+    assert signal.received_in_flight_update is None
+    assert len(observed) == 1
+    assert observed[0][0]["controller_state"]["completed_steps"] == 1
+    # The signal arrived after this generation committed; its later receipt,
+    # rather than a fabricated save reason, binds the same safe generation.
+    assert observed[0][1] == "interval"
+
+
+def test_first_order_controller_frozen_slice_cap_is_a_planned_boundary() -> None:
+    trainer = _FakeFirstOrderTrainer()
+    observed: list[tuple[Mapping[str, object], str]] = []
+    progress: list[Mapping[str, object]] = []
+
+    with pytest.raises(PlannedSegmentBoundary):
+        phase2_training._run_trainer_to_first_order_convergence(
+            trainer,
+            audit=lambda: _fake_checkpoint_audit(trainer),
+            spec=_small_checkpointable_controller_spec(),
+            fixed_snapshot_steps=4,
+            objective_name="planned_segment_boundary",
+            checkpoint_hook=lambda state, *, reason: observed.append(
+                (copy.deepcopy(state), reason)
+            ),
+            execution_step_cap=2,
+            progress_hook=lambda event: progress.append(dict(event)),
+        )
+
+    assert trainer.completed_steps == 2
+    assert len(observed) == 1
+    assert observed[0][1] == "stage_boundary"
+    assert observed[0][0]["controller_state"]["completed_steps"] == 2
+    assert progress[-1]["planned_segment_boundary"] is True
+    assert progress[-1]["next_update"] == 3
+
+
+def test_selected_terminal_checkpoint_separates_selection_and_execution_counts() -> None:
+    trainer = _FakeFirstOrderTrainer()
+    observed = phase2_training._run_trainer_to_first_order_convergence(
+        trainer,
+        audit=lambda: _fake_checkpoint_audit(trainer),
+        spec=_small_checkpointable_controller_spec(),
+        fixed_snapshot_steps=4,
+        objective_name="selected_terminal_counts",
+    )
+
+    terminal = observed.selected_terminal_checkpoint
+    assert terminal is not None
+    assert terminal["selected_primary_step"] == 3
+    assert terminal["controller_updates_executed"] == 4
+    assert terminal["trainer_state"]["completed_steps"] == 3
+    assert trainer.completed_steps == 3
+    validated = phase2_training._validated_selected_primary_terminal_checkpoint(
+        terminal,
+        expected_identity=terminal["identity"],
+    )
+    assert validated["terminal_checkpoint_sha256"] == terminal["terminal_checkpoint_sha256"]
+
+
 def test_first_order_controller_fails_closed_with_complete_evidence() -> None:
     trainer = _FakeFirstOrderTrainer()
 
@@ -1518,6 +2117,157 @@ def test_recovery_controller_sets_lr_before_update_preserves_moments_and_snapsho
     assert group["maximize"] is False
     assert group["foreach"] is False
     assert group["fused"] is False
+
+
+def test_recovery_controller_resume_replays_state_checks_exactly() -> None:
+    protocol = _recovery_optimizer_protocol()
+    spec = FirstOrderConvergenceSpec(
+        gradient_ratio_tolerance=1.0e-3,
+        min_steps=100,
+        max_steps=12760,
+        check_interval=20,
+        consecutive_checks=3,
+        optimizer_protocol=protocol,
+    )
+
+    def run_audit(trainer):
+        gradient = (
+            10.0
+            if trainer.completed_steps == 0
+            else (1.0 if trainer.completed_steps <= 6760 else 0.005)
+        )
+        return phase2_training._FirstOrderMeasurement(
+            objective=1.0,
+            gradient_l2_norm=gradient,
+            audit_dtype="float64",
+        )
+
+    uninterrupted_trainer = _RecoveryFirstOrderTrainer()
+    uninterrupted = phase2_training._run_trainer_to_first_order_convergence(
+        uninterrupted_trainer,
+        audit=lambda: run_audit(uninterrupted_trainer),
+        spec=spec,
+        fixed_snapshot_steps=720,
+        objective_name="recovery_resume_equivalence",
+    )
+
+    interrupted_trainer = _RecoveryFirstOrderTrainer()
+    checkpoints: list[Mapping[str, object]] = []
+
+    def save_checkpoint(state, *, reason):
+        assert reason == "signal"
+        checkpoints.append(copy.deepcopy(state))
+
+    with pytest.raises(phase2_training.CheckpointInterruption):
+        phase2_training._run_trainer_to_first_order_convergence(
+            interrupted_trainer,
+            audit=lambda: run_audit(interrupted_trainer),
+            spec=spec,
+            fixed_snapshot_steps=720,
+            objective_name="recovery_resume_equivalence",
+            checkpoint_hook=save_checkpoint,
+            stop_requested=lambda: "SIGUSR1" if interrupted_trainer.completed_steps == 40 else None,
+        )
+    assert len(checkpoints) == 1
+    checkpoint = checkpoints[0]
+    controller = checkpoint["controller_state"]
+    transcript = controller["recovery_state_check_transcript"]
+    assert controller["completed_steps"] == 40
+    assert len(transcript) == 80
+    assert transcript[0]["phase"] == "before_update"
+    assert transcript[-1]["phase"] == "after_update"
+    assert transcript[-1]["update"] == 40
+
+    resumed_trainer = _RecoveryFirstOrderTrainer()
+    resumed = phase2_training._run_trainer_to_first_order_convergence(
+        resumed_trainer,
+        audit=lambda: run_audit(resumed_trainer),
+        spec=spec,
+        fixed_snapshot_steps=720,
+        objective_name="recovery_resume_equivalence",
+        resume_state=checkpoint,
+    )
+
+    assert resumed.evidence == uninterrupted.evidence
+    assert resumed_trainer.completed_steps == uninterrupted_trainer.completed_steps == 6820
+    assert phase2_training._checkpoint_value_sha256(resumed_trainer.state_dict()) == (
+        phase2_training._checkpoint_value_sha256(uninterrupted_trainer.state_dict())
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "expected_completed_updates",
+        "scalar_step",
+        "moment_descriptor",
+        "learning_rate",
+        "summary",
+    ],
+)
+def test_recovery_controller_rejects_rehashed_semantic_transcript_tampering(
+    mutation: str,
+) -> None:
+    protocol = _recovery_optimizer_protocol()
+    spec = FirstOrderConvergenceSpec(
+        gradient_ratio_tolerance=1.0e-3,
+        min_steps=100,
+        max_steps=12760,
+        check_interval=20,
+        consecutive_checks=3,
+        optimizer_protocol=protocol,
+    )
+    source = _RecoveryFirstOrderTrainer()
+    checkpoints: list[Mapping[str, object]] = []
+
+    with pytest.raises(phase2_training.CheckpointInterruption):
+        phase2_training._run_trainer_to_first_order_convergence(
+            source,
+            audit=lambda: phase2_training._FirstOrderMeasurement(
+                objective=1.0,
+                gradient_l2_norm=1.0,
+                audit_dtype="float64",
+            ),
+            spec=spec,
+            fixed_snapshot_steps=720,
+            objective_name="semantic_transcript_tampering",
+            checkpoint_hook=lambda state, *, reason: checkpoints.append(copy.deepcopy(state)),
+            stop_requested=lambda: "SIGUSR1" if source.completed_steps == 2 else None,
+        )
+    tampered = copy.deepcopy(checkpoints[0])
+    controller = tampered["controller_state"]
+    after_first = controller["recovery_state_check_transcript"][1]["observation"]
+    if mutation == "expected_completed_updates":
+        after_first["expected_completed_updates"] = 999
+    elif mutation == "scalar_step":
+        after_first["scalar_step"]["value"] = 999
+    elif mutation == "moment_descriptor":
+        after_first["exp_avg"]["dtype"] = "torch.float64"
+    elif mutation == "learning_rate":
+        after_first["parameter_group"]["learning_rate"] = 0.5
+    elif mutation == "summary":
+        controller["optimizer_protocol_execution"]["per_update_state_checks"][
+            "after_update_checks"
+        ] = 999
+    tampered["checkpoint_sha256"] = phase2_training._checkpoint_value_sha256(
+        {key: value for key, value in tampered.items() if key != "checkpoint_sha256"}
+    )
+    resumed = _RecoveryFirstOrderTrainer()
+
+    with pytest.raises(ValueError, match="recovery"):
+        phase2_training._run_trainer_to_first_order_convergence(
+            resumed,
+            audit=lambda: phase2_training._FirstOrderMeasurement(
+                objective=1.0,
+                gradient_l2_norm=1.0,
+                audit_dtype="float64",
+            ),
+            spec=spec,
+            fixed_snapshot_steps=720,
+            objective_name="semantic_transcript_tampering",
+            resume_state=tampered,
+        )
+    assert resumed.completed_steps == 0
 
 
 def test_recovery_controller_rejects_hidden_double_optimizer_step() -> None:
