@@ -992,6 +992,8 @@ def test_later_segment_cannot_be_admitted_without_continuation_capability() -> N
 def test_segment_outcome_cannot_be_caller_constructed(tmp_path: Path) -> None:
     artifact = tmp_path / "outcome.json"
     artifact.write_text("{}\n", encoding="utf-8")
+    if os.name == "posix":
+        artifact.chmod(0o440)
     with pytest.raises(TypeError, match="durable evidence"):
         orchestrator.R3PrimarySegmentOutcome(
             status="compute_complete_pending_external_scheduler_terminal",
@@ -1007,6 +1009,8 @@ def test_segment_outcome_seal_is_not_inherited_by_dataclass_replace(
 ) -> None:
     artifact = tmp_path / "outcome.json"
     artifact.write_text("{}\n", encoding="utf-8")
+    if os.name == "posix":
+        artifact.chmod(0o440)
     outcome = orchestrator.R3PrimarySegmentOutcome(
         status="compute_complete_pending_external_scheduler_terminal",
         outcome_sha256="a" * 64,
