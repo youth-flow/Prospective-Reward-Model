@@ -330,6 +330,10 @@ def _publish_exclusive(path: Path, raw: bytes) -> None:
             if written <= 0:
                 raise OSError("short write while publishing raw sacct evidence")
             view = view[written:]
+        if os.name == "posix":
+            # Submitters run under umask 077, but terminal evidence has a
+            # fixed group-readable 0440 contract.
+            os.fchmod(descriptor, 0o440)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)

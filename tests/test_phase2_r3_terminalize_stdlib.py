@@ -166,13 +166,18 @@ def test_raw_capture_is_no_overwrite_and_exactly_reentrant(
         return subprocess.CompletedProcess(command, 0, row, b"")
 
     monkeypatch.setattr(terminalize, "_run_command", run)
-    first = terminalize.capture_raw_sacct(
-        job_selector="123_0",
-        output=output,
-        user="yyangjo",
-        attempts=1,
-        interval_seconds=0,
-    )
+    previous_umask = os.umask(0o077) if os.name == "posix" else None
+    try:
+        first = terminalize.capture_raw_sacct(
+            job_selector="123_0",
+            output=output,
+            user="yyangjo",
+            attempts=1,
+            interval_seconds=0,
+        )
+    finally:
+        if previous_umask is not None:
+            os.umask(previous_umask)
     assert first["reused"] is False
     assert output.read_bytes() == row
     second = terminalize.capture_raw_sacct(

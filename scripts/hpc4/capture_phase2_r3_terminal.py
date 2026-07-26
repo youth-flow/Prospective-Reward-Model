@@ -45,6 +45,8 @@ def _publish_exclusive(path: Path, raw: bytes) -> str:
             if written <= 0:
                 raise OSError("short write while publishing raw sacct evidence")
             view = view[written:]
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o440)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)

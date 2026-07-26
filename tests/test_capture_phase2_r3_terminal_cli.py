@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import stat
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -38,6 +40,27 @@ def _argv(command: str) -> list[str]:
         "--evidence-directory",
         "terminal-evidence",
     ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="publisher is an HPC4 POSIX-only surface")
+def test_raw_publisher_enforces_mode_under_restrictive_umask(tmp_path: Path) -> None:
+    cli = _load_cli()
+    output = tmp_path / "raw-sacct.psv"
+    raw = b"terminal scheduler evidence\n"
+
+    previous_umask = os.umask(0o077) if os.name == "posix" else None
+    try:
+        digest = cli._publish_exclusive(output, raw)
+    finally:
+        if previous_umask is not None:
+            os.umask(previous_umask)
+
+    assert len(digest) == 64
+    assert output.read_bytes() == raw
+    if os.name == "posix":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o440
+    with pytest.raises(FileExistsError):
+        cli._publish_exclusive(output, raw)
 
 
 @pytest.mark.parametrize(
