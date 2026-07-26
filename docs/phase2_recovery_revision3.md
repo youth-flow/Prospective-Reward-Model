@@ -146,7 +146,7 @@ R2 design
 
 该邮件证明账号/组资源授予，不证明当前 partition availability、QoS、最大 walltime、
 GPU 空闲量或 quota 余量。Gate P 提交前仍须在登录后只读捕获 `squota -A sigroup`、
-`squota`、`savail`、partition/QoS 配置和容器 runtime；不得从邮件推测墙钟上限。
+`squota`、`sinfo`、`scontrol`、`sacctmgr` 和容器 runtime；不得从邮件推测墙钟上限。
 校外登录可能需要 VPN 与 2FA。认证若过期，只由用户完成交互登录；自动化不得记录
 密码、MFA token 或私钥。
 

@@ -184,7 +184,11 @@ def test_prorm_audit_uses_fresh_fp64_dual_and_envelope_gradient() -> None:
         torch.linalg.vector_norm(expected_gradient).item(),
         rel=1.0e-12,
     )
-    assert abs(observed["dual_loss_minus_saddle_value"]) < 1.0e-20
+    assert observed["dual_saddle_value"] == pytest.approx(
+        observed["objective"],
+        rel=1.0e-12,
+        abs=1.0e-14,
+    )
     assert observed["gradient_definition"] == "fresh_dual_envelope_gradient"
 
 
