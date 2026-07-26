@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -382,7 +383,11 @@ def test_real_recovery_authorization_verifier_rejects_byte_tampering(
 
     tampered = json.loads(output.read_text(encoding="utf-8"))
     tampered["full_calibration_authorized"] = False
+    if os.name == "posix":
+        output.chmod(0o640)
     output.write_bytes(helpers.aggregate._canonical_bytes(tampered))
+    if os.name == "posix":
+        output.chmod(0o440)
     with pytest.raises(ValueError, match="SHA256"):
         control.verify_recovery_authorization_file(
             output,

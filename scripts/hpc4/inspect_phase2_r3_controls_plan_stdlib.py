@@ -34,7 +34,10 @@ AUDIT_INTERVAL = 20
 PROFILE_UPDATES = 100
 CHECKPOINT_CADENCE_UPDATES = 200
 MAX_WALLTIME_SECONDS = 2 * 24 * 60 * 60
-GPU_MEMORY_CAPACITY_BYTES = 46_068 * 1024**2
+L20_PHYSICAL_GPU_MEMORY_BYTES = 46_068 * 1024**2
+TORCH_VISIBLE_GPU_MEMORY_BYTES = 47_676_129_280
+# Gate-C admission follows the capacity visible to its PyTorch process.
+GPU_MEMORY_CAPACITY_BYTES = TORCH_VISIBLE_GPU_MEMORY_BYTES
 HOST_MEMORY_BYTES = 96 * 1024**3
 
 PROFILE_FIELDS = {
@@ -333,7 +336,7 @@ def _validate_measurement(
         _real(item[name], name, positive=True)
     _real(item["setup_wall_seconds"], "setup wall seconds", positive=False)
     _positive_int(item["peak_gpu_memory_bytes"], "peak GPU memory")
-    if item["gpu_total_memory_bytes"] != GPU_MEMORY_CAPACITY_BYTES:
+    if item["gpu_total_memory_bytes"] != TORCH_VISIBLE_GPU_MEMORY_BYTES:
         raise ValueError("profile measurement is not from the admitted HPC4 L20")
     terminal = _closed(
         item["scheduler_terminal"],
@@ -484,7 +487,7 @@ def _validate_profile(value: object) -> dict[str, Any]:
         or resource["account"] != "sigroup"
         or resource["partition"] != "gpu-l20"
         or resource["gpu_name"] != "NVIDIA L20"
-        or resource["observed_gpu_memory_capacity_bytes"] != GPU_MEMORY_CAPACITY_BYTES
+        or resource["observed_gpu_memory_capacity_bytes"] != TORCH_VISIBLE_GPU_MEMORY_BYTES
         or resource["gpus_per_task"] != 1
         or resource["cpus_per_task"] != 8
         or resource["memory_bytes"] != HOST_MEMORY_BYTES
@@ -515,7 +518,7 @@ def _validate_profile(value: object) -> dict[str, Any]:
     required_gpu = max(
         math.ceil(item["peak_gpu_memory_bytes"] * (1 + memory_margin)) for item in validated
     )
-    if required_gpu > GPU_MEMORY_CAPACITY_BYTES:
+    if required_gpu > TORCH_VISIBLE_GPU_MEMORY_BYTES:
         raise ValueError("profile-derived GPU memory exceeds one NVIDIA L20")
     return profile
 
@@ -544,7 +547,7 @@ def _validate_plan(value: object, profile: dict[str, Any]) -> dict[str, Any]:
         "account": "sigroup",
         "partition": "gpu-l20",
         "gpu_name": "NVIDIA L20",
-        "observed_gpu_memory_capacity_bytes": GPU_MEMORY_CAPACITY_BYTES,
+        "observed_gpu_memory_capacity_bytes": TORCH_VISIBLE_GPU_MEMORY_BYTES,
         "slurm_gpu_tres": "gres/gpu:l20",
         "gpus_per_task": 1,
         "cpus_per_task": 8,

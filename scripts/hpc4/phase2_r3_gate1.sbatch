@@ -27,6 +27,7 @@ readonly SOURCE_RECEIPT_RELATIVE="runs/phase2-recovery-r3/gate1/r3-source-test-r
 readonly GATE1_RELATIVE="runs/phase2-recovery-r3/gate1/r3-implementation-closure.json"
 readonly FROZEN_IMAGE_SHA256="d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb"
 readonly SCRATCH_TOOLS="/scratch/yyangjo/r3-gate1-tools-ruff01522-pytest744"
+readonly SCRATCH_RUNTIME_ROOT="/scratch/yyangjo/r3-gate1-runtime"
 readonly RUFF_SHA256="64aae5e444938e33121c3b940dff9b3d8ef8fc2a88c477e7f3a4fae2584a8fe8"
 readonly HOST_PYTHON_MODULE="miniconda3/24.3.0-quc3pyu"
 readonly HOST_PYTHON="/opt/shared/spack/local/linux-rocky9-x86_64_v4/gcc-11.4.1/miniconda3-24.3.0-quc3pyudmzikgo2r4qsyqpwnrvzpin63/bin/python3.12"
@@ -164,9 +165,31 @@ export PATH="/usr/bin:/bin"
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONUNBUFFERED=1
-pycache_parent="${SLURM_TMPDIR:-/tmp}"
-host_pycache="${pycache_parent}/prorm-r3-gate1-${SLURM_JOB_ID}-host-pyc"
-container_pycache="/tmp/prorm-r3-gate1-${SLURM_JOB_ID}-sif-pyc"
+if [[ ! -e "${SCRATCH_RUNTIME_ROOT}" && ! -L "${SCRATCH_RUNTIME_ROOT}" ]]; then
+  mkdir -m 0700 -- "${SCRATCH_RUNTIME_ROOT}"
+fi
+[[ -d "${SCRATCH_RUNTIME_ROOT}" && ! -L "${SCRATCH_RUNTIME_ROOT}" ]] \
+  || die "Gate-1 scratch runtime root must be one real directory"
+[[ "$(realpath -e -- "${SCRATCH_RUNTIME_ROOT}")" == "${SCRATCH_RUNTIME_ROOT}" ]] \
+  || die "Gate-1 scratch runtime root is not canonical"
+commit_runtime_root="${SCRATCH_RUNTIME_ROOT}/${commit}"
+if [[ ! -e "${commit_runtime_root}" && ! -L "${commit_runtime_root}" ]]; then
+  mkdir -m 0700 -- "${commit_runtime_root}"
+fi
+[[ -d "${commit_runtime_root}" && ! -L "${commit_runtime_root}" ]] \
+  || die "Gate-1 commit runtime root must be one real directory"
+[[ "$(realpath -e -- "${commit_runtime_root}")" == "${commit_runtime_root}" ]] \
+  || die "Gate-1 commit runtime root is not canonical"
+job_runtime="${commit_runtime_root}/job-${SLURM_JOB_ID}"
+[[ ! -e "${job_runtime}" && ! -L "${job_runtime}" ]] \
+  || die "refusing to reuse Gate-1 scratch runtime directory"
+mkdir -m 0700 -- "${job_runtime}"
+[[ -d "${job_runtime}" && ! -L "${job_runtime}" ]] \
+  || die "Gate-1 job runtime must be one real directory"
+[[ "$(realpath -e -- "${job_runtime}")" == "${job_runtime}" ]] \
+  || die "Gate-1 job runtime is not canonical"
+host_pycache="${job_runtime}/host-pyc"
+container_pycache="/tmp/sif-pyc"
 export PYTHONPYCACHEPREFIX="${host_pycache}"
 mkdir -p -- "${host_pycache}"
 
@@ -182,12 +205,14 @@ container_python=(
   --bind "${repo_root}:${repo_root}:ro"
   --bind "${project_root}:${project_root}:rw"
   --bind "${scratch_tools}:${scratch_tools}:ro"
+  --bind "${job_runtime}:/tmp:rw"
   --env "PATH=${container_path}"
   --env "PYTHONPATH=${container_pythonpath}"
   --env "PYTHONNOUSERSITE=1"
   --env "PYTHONDONTWRITEBYTECODE=1"
   --env "PYTHONUNBUFFERED=1"
   --env "PYTHONPYCACHEPREFIX=${container_pycache}"
+  --env "TMPDIR=/tmp"
   --pwd "${repo_root}"
   "${image}"
   "${SIF_PYTHON}"

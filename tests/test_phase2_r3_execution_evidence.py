@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -144,7 +145,11 @@ def test_identity_and_segment_receipts_reopen_exact_design_and_task_bytes(
     )
     assert reopened["completed_head_receipts"] == []
 
+    if os.name == "posix":
+        outcome.artifact_path.chmod(0o640)
     outcome.artifact_path.write_text('{"tampered":true}\n', encoding="utf-8")
+    if os.name == "posix":
+        outcome.artifact_path.chmod(0o440)
     with pytest.raises(ValueError, match="bytes changed"):
         reopen_segment_evidence_receipt(
             project_root,

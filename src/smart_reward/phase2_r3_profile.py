@@ -93,6 +93,7 @@ R3_TOTAL_SAFE_UPDATE_BLOCKS: Final = (
     len(PHASE2_PROFILE_LEARNER_ORDER) * R3_MAXIMUM_UPDATES_PER_HEAD // R3_AUDIT_CADENCE_UPDATES
 )
 HPC4_SLURM_ACCOUNT: Final = "sigroup"
+HPC4_L20_TORCH_VISIBLE_MEMORY_BYTES: Final = 47_676_129_280
 
 _PROFILE_MAX_FINITE_FLOAT: Final = 1.7976931348623157e308
 _PROFILE_MAX_SIGNED_INT: Final = 2_147_483_647
@@ -1093,8 +1094,14 @@ def _validate_cuda_identity(
     visible = identity["cuda_visible_devices"]
     if visible is not None and type(visible) is not str:
         raise TypeError("cuda_visible_devices must be string or null")
-    if name != envelope.gpu_name or memory != envelope.gpu_total_memory_bytes:
+    if name != envelope.gpu_name:
         raise ValueError("live CUDA identity differs from the frozen resource envelope")
+    if memory != HPC4_L20_TORCH_VISIBLE_MEMORY_BYTES:
+        raise ValueError(
+            "live Torch-visible GPU memory differs from the measured HPC4 L20 capacity"
+        )
+    if memory > envelope.gpu_total_memory_bytes:
+        raise ValueError("live Torch-visible GPU memory exceeds the physical resource envelope")
     normalized = dict(identity)
     normalized["logical_device_index"] = index
     return normalized
@@ -1104,6 +1111,7 @@ def _validate_gpu_samples(
     value: object,
     *,
     cuda_identity: Mapping[str, object],
+    envelope: SchedulerResourceEnvelope,
 ) -> tuple[dict[str, object], dict[str, object]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise TypeError("gpu_utilization_samples must be a sequence")
@@ -1113,11 +1121,6 @@ def _validate_gpu_samples(
     first_uuid: str | None = None
     previous_monotonic: int | None = None
     previous_wall: int | None = None
-    live_memory = _exact_int(
-        cuda_identity["total_memory_bytes"],
-        name="cuda_identity.total_memory_bytes",
-        minimum=1,
-    )
     for expected_index, raw in enumerate(value):
         sample = _exact_mapping(
             raw,
@@ -1150,8 +1153,10 @@ def _validate_gpu_samples(
             name="sample.total_memory_bytes",
             minimum=1,
         )
-        if abs(sampled_memory - live_memory) > 2 * 1024 * 1024:
-            raise ValueError("nvidia-smi and Torch total GPU memory disagree")
+        if sampled_memory != envelope.gpu_total_memory_bytes:
+            raise ValueError(
+                "nvidia-smi physical GPU memory differs from the frozen resource envelope"
+            )
         for name in ("gpu_utilization_percent", "memory_utilization_percent"):
             metric = _nonnegative_real(sample[name], name=name)
             if metric > 100.0:
@@ -2579,6 +2584,7 @@ class FormalCudaProfileResult:
         samples = _validate_gpu_samples(
             self.gpu_utilization_samples,
             cuda_identity=cuda_identity,
+            envelope=self.envelope,
         )
         cpu_memory = _validate_cpu_memory(self.cpu_memory)
         revalidation_seconds = _positive_real(

@@ -1604,7 +1604,11 @@ def test_public_verifier_rechecks_external_sha_canonical_and_namespace(
     with pytest.raises(ValueError, match="SHA256 mismatch"):
         aggregate.verify_phase2_recovery_authorization(output, "f" * 64)
     noncanonical = json.loads(output.read_text(encoding="utf-8"))
+    if os.name == "posix":
+        output.chmod(0o640)
     output.write_text(json.dumps(noncanonical, indent=2), encoding="utf-8")
+    if os.name == "posix":
+        output.chmod(0o440)
     with pytest.raises(ValueError, match="not canonical JSON"):
         aggregate.verify_phase2_recovery_authorization(
             output,

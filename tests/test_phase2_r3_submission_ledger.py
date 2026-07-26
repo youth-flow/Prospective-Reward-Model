@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 from types import ModuleType
 
@@ -142,7 +143,11 @@ def test_complete_submission_ledger_reopens_and_binds_plan_bytes(tmp_path: Path)
             plan_file_sha256=plan_file_sha,
             plan_semantic_sha256="f" * 64,
         )
+    if os.name == "posix":
+        plan.chmod(0o640)
     plan.write_text('{"changed":true}\n', encoding="utf-8")
+    if os.name == "posix":
+        plan.chmod(0o440)
     with pytest.raises(ValueError, match="file SHA-256"):
         module.reopen_submission_ledger(root, plan_semantic_sha256=semantic)
 

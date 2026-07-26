@@ -391,7 +391,11 @@ def test_embedded_script_or_controller_evidence_tamper_fails_closed(
     target = built.final_evidence / "aggregate-submission"
     target = target.joinpath(*relative.split("/"))
     if mutation == "tamper":
+        if os.name == "posix":
+            target.chmod(0o640)
         target.write_bytes(target.read_bytes() + b"# tampered\n")
+        if os.name == "posix":
+            target.chmod(0o440)
     else:
         target.unlink()
 
@@ -420,7 +424,11 @@ def test_success_fast_path_is_offline_but_still_validates_embedded_binding(
         / "aggregate-submission"
         / control.POST_RECOVERY_AGGREGATE_SCRIPT_EVIDENCE
     )
+    if os.name == "posix":
+        embedded.chmod(0o640)
     embedded.write_bytes(embedded.read_bytes() + b"# post-success tamper\n")
+    if os.name == "posix":
+        embedded.chmod(0o440)
     with pytest.raises(ValueError):
         built.verify()
     with pytest.raises(ValueError):

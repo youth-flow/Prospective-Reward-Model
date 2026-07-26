@@ -81,7 +81,8 @@ from smart_reward.phase2_r3_profile import (
 ROOT = Path(__file__).resolve().parents[1]
 SCIENCE_CONFIG = ROOT / "configs" / "phase2_recovery_r3_science.yaml"
 GPU_NAME = "NVIDIA L20"
-GPU_MEMORY_BYTES = 48 * 1024**3
+PHYSICAL_GPU_MEMORY_BYTES = 46_068 * 1024**2
+TORCH_VISIBLE_GPU_MEMORY_BYTES = 47_676_129_280
 
 
 def _digest(value: str) -> str:
@@ -393,7 +394,7 @@ def _cuda_identity() -> dict[str, object]:
     return {
         "logical_device_index": 0,
         "name": GPU_NAME,
-        "total_memory_bytes": GPU_MEMORY_BYTES,
+        "total_memory_bytes": TORCH_VISIBLE_GPU_MEMORY_BYTES,
         "compute_capability_major": 8,
         "compute_capability_minor": 9,
         "torch_cuda_version": "12.4",
@@ -408,7 +409,7 @@ def _gpu_sample(sample_index: int) -> dict[str, object]:
         "monotonic_time_ns": 1_000 + sample_index,
         "uuid": "GPU-test-uuid",
         "name": GPU_NAME,
-        "total_memory_bytes": GPU_MEMORY_BYTES,
+        "total_memory_bytes": PHYSICAL_GPU_MEMORY_BYTES,
         "gpu_utilization_percent": 50.0 + sample_index,
         "memory_utilization_percent": 25.0 + sample_index,
     }
@@ -457,7 +458,7 @@ def envelope(profile_run: ValidatedGatePRun) -> SchedulerResourceEnvelope:
         resource_raw_evidence_sha256=_digest("resource-raw"),
         partition="gpu-l20",
         gpu_name=GPU_NAME,
-        gpu_total_memory_bytes=GPU_MEMORY_BYTES,
+        gpu_total_memory_bytes=PHYSICAL_GPU_MEMORY_BYTES,
         max_allocation_wall_seconds=300,
         max_array_concurrency=3,
         max_scheduler_segments=4,
@@ -1053,6 +1054,40 @@ def test_live_cuda_identity_must_match_resource_envelope(
             envelope=envelope,
             preparation=preparation,
             io_probe_directory=tmp_path,
+        )
+
+
+def test_live_cuda_identity_requires_measured_torch_visible_memory(
+    profile_run: ValidatedGatePRun,
+    safety_policy: ProfileSafetyMarginPolicy,
+    envelope: SchedulerResourceEnvelope,
+    preparation: ProfilePreparationTimings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _cuda_identity()
+    identity["total_memory_bytes"] = PHYSICAL_GPU_MEMORY_BYTES
+    monkeypatch.setattr(formal_profile, "_require_live_cuda", lambda _run: identity)
+    with pytest.raises(ValueError, match="Torch-visible GPU memory"):
+        run_formal_gate_p_cuda_profile(
+            profile_run,
+            safety_policy=safety_policy,
+            envelope=envelope,
+            preparation=preparation,
+            io_probe_directory=tmp_path,
+        )
+
+
+def test_nvidia_smi_samples_require_physical_resource_envelope(
+    formal_result,
+) -> None:
+    samples = copy.deepcopy(formal_result.gpu_utilization_samples)
+    samples[0]["total_memory_bytes"] = TORCH_VISIBLE_GPU_MEMORY_BYTES
+    with pytest.raises(ValueError, match="nvidia-smi physical GPU memory"):
+        replace(
+            formal_result,
+            gpu_utilization_samples=samples,
+            _factory_token=formal_profile._FACTORY_TOKEN,
         )
 
 

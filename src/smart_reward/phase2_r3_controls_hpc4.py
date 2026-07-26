@@ -71,9 +71,15 @@ R3_CONTROLS_PROFILE_ACCOUNT: Final = "sigroup"
 R3_CONTROLS_PROFILE_PARTITION: Final = "gpu-l20"
 R3_CONTROLS_PROFILE_GPU_NAME: Final = "NVIDIA L20"
 R3_CONTROLS_PROFILE_SLURM_GPU_TRES: Final = "gres/gpu:l20"
-# Exact CUDA-visible capacity observed for the admitted HPC4 L20 allocation.
-# This is 46,068 MiB, not the vendor's rounded 48 GB marketing capacity.
-R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES: Final = 46_068 * 1024**2
+# ``nvidia-smi`` reports the physical device as 46,068 MiB, while PyTorch
+# exposes 47,676,129,280 allocatable-address-space bytes for this allocation.
+# Gate-C receipts and admission are defined against the latter because that is
+# the capacity observed by the training process.
+R3_CONTROLS_L20_PHYSICAL_GPU_MEMORY_BYTES: Final = 46_068 * 1024**2
+R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES: Final = 47_676_129_280
+R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES: Final = (
+    R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES
+)
 R3_CONTROLS_PROFILE_GPUS_PER_TASK: Final = 1
 R3_CONTROLS_PROFILE_CPUS_PER_TASK: Final = 8
 R3_CONTROLS_PROFILE_MEMORY_BYTES: Final = 96 * 1024**3
@@ -645,9 +651,11 @@ def validate_profile_compute_receipt(value: object) -> dict[str, object]:
     _positive_int(payload["peak_gpu_memory_bytes"], name="peak GPU memory bytes")
     if (
         _positive_int(payload["gpu_total_memory_bytes"], name="GPU total memory bytes")
-        != R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES
+        != R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES
     ):
-        raise ValueError("Gate-C profile did not run on the admitted 46,068-MiB L20")
+        raise ValueError(
+            "Gate-C profile did not expose the admitted 47,676,129,280-byte Torch L20 capacity"
+        )
     _reject_forbidden_payload(payload, name="Gate-C profile compute receipt")
     return payload
 
@@ -866,9 +874,11 @@ def validate_profile_family_measurement(value: object) -> dict[str, object]:
     _positive_int(payload["peak_gpu_memory_bytes"], name="peak GPU memory bytes")
     if (
         _positive_int(payload["gpu_total_memory_bytes"], name="GPU total memory bytes")
-        != R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES
+        != R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES
     ):
-        raise ValueError("Gate-C profile did not run on the admitted 46,068-MiB L20")
+        raise ValueError(
+            "Gate-C profile did not expose the admitted 47,676,129,280-byte Torch L20 capacity"
+        )
     terminal = _closed(
         payload["scheduler_terminal"],
         name="profile scheduler terminal",
@@ -1284,7 +1294,7 @@ def validate_controls_operational_profile(
         resource["observed_gpu_memory_capacity_bytes"],
         name="observed GPU memory capacity bytes",
     )
-    if observed_gpu_capacity != R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES or any(
+    if observed_gpu_capacity != R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES or any(
         item["gpu_total_memory_bytes"] != observed_gpu_capacity for item in validated
     ):
         raise ValueError("Gate-C resource plan GPU capacity differs from profile receipts")
@@ -2197,6 +2207,8 @@ __all__ = [
     "R3_CONTROLS_PROFILE_GPUS_PER_TASK",
     "R3_CONTROLS_PROFILE_GPU_NAME",
     "R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES",
+    "R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES",
+    "R3_CONTROLS_L20_PHYSICAL_GPU_MEMORY_BYTES",
     "R3_CONTROLS_PROFILE_MEMORY_BYTES",
     "R3_CONTROLS_PROFILE_MEASUREMENT_SCHEMA",
     "R3_CONTROLS_PROFILE_NODES",

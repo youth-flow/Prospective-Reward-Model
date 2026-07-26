@@ -109,7 +109,13 @@ def test_gate1_batch_uses_sif_tests_and_host_control_python() -> None:
     assert "export PYTHONNOUSERSITE=1" in text
     assert "export PYTHONDONTWRITEBYTECODE=1" in text
     assert 'export PYTHONPYCACHEPREFIX="${host_pycache}"' in text
-    assert 'container_pycache="/tmp/prorm-r3-gate1-' in text
+    assert 'readonly SCRATCH_RUNTIME_ROOT="/scratch/yyangjo/r3-gate1-runtime"' in text
+    assert 'job_runtime="${commit_runtime_root}/job-${SLURM_JOB_ID}"' in text
+    assert '[[ ! -e "${job_runtime}" && ! -L "${job_runtime}" ]]' in text
+    assert 'mkdir -m 0700 -- "${job_runtime}"' in text
+    assert '--bind "${job_runtime}:/tmp:rw"' in text
+    assert 'container_pycache="/tmp/sif-pyc"' in text
+    assert '--env "TMPDIR=/tmp"' in text
 
 
 def test_gate1_submit_prepares_core_compatible_output_modes() -> None:

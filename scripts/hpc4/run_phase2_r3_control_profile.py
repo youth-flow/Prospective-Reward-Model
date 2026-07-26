@@ -22,7 +22,10 @@ from smart_reward.phase2_r3_controls import (
     R3_GATE_C_SEEDS,
     load_r3_controls_config,
 )
-from smart_reward.phase2_r3_controls_hpc4 import build_profile_compute_receipt
+from smart_reward.phase2_r3_controls_hpc4 import (
+    R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES,
+    build_profile_compute_receipt,
+)
 from smart_reward.phase2_r3_inputs import (
     materialize_r3_control_train_only_from_parent,
 )
@@ -88,8 +91,11 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("Gate-C profile requires exactly one visible CUDA GPU")
     device = torch.device("cuda:0")
     gpu_total_memory_bytes = int(torch.cuda.get_device_properties(device).total_memory)
-    if gpu_total_memory_bytes != 46_068 * 1024**2:
-        raise RuntimeError("Gate-C profile requires the observed 46,068-MiB HPC4 L20 capacity")
+    if gpu_total_memory_bytes != R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES:
+        raise RuntimeError(
+            "Gate-C profile requires the observed "
+            "47,676,129,280-byte Torch-visible HPC4 L20 capacity"
+        )
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.synchronize(device)
     input_started = time.perf_counter()

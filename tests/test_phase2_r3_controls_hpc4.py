@@ -221,8 +221,10 @@ def test_profile_is_exact_nonreusable_three_family_and_enforces_two_day_ceiling(
     assert len(profile["measurements"]) == 3
     assert profile["resource_plan"]["requested_walltime_seconds_per_segment"] == 3600
     assert profile["resource_plan"]["max_scheduler_segments"] == 1
-    assert hpc.R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES == 46_068 * 1024**2
-    assert profile["resource_plan"]["observed_gpu_memory_capacity_bytes"] == 46_068 * 1024**2
+    assert hpc.R3_CONTROLS_L20_PHYSICAL_GPU_MEMORY_BYTES == 46_068 * 1024**2
+    assert hpc.R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES == 47_676_129_280
+    assert hpc.R3_CONTROLS_PROFILE_GPU_MEMORY_CAPACITY_BYTES == 47_676_129_280
+    assert profile["resource_plan"]["observed_gpu_memory_capacity_bytes"] == 47_676_129_280
     assert profile["resource_plan"]["checkpoint_cadence_updates"] == 200
     with pytest.raises(ValueError, match="frozen 200-update policy"):
         _profile(checkpoint_cadence_updates=40)
@@ -304,6 +306,23 @@ def test_profile_compute_receipt_terminalizes_only_after_exact_fixed_hpc4_row() 
     assert receipt["completed_updates"] == 100
     assert receipt["result_reusable_for_training"] is False
     assert "scheduler_terminal" not in receipt
+    with pytest.raises(ValueError, match="Torch L20 capacity"):
+        hpc.build_profile_compute_receipt(
+            family=family,
+            seed=SEEDS[0],
+            git_commit="3" * 40,
+            container_sha256="4" * 64,
+            controls_config_file_sha256=FakeConfig.file_sha256,
+            controls_config_semantic_sha256=FakeConfig.semantic_sha256,
+            input_training_sha256="5" * 64,
+            oracle_reward_sha256="6" * 64,
+            setup_wall_seconds=2.0,
+            training_wall_seconds=10.0,
+            audit_wall_seconds=1.0,
+            checkpoint_roundtrip_wall_seconds=0.5,
+            peak_gpu_memory_bytes=1024**3,
+            gpu_total_memory_bytes=hpc.R3_CONTROLS_L20_PHYSICAL_GPU_MEMORY_BYTES,
+        )
 
     raw = _raw(
         job_id="410000_1",
@@ -661,7 +680,8 @@ def test_real_control_runners_and_disposable_profile_surface_are_separated() -> 
     assert "profile_r3_control_family" in profile
     assert "build_profile_compute_receipt" in profile
     assert "torch.cuda.get_device_properties(device).total_memory" in profile
-    assert "46_068 * 1024**2" in profile
+    assert "R3_CONTROLS_PROFILE_TORCH_VISIBLE_GPU_MEMORY_BYTES" in profile
+    assert "47,676,129,280-byte Torch-visible HPC4 L20 capacity" in profile
     assert '"formal_result_issued": False' in profile
     assert '"primary_label_stream_constructed": False' in profile
     assert "profile-measurement-finalize" in evidence
@@ -802,7 +822,7 @@ def test_pure_stdlib_plan_inspector_accepts_real_contract_and_rejects_tamper(
     assert completed.returncode == 0, completed.stderr
     inspected = json.loads(completed.stdout)
     assert inspected["plan_sha256"] == plan["plan_sha256"]
-    assert inspected["resources"]["observed_gpu_memory_capacity_bytes"] == (46_068 * 1024**2)
+    assert inspected["resources"]["observed_gpu_memory_capacity_bytes"] == 47_676_129_280
 
     tampered = deepcopy(plan)
     tampered["tasks"][0]["seed"] = SEEDS[1]

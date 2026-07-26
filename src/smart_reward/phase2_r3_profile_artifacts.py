@@ -537,6 +537,7 @@ def _validated_formal_profile(
     gpu_samples = _profile._validate_gpu_samples(
         formal["gpu_utilization_samples"],
         cuda_identity=cuda_identity,
+        envelope=envelope_adapter,
     )
     cpu_memory = _profile._validate_cpu_memory(formal["cpu_memory"])
     revalidation_seconds = _positive_real(
