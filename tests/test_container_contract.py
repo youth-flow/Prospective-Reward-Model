@@ -70,6 +70,13 @@ def test_image_workflow_publishes_raw_sif_and_checks_public_access() -> None:
     assert "sif_sha256" in workflow
 
 
+def test_ci_fetches_history_required_by_frozen_lineage_contracts() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "actions/checkout@" in workflow
+    assert "fetch-depth: 0" in workflow
+
+
 def test_tracked_config_identities_match_exact_bytes_and_semantics() -> None:
     identity_path = ROOT / "configs" / "identities.json"
     payload = json.loads(identity_path.read_text(encoding="utf-8"))
