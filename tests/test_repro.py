@@ -269,7 +269,10 @@ def test_manifest_does_not_implicitly_read_supplied_secret_process_env(
     monkeypatch.setenv("WANDB_API_KEY", "wandb_process_secret")
     monkeypatch.setenv("SLURM_JOB_ID", "7")
 
-    serialized = json.dumps(collect_slurm_environment(os.environ))
+    collected = collect_slurm_environment(os.environ)
+    serialized = json.dumps(collected)
 
-    assert serialized == '{"SLURM_JOB_ID": "7"}'
+    assert collected["SLURM_JOB_ID"] == "7"
+    assert "HF_TOKEN" not in collected
+    assert "WANDB_API_KEY" not in collected
     assert "secret" not in serialized
