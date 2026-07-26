@@ -227,15 +227,30 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _ensure_child_directory(parent: Path, name: str) -> Path:
-    _require_real_directory(parent, name="orchestrator directory parent")
+    parent_info = _require_real_directory(parent, name="orchestrator directory parent")
     child = parent / name
     if child.exists() or child.is_symlink():
-        _require_real_directory(child, name=f"orchestrator directory {name}")
+        _require_writable_child_directory(child, name=f"orchestrator directory {name}")
         return child
-    os.mkdir(child, mode=0o550)
+    directory_mode = 0o750
+    if os.name == "posix" and parent_info.st_mode & stat.S_ISGID:
+        directory_mode |= stat.S_ISGID
+    os.mkdir(child, mode=directory_mode)
+    if os.name == "posix":
+        os.chmod(child, directory_mode, follow_symlinks=False)
     _fsync_directory(parent)
-    _require_real_directory(child, name=f"orchestrator directory {name}")
+    _require_writable_child_directory(child, name=f"orchestrator directory {name}")
     return child
+
+
+def _require_writable_child_directory(path: Path, *, name: str) -> os.stat_result:
+    info = _require_real_directory(path, name=name)
+    if os.name == "posix":
+        if stat.S_IMODE(info.st_mode) not in {0o750, 0o2750}:
+            raise ValueError(f"{name} must retain mode 0750 (optional setgid accepted)")
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise PermissionError(f"{name} must be writable and searchable by its owner")
+    return info
 
 
 def _publish_no_overwrite(path: Path, raw: bytes, *, name: str) -> str:

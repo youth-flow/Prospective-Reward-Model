@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -481,6 +482,51 @@ def test_gate0_production_dual_roots_are_fixed_disjoint_and_not_swappable(
         patch.setattr(gate0, "PRODUCTION_PROJECT_ROOT", repo / "persistent")
         with pytest.raises(RuntimeError, match="fixed HPC4 path"):
             gate0._assert_production_roots()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires real POSIX directory modes")
+def test_gate_output_namespaces_are_multilevel_owner_writable_0750(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smart_reward import phase2_r3_gate1 as gate1
+
+    project = (tmp_path / "project").resolve()
+    project.mkdir(mode=0o750)
+    os.chmod(project, 0o2750)
+    retained_runs = project / "runs"
+    retained_runs.mkdir(mode=0o755)
+    os.chmod(retained_runs, 0o2755)
+    retained_r3 = retained_runs / "phase2-recovery-r3"
+    retained_r3.mkdir(mode=0o550)
+    os.chmod(retained_r3, 0o550)
+    monkeypatch.setattr(gate0, "PRODUCTION_PROJECT_ROOT", project)
+    monkeypatch.setattr(gate1, "PRODUCTION_PROJECT_ROOT", project)
+
+    with pytest.raises(ValueError, match="mode 0750"):
+        gate0._ensure_output_parent()
+
+    os.chmod(retained_r3, 0o2750)
+    gate0_parent = gate0._ensure_output_parent()
+    gate1_parent = gate1._ensure_output_parent()
+    source_receipt_parent = gate1._ensure_output_parent(
+        gate1._SOURCE_TEST_RECEIPT_RELATIVE,
+        namespace_name="source-test receipt",
+    )
+    assert gate0_parent == project / "runs/phase2-recovery-r3/gate0"
+    assert gate1_parent == project / "runs/phase2-recovery-r3/gate1"
+    assert source_receipt_parent == gate1_parent
+
+    expected_modes = {
+        Path("runs"): 0o2755,
+        Path("runs/phase2-recovery-r3"): 0o2750,
+        Path("runs/phase2-recovery-r3/gate0"): 0o2750,
+        Path("runs/phase2-recovery-r3/gate1"): 0o2750,
+    }
+    for relative, expected_mode in expected_modes.items():
+        directory = project / relative
+        assert stat.S_IMODE(directory.stat().st_mode) == expected_mode
+        assert os.access(directory, os.W_OK | os.X_OK)
 
 
 def test_local_machine_cannot_issue_live_hpc4_capability() -> None:

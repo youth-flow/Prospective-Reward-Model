@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,34 @@ from tests import test_phase2_r3_profile as profile_test_support
 
 ROOT = Path(__file__).resolve().parents[1]
 SCIENCE_PATH = ROOT / "configs" / "phase2_recovery_r3_science.yaml"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires real POSIX directory modes")
+def test_orchestrator_nested_directories_are_writable_0750_with_optional_setgid(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "orchestrator-modes").resolve()
+    root.mkdir(mode=0o750)
+    os.chmod(root, 0o750)
+    heads = orchestrator._ensure_child_directory(root, "heads")
+    learner = orchestrator._ensure_child_directory(heads, "prorm_plus")
+    probe = learner / "no-overwrite-probe"
+    with probe.open("xb") as stream:
+        stream.write(b"writable\n")
+    assert probe.read_bytes() == b"writable\n"
+    assert stat.S_IMODE(heads.stat().st_mode) == 0o750
+    assert stat.S_IMODE(learner.stat().st_mode) == 0o750
+
+    retained_bad = root / "retained-bad"
+    retained_bad.mkdir(mode=0o550)
+    os.chmod(retained_bad, 0o550)
+    with pytest.raises(ValueError, match="mode 0750"):
+        orchestrator._ensure_child_directory(root, retained_bad.name)
+
+    retained_setgid = root / "retained-setgid"
+    retained_setgid.mkdir(mode=0o750)
+    os.chmod(retained_setgid, 0o2750)
+    assert orchestrator._ensure_child_directory(root, retained_setgid.name) == retained_setgid
 
 
 def _digest(value: str) -> str:

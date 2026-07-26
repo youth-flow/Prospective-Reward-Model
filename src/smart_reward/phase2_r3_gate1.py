@@ -56,6 +56,7 @@ PRODUCTION_REPO_ROOT: Final = Path("/home/yyangjo/Smart-Reward-Model")
 PRODUCTION_PROJECT_ROOT: Final = Path("/project/sigroup/smart-reward-model")
 _EXPECTED_PRODUCTION_REPO_ROOT: Final = Path("/home/yyangjo/Smart-Reward-Model")
 _EXPECTED_PRODUCTION_PROJECT_ROOT: Final = Path("/project/sigroup/smart-reward-model")
+_OUTPUT_DIRECTORY_MODE: Final = 0o750
 R3_HPC4_IMAGE_SHA256: Final = "d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb"
 _GATE1_RELATIVE: Final = Path("runs/phase2-recovery-r3/gate1/r3-implementation-closure.json")
 _SOURCE_TEST_RECEIPT_RELATIVE: Final = Path(
@@ -2849,15 +2850,53 @@ def _ensure_output_parent(
     root = PRODUCTION_PROJECT_ROOT
     _require_real_directory(root, name="HPC4 production project root")
     current = root
-    for component in relative.parent.parts:
+    for index, component in enumerate(relative.parent.parts):
         current = current / component
+        r3_owned = index > 0
         if current.exists() or current.is_symlink():
-            _require_real_directory(current, name=f"{namespace_name} output namespace")
+            _require_output_namespace_directory(
+                current,
+                name=f"{namespace_name} output namespace",
+                r3_owned=r3_owned,
+            )
             continue
-        os.mkdir(current, mode=0o550)
+        parent_info = _require_real_directory(
+            current.parent,
+            name=f"{namespace_name} output namespace parent",
+        )
+        directory_mode = _OUTPUT_DIRECTORY_MODE
+        if os.name == "posix" and parent_info.st_mode & stat.S_ISGID:
+            directory_mode |= stat.S_ISGID
+        os.mkdir(current, mode=directory_mode)
+        if os.name == "posix":
+            os.chmod(current, directory_mode, follow_symlinks=False)
         _fsync_directory(current.parent)
-        _require_real_directory(current, name=f"new {namespace_name} output namespace")
+        _require_output_namespace_directory(
+            current,
+            name=f"new {namespace_name} output namespace",
+            r3_owned=r3_owned,
+        )
     return current
+
+
+def _require_output_namespace_directory(
+    path: Path,
+    *,
+    name: str,
+    r3_owned: bool,
+) -> os.stat_result:
+    info = _require_real_directory(path, name=name)
+    if path.resolve(strict=True) != path:
+        raise ValueError(f"{name} must be a canonical real directory")
+    if os.name == "posix":
+        mode = stat.S_IMODE(info.st_mode)
+        if r3_owned and mode not in {_OUTPUT_DIRECTORY_MODE, 0o2750}:
+            raise ValueError(f"{name} must retain mode 0750 (optional setgid accepted)")
+        if not mode & stat.S_IWUSR or not mode & stat.S_IXUSR:
+            raise PermissionError(f"{name} must be owner-writable and owner-searchable")
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise PermissionError(f"{name} must be writable and searchable by the current user")
+    return info
 
 
 def _fsync_directory(path: Path) -> None:
