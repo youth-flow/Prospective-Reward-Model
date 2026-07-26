@@ -195,7 +195,9 @@ apptainer exec \
   --bind "${image}:${image}:ro" \
   --env "PYTHONPATH=${repo_root}/src" \
   --env "HF_HOME=${hf_cache}" \
-  --env "TRANSFORMERS_CACHE=${hf_cache}" \
+  --env "HF_HUB_CACHE=${hf_cache}/hub" \
+  --env "HF_HUB_OFFLINE=1" \
+  --env "TRANSFORMERS_OFFLINE=1" \
   --env "PRORM_R3_REPO_ROOT=${repo_root}" \
   --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
   --env "PRORM_R3_GIT_COMMIT=${PRORM_R3_GIT_COMMIT}" \

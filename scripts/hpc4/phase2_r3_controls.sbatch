@@ -141,7 +141,7 @@ apptainer exec \
   --env "PYTHONDONTWRITEBYTECODE=1" \
   --env "PYTHONUNBUFFERED=1" \
   --env "HF_HOME=${hf_cache}" \
-  --env "TRANSFORMERS_CACHE=${hf_cache}" \
+  --env "HF_HUB_CACHE=${hf_cache}/hub" \
   --env "HF_HUB_OFFLINE=1" \
   --env "TRANSFORMERS_OFFLINE=1" \
   --env "SLURM_JOB_ID=${SLURM_JOB_ID}" \

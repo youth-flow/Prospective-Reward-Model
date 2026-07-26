@@ -387,6 +387,9 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
     assert "retained input copy differs from clean repository bytes" in gatep_submitter
     assert "runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}" in gatep_sbatch
     assert "retained clean-commit copy" in gatep_runner
+    assert '--env "HF_HOME=${hf_cache}"' in gatep_sbatch
+    assert '--env "HF_HUB_CACHE=${hf_cache}/hub"' in gatep_sbatch
+    assert "TRANSFORMERS_CACHE" not in gatep_sbatch
     for materialization_surface in (
         gatep_runner,
         gatep_sbatch,

@@ -97,6 +97,9 @@ def test_sbatch_reopens_plan_and_passes_exact_runner_contract_through_cleanenv()
     assert '    --parent-registry "${PRORM_R3_PARENT_REGISTRY}" \\' not in text
     assert "retained source config differs from the clean commit" in text
     assert "retained parent registry differs from the clean commit" in text
+    assert '--env "HF_HOME=${hf_cache}"' in text
+    assert '--env "HF_HUB_CACHE=${hf_cache}/hub"' in text
+    assert "TRANSFORMERS_CACHE" not in text
     assert '[[ "${SLURM_NNODES:-}" == "1" ]]' in text
     assert '[[ "${SLURM_NTASKS:-}" == "1" ]]' in text
     assert 'case "${SLURM_GPUS_ON_NODE:-}" in' in text

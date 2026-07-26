@@ -298,7 +298,9 @@ apptainer exec \
   --env "PRORM_R3_REPO_ROOT=${repo_root}" \
   --env "PRORM_R3_PROJECT_ROOT=${project_root}" \
   --env "HF_HOME=${hf_cache}" \
-  --env "TRANSFORMERS_CACHE=${hf_cache}" \
+  --env "HF_HUB_CACHE=${hf_cache}/hub" \
+  --env "HF_HUB_OFFLINE=1" \
+  --env "TRANSFORMERS_OFFLINE=1" \
   --env "SLURM_CLUSTER_NAME=${SLURM_CLUSTER_NAME}" \
   --env "SLURM_JOB_ID=${SLURM_JOB_ID}" \
   --env "SLURM_ARRAY_JOB_ID=${SLURM_ARRAY_JOB_ID}" \

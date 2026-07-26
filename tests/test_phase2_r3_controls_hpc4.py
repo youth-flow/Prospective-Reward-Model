@@ -640,7 +640,8 @@ def test_sbatch_has_independent_task_namespace_and_no_science_overrides() -> Non
     assert "--cleanenv" in text
     assert "PRORM_R3_GATEC_HF_CACHE" in text
     assert '--env "HF_HOME=${hf_cache}"' in text
-    assert '--env "TRANSFORMERS_CACHE=${hf_cache}"' in text
+    assert '--env "HF_HUB_CACHE=${hf_cache}/hub"' in text
+    assert "TRANSFORMERS_CACHE" not in text
     assert '--env "HF_HUB_OFFLINE=1"' in text
     assert '--env "TRANSFORMERS_OFFLINE=1"' in text
     assert 'task_id="$((PRORM_R3_GATEC_FAMILY_INDEX * 3' in text
@@ -713,7 +714,8 @@ def test_real_control_runners_and_disposable_profile_surface_are_separated() -> 
     assert "common_beta_recovery_pilot.yaml" not in sbatch
     assert "PRORM_R3_GATEC_PROFILE_HF_CACHE" in sbatch
     assert '--env "HF_HOME=${hf_cache}"' in sbatch
-    assert '--env "TRANSFORMERS_CACHE=${hf_cache}"' in sbatch
+    assert '--env "HF_HUB_CACHE=${hf_cache}/hub"' in sbatch
+    assert "TRANSFORMERS_CACHE" not in sbatch
 
     assert "submit_phase2_r3_controls_profile_finalize.sh" in submit
     assert '--dependency="afterany:${profile_array_job_id}"' in profile_finalize_submit
