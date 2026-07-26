@@ -78,8 +78,8 @@ copy_no_overwrite_exact \
   "${repo_root}/configs/phase2_recovery_r3_science.yaml" \
   "${input_root}/phase2_recovery_r3_science.yaml"
 copy_no_overwrite_exact \
-  "${repo_root}/configs/common_beta_recovery_pilot.yaml" \
-  "${input_root}/common_beta_recovery_pilot.yaml"
+  "${repo_root}/configs/common_beta_pilot_base.yaml" \
+  "${input_root}/common_beta_pilot_base.yaml"
 copy_no_overwrite_exact \
   "${repo_root}/configs/phase2_recovery_parent_failures.json" \
   "${input_root}/phase2_recovery_parent_failures.json"

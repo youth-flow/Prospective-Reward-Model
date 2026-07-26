@@ -115,7 +115,7 @@ source_test_receipt="$(
   "${repo_root}/configs/phase2_recovery_r3_science.yaml" ]] \
   || die "science config must be the frozen R3 production config"
 input_root="${project_root}/runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}"
-[[ "${source_config}" == "${input_root}/common_beta_recovery_pilot.yaml" ]] \
+[[ "${source_config}" == "${input_root}/common_beta_pilot_base.yaml" ]] \
   || die "source config is not the retained clean-commit copy"
 [[ "${parent_registry}" == \
   "${input_root}/phase2_recovery_parent_failures.json" ]] \
@@ -167,7 +167,7 @@ verify_retained_copy() {
     || die "retained input copy differs from clean repository bytes"
 }
 verify_retained_copy \
-  "${repo_root}/configs/common_beta_recovery_pilot.yaml" \
+  "${repo_root}/configs/common_beta_pilot_base.yaml" \
   "${source_config}"
 verify_retained_copy \
   "${repo_root}/configs/phase2_recovery_parent_failures.json" \

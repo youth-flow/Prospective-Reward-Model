@@ -387,6 +387,14 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
     assert "retained input copy differs from clean repository bytes" in gatep_submitter
     assert "runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}" in gatep_sbatch
     assert "retained clean-commit copy" in gatep_runner
+    for materialization_surface in (
+        gatep_runner,
+        gatep_sbatch,
+        gatep_submitter,
+        gatep_environment,
+    ):
+        assert "common_beta_pilot_base.yaml" in materialization_surface
+        assert "common_beta_recovery_pilot.yaml" not in materialization_surface
     assert "--nodes=1" in gatep_submitter
     assert "--ntasks=1" in gatep_submitter
     assert "--gpus-per-node=1" in gatep_submitter
@@ -403,7 +411,7 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
     assert (
         "${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/inputs/${PRORM_R3_INPUT_GIT_COMMIT}"
     ) in gatep_environment
-    assert "${PRORM_R3_INPUT_ROOT}/common_beta_recovery_pilot.yaml" in (gatep_environment)
+    assert "${PRORM_R3_INPUT_ROOT}/common_beta_pilot_base.yaml" in (gatep_environment)
     assert "${PRORM_R3_INPUT_ROOT}/phase2_recovery_parent_failures.json" in (gatep_environment)
     assert '    --project-root "${project_root}" \\' not in gatep_sbatch
     assert '    --source-test-receipt "${PRORM_R3_SOURCE_TEST_RECEIPT}" \\' not in (gatep_sbatch)

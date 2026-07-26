@@ -268,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         name="source config",
         required_mode=0o440,
     )
-    if source_config != input_root / "common_beta_recovery_pilot.yaml":
+    if source_config != input_root / "common_beta_pilot_base.yaml":
         raise ValueError("source config is not the retained clean-commit copy")
     parent_registry = _existing_file_in(
         arguments.parent_registry,

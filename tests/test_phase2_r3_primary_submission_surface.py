@@ -31,7 +31,8 @@ def test_submitter_derives_all_scheduler_resources_from_the_pinned_plan() -> Non
     assert "cp --no-clobber" in text
     assert "cmp --silent" in text
     assert 'input_root="${input_parent}/${commit}"' in text
-    assert 'source_config="${input_root}/common_beta_recovery_pilot.yaml"' in text
+    assert 'source_config="${input_root}/common_beta_pilot_base.yaml"' in text
+    assert "common_beta_recovery_pilot.yaml" not in text
     assert 'parent_registry="${input_root}/phase2_recovery_parent_failures.json"' in text
     assert "retained input copy differs from clean repository bytes" in text
     assert "${repo_root}/configs/phase2_recovery_r3_science.yaml" in text
@@ -86,6 +87,8 @@ def test_sbatch_reopens_plan_and_passes_exact_runner_contract_through_cleanenv()
     assert "\n  PRORM_R3_SOURCE_TEST_RECEIPT\n" not in text
     assert '--source-test-receipt "${PRORM_R3_SOURCE_TEST_RECEIPT}"' not in text
     assert "runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}" in text
+    assert "common_beta_pilot_base.yaml" in text
+    assert "common_beta_recovery_pilot.yaml" not in text
     assert '[[ "${PRORM_R3_SOURCE_CONFIG}" == "${expected_source_config}" ]]' in text
     assert '[[ "${PRORM_R3_PARENT_REGISTRY}" == "${expected_parent_registry}" ]]' in text
     assert '    --source-config "${source_config}" \\' in text

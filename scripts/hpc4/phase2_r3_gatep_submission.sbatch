@@ -129,7 +129,7 @@ commit="$(git -C "${repo_root}" rev-parse HEAD)"
 # persistent project root.  Publish byte-identical, no-overwrite copies from
 # the clean commit before exporting their runtime paths.
 repo_source_config="$(
-  realpath -e -- "${repo_root}/configs/common_beta_recovery_pilot.yaml"
+  realpath -e -- "${repo_root}/configs/common_beta_pilot_base.yaml"
 )"
 repo_parent_registry="$(
   realpath -e -- "${repo_root}/configs/phase2_recovery_parent_failures.json"
@@ -148,7 +148,7 @@ else
 fi
 input_root="$(realpath -e -- "${input_root}")"
 
-source_config="${input_root}/common_beta_recovery_pilot.yaml"
+source_config="${input_root}/common_beta_pilot_base.yaml"
 parent_registry="${input_root}/phase2_recovery_parent_failures.json"
 [[ "${requested_source_config}" == "${source_config}" ]] \
   || die "PRORM_R3_SOURCE_CONFIG must name the fixed clean-commit copy"

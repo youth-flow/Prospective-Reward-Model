@@ -107,7 +107,7 @@ input_root="$(realpath -e -- "${input_root}")"
 [[ "${input_root}" == \
   "${project_root}/runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}" ]] \
   || die "commit input namespace is not canonical"
-expected_source_config="${input_root}/common_beta_recovery_pilot.yaml"
+expected_source_config="${input_root}/common_beta_pilot_base.yaml"
 expected_parent_registry="${input_root}/phase2_recovery_parent_failures.json"
 expected_science_config="${input_root}/phase2_recovery_r3_science.yaml"
 [[ "${PRORM_R3_SCIENCE_CONFIG}" == "${expected_science_config}" ]] \
@@ -154,7 +154,7 @@ cmp --silent -- \
   "${science_config}" \
   || die "retained science config differs from the clean commit"
 cmp --silent -- \
-  "${repo_root}/configs/common_beta_recovery_pilot.yaml" \
+  "${repo_root}/configs/common_beta_pilot_base.yaml" \
   "${source_config}" \
   || die "retained source config differs from the clean commit"
 cmp --silent -- \

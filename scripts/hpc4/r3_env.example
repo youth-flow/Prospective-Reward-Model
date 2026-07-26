@@ -13,7 +13,10 @@ export PRORM_R3_SCIENCE_CONFIG="${PRORM_R3_REPO_ROOT}/configs/phase2_recovery_r3
 # and verifies each retained file against the tracked source by SHA-256.
 export PRORM_R3_INPUT_GIT_COMMIT="CHANGE_ME"
 export PRORM_R3_INPUT_ROOT="${PRORM_R3_PROJECT_ROOT}/runs/phase2-recovery-r3/inputs/${PRORM_R3_INPUT_GIT_COMMIT}"
-export PRORM_R3_SOURCE_CONFIG="${PRORM_R3_INPUT_ROOT}/common_beta_recovery_pilot.yaml"
+# The train-only materializer consumes the eight-section Phase-1 base config.
+# The R2 recovery overlay remains independently frozen by Gate-0 and the R3
+# migration-equality contract; it is never passed to load_config().
+export PRORM_R3_SOURCE_CONFIG="${PRORM_R3_INPUT_ROOT}/common_beta_pilot_base.yaml"
 export PRORM_R3_PARENT_REGISTRY="${PRORM_R3_INPUT_ROOT}/phase2_recovery_parent_failures.json"
 export PRORM_R3_PARENT_REGISTRY_FILE_SHA256="7be4ee90b1f494d32f96214f407a57cbee54be86a77dacc1206d2acd527857dc"
 

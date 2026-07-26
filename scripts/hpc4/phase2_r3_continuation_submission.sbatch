@@ -89,7 +89,7 @@ image="$(realpath -e -- "${PRORM_R3_IMAGE}")"
 hf_cache="$(realpath -e -- "${PRORM_R3_HF_CACHE}")"
 repo_science_config="$(realpath -e -- "${PRORM_R3_SCIENCE_CONFIG}")"
 repo_source_config="$(
-  realpath -e -- "${repo_root}/configs/common_beta_recovery_pilot.yaml"
+  realpath -e -- "${repo_root}/configs/common_beta_pilot_base.yaml"
 )"
 repo_parent_registry="$(
   realpath -e -- "${repo_root}/configs/phase2_recovery_parent_failures.json"
@@ -119,7 +119,7 @@ prepare_primary="${repo_root}/scripts/hpc4/prepare_phase2_r3_primary_submission.
   "${repo_root}/configs/phase2_recovery_r3_science.yaml" ]] \
   || die "science config must be the frozen R3 production config"
 [[ "${repo_source_config}" == \
-  "${repo_root}/configs/common_beta_recovery_pilot.yaml" ]] \
+  "${repo_root}/configs/common_beta_pilot_base.yaml" ]] \
   || die "source config must be the fixed clean-repository input"
 [[ "${repo_parent_registry}" == \
   "${repo_root}/configs/phase2_recovery_parent_failures.json" ]] \
@@ -196,7 +196,7 @@ copy_no_overwrite_exact() {
     || die "retained input copy differs from clean repository bytes"
 }
 
-source_config="${input_root}/common_beta_recovery_pilot.yaml"
+source_config="${input_root}/common_beta_pilot_base.yaml"
 parent_registry="${input_root}/phase2_recovery_parent_failures.json"
 science_config="${input_root}/phase2_recovery_r3_science.yaml"
 copy_no_overwrite_exact "${repo_source_config}" "${source_config}"

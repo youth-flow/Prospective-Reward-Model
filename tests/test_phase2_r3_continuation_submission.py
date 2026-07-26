@@ -475,7 +475,8 @@ def test_completed_task_and_unsealed_failure_paths_never_run_or_resubmit(
     assert "cmp --silent" in submit
     assert 'input_root="${input_parent}/${commit}"' in submit
     assert 'science_config="${input_root}/phase2_recovery_r3_science.yaml"' in submit
-    assert 'source_config="${input_root}/common_beta_recovery_pilot.yaml"' in submit
+    assert 'source_config="${input_root}/common_beta_pilot_base.yaml"' in submit
+    assert "common_beta_recovery_pilot.yaml" not in submit
     assert 'parent_registry="${input_root}/phase2_recovery_parent_failures.json"' in submit
     assert 'export PRORM_R3_SCIENCE_CONFIG="${science_config}"' in submit
     assert 'export PRORM_R3_CONTINUATION_PLAN_SHA256="${continuation_plan_sha256}"' in submit
@@ -504,6 +505,8 @@ def test_completed_task_and_unsealed_failure_paths_never_run_or_resubmit(
         assert canonical_export in submit
     assert "retained input copy differs from clean repository bytes" in submit
     assert "runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}" in sbatch
+    assert "common_beta_pilot_base.yaml" in sbatch
+    assert "common_beta_recovery_pilot.yaml" not in sbatch
     assert '    --source-config "${source_config}" \\' in sbatch
     assert '    --parent-registry "${parent_registry}" \\' in sbatch
     assert '    --source-config "${PRORM_R3_SOURCE_CONFIG}" \\' not in sbatch

@@ -695,9 +695,13 @@ def test_real_control_runners_and_disposable_profile_surface_are_separated() -> 
     assert '"${host_python}" --version' in submit
     assert "build_controls_operational_profile" in submit
     assert "not a formal-family walltime source" in submit
+    assert "common_beta_pilot_base.yaml" in submit
+    assert "common_beta_recovery_pilot.yaml" not in submit
     assert 'readonly SIF_PYTHON="/opt/conda/bin/python"' in sbatch
     assert 'python3 "${runner}"' not in sbatch
     assert '"${SIF_PYTHON}" "${runner}"' in sbatch
+    assert "common_beta_pilot_base.yaml" in sbatch
+    assert "common_beta_recovery_pilot.yaml" not in sbatch
 
     assert "submit_phase2_r3_controls_profile_finalize.sh" in submit
     assert '--dependency="afterany:${profile_array_job_id}"' in profile_finalize_submit

@@ -70,7 +70,7 @@ input_root="$(
   "${project_root}/runs/phase2-recovery-r3/inputs/${PRORM_R3_GATEC_GIT_COMMIT}" ]] \
   || die "Gate-C input namespace is not canonical"
 science_config="$(realpath -e -- "${input_root}/phase2_recovery_r3_science.yaml")"
-source_config="$(realpath -e -- "${input_root}/common_beta_recovery_pilot.yaml")"
+source_config="$(realpath -e -- "${input_root}/common_beta_pilot_base.yaml")"
 parent_registry="$(
   realpath -e -- "${input_root}/phase2_recovery_parent_failures.json"
 )"
@@ -83,7 +83,7 @@ cmp --silent -- \
   "${science_config}" \
   || die "retained science config differs from the clean commit"
 cmp --silent -- \
-  "${repo_root}/configs/common_beta_recovery_pilot.yaml" \
+  "${repo_root}/configs/common_beta_pilot_base.yaml" \
   "${source_config}" \
   || die "retained source config differs from the clean commit"
 cmp --silent -- \
