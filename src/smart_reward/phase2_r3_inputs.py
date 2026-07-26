@@ -34,6 +34,7 @@ from typing import Any, Final, Protocol
 
 import torch
 
+from . import phase2_training as _training
 from .config import config_hash, load_config
 from .data import CandidateNode
 from .experiment import TrainingTensorData
@@ -55,6 +56,12 @@ ARTIFACT_BINDING_SCHEMA: Final = "prorm-phase2-artifact-binding/v1"
 R3_INPUT_PREPARATION_TIMINGS_SCHEMA: Final = "phase2-recovery-r3-train-input-preparation-timings/v1"
 R3_TRAIN_MATERIALIZATION_CAPABILITY_SCHEMA: Final = (
     "phase2-recovery-r3-validated-input-materialization-capability/v1"
+)
+R3_CONTROL_INPUT_PREPARATION_TIMINGS_SCHEMA: Final = (
+    "phase2-recovery-r3-control-input-preparation-timings/v1"
+)
+R3_CONTROL_TRAIN_INPUT_CAPABILITY_SCHEMA: Final = (
+    "phase2-recovery-r3-control-train-input-capability/v1"
 )
 
 _STORAGE_TRAIN_KEYS: Final = (
@@ -165,6 +172,7 @@ _GIT_RE: Final = re.compile(r"[0-9a-f]{40,64}\Z")
 _MAX_JSON_BYTES: Final = 16 * 1024 * 1024
 _MAX_ARTIFACT_BYTES: Final = 64 * 1024 * 1024 * 1024
 _CAPABILITY_SEAL = object()
+_CONTROL_CAPABILITY_SEAL = object()
 
 _FileIdentity = tuple[int, int, int, int, int]
 
@@ -1110,6 +1118,503 @@ def _capability_payload(
     }
 
 
+def _control_input_capability_payload(
+    *,
+    seed: int,
+    science_semantic_sha256: str,
+    science_file_sha256: str,
+    source_config_hash: str,
+    parent_registry_file_sha256: str,
+    parent_seed_entry_sha256: str,
+    artifact_metadata_sha256: str,
+    artifact_tensors_sha256: str,
+    artifact_candidates_sha256: str,
+    candidate_train_prefix_sha256: str,
+    candidate_train_prefix_count: int,
+    artifact_materialization_sha256: str,
+    artifact_verification_sha256: str,
+    source_run_manifest_sha256: str,
+    source_producer_identity_sha256: str,
+    oracle_chat_template_sha256: str,
+    oracle_transform_sha256: str,
+    input_training_sha256: str,
+    train_oracle_rewards_sha256: str,
+    num_train_prompts: int,
+    num_candidates: int,
+    policy_dimension: int,
+    reward_dimension: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": R3_CONTROL_TRAIN_INPUT_CAPABILITY_SCHEMA,
+        "seed": _exact_int(seed, name="control input seed"),
+        "science_semantic_sha256": _digest(
+            science_semantic_sha256,
+            name="science_semantic_sha256",
+        ),
+        "science_file_sha256": _digest(
+            science_file_sha256,
+            name="science_file_sha256",
+        ),
+        "source_config_hash": _digest(
+            source_config_hash,
+            name="source_config_hash",
+        ),
+        "parent_registry_file_sha256": _digest(
+            parent_registry_file_sha256,
+            name="parent_registry_file_sha256",
+        ),
+        "parent_seed_entry_sha256": _digest(
+            parent_seed_entry_sha256,
+            name="parent_seed_entry_sha256",
+        ),
+        "artifact_metadata_sha256": _digest(
+            artifact_metadata_sha256,
+            name="artifact_metadata_sha256",
+        ),
+        "artifact_tensors_sha256": _digest(
+            artifact_tensors_sha256,
+            name="artifact_tensors_sha256",
+        ),
+        "artifact_candidates_sha256": _digest(
+            artifact_candidates_sha256,
+            name="artifact_candidates_sha256",
+        ),
+        "candidate_train_prefix_sha256": _digest(
+            candidate_train_prefix_sha256,
+            name="candidate_train_prefix_sha256",
+        ),
+        "candidate_train_prefix_count": _exact_int(
+            candidate_train_prefix_count,
+            name="candidate_train_prefix_count",
+            minimum=1,
+        ),
+        "artifact_materialization_sha256": _digest(
+            artifact_materialization_sha256,
+            name="artifact_materialization_sha256",
+        ),
+        "artifact_verification_sha256": _digest(
+            artifact_verification_sha256,
+            name="artifact_verification_sha256",
+        ),
+        "source_run_manifest_sha256": _digest(
+            source_run_manifest_sha256,
+            name="source_run_manifest_sha256",
+        ),
+        "source_producer_identity_sha256": _digest(
+            source_producer_identity_sha256,
+            name="source_producer_identity_sha256",
+        ),
+        "oracle_chat_template_sha256": _digest(
+            oracle_chat_template_sha256,
+            name="oracle_chat_template_sha256",
+        ),
+        "oracle_transform_sha256": _digest(
+            oracle_transform_sha256,
+            name="oracle_transform_sha256",
+        ),
+        "input_training_sha256": _digest(
+            input_training_sha256,
+            name="input_training_sha256",
+        ),
+        "train_oracle_rewards_sha256": _digest(
+            train_oracle_rewards_sha256,
+            name="train_oracle_rewards_sha256",
+        ),
+        "input_dimensions": {
+            "num_train_prompts": _exact_int(
+                num_train_prompts,
+                name="num_train_prompts",
+                minimum=1,
+            ),
+            "num_candidates": _exact_int(
+                num_candidates,
+                name="num_candidates",
+                minimum=2,
+            ),
+            "policy_dimension": _exact_int(
+                policy_dimension,
+                name="policy_dimension",
+                minimum=1,
+            ),
+            "reward_dimension": _exact_int(
+                reward_dimension,
+                name="reward_dimension",
+                minimum=1,
+            ),
+        },
+        "byte_sources_reverified": True,
+        "train_tensor_keys_decoded": list(TRAIN_TENSOR_KEYS),
+        "heldout_tensor_values_decoded": False,
+        "candidate_suffix_decoded": False,
+        "policy_session_opened": False,
+        "primary_label_stream_constructed": False,
+        "primary_label_stream_accessed": False,
+        "raw_tensors_serialized": False,
+        "raw_oracle_rewards_serialized": False,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class R3ControlTrainInputCapability:
+    """Sealed process-local Gate-C input that predates every primary label.
+
+    The raw train tensors and rescored oracle rewards exist only in this
+    process-local capability.  :meth:`to_dict` emits identities and boundary
+    evidence only; it never serializes either tensor payload.
+    """
+
+    training: TrainingTensorData = field(repr=False, compare=False)
+    train_oracle_rewards: torch.Tensor = field(repr=False, compare=False)
+    science_bundle: R3ScienceConfigBundle = field(repr=False, compare=False)
+    schema_version: str
+    seed: int
+    science_semantic_sha256: str
+    science_file_sha256: str
+    source_config_hash: str
+    parent_registry_file_sha256: str
+    parent_seed_entry_sha256: str
+    artifact_metadata_sha256: str
+    artifact_tensors_sha256: str
+    artifact_candidates_sha256: str
+    candidate_train_prefix_sha256: str
+    candidate_train_prefix_count: int
+    artifact_materialization_sha256: str
+    artifact_verification_sha256: str
+    source_run_manifest_sha256: str
+    source_producer_identity_sha256: str
+    oracle_chat_template_sha256: str
+    oracle_transform_sha256: str
+    input_training_sha256: str
+    train_oracle_rewards_sha256: str
+    num_train_prompts: int
+    num_candidates: int
+    policy_dimension: int
+    reward_dimension: int
+    capability_sha256: str
+    _seal: object = field(init=False, repr=False, compare=False, default=None)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _CONTROL_CAPABILITY_SEAL:
+            raise TypeError(
+                "R3ControlTrainInputCapability must be issued by the train-only byte validator"
+            )
+        if type(self.training) is not TrainingTensorData:
+            raise TypeError("control input training must be exact TrainingTensorData")
+        if type(self.science_bundle) is not R3ScienceConfigBundle:
+            raise TypeError("control input science_bundle must be exact R3ScienceConfigBundle")
+        self.science_bundle.validate_integrity()
+        rewards = _training._validate_frozen_oracle_rewards(
+            self.training,
+            self.train_oracle_rewards,
+        )
+        if self.seed not in self.science_bundle.settings.seeds:
+            raise ValueError("control input seed is not declared by the R3 science bundle")
+        if self.source_config_hash != self.science_bundle.settings.source_config_hash:
+            raise ValueError("control input source config differs from the R3 science bundle")
+        if self.science_semantic_sha256 != self.science_bundle.semantic_sha256:
+            raise ValueError("control input science semantic identity changed")
+        if self.science_file_sha256 != self.science_bundle.file_sha256:
+            raise ValueError("control input science file identity changed")
+        if self.input_training_sha256 != _training._input_training_sha256(self.training):
+            raise ValueError("control input training tensors changed")
+        if self.train_oracle_rewards_sha256 != _training._tensor_sha256(rewards):
+            raise ValueError("control input oracle rewards changed")
+        if (
+            self.num_train_prompts != self.training.num_prompts
+            or self.num_candidates != self.training.num_candidates
+            or self.policy_dimension != self.training.policy_dimension
+            or self.reward_dimension != self.training.reward_dimension
+        ):
+            raise ValueError("control input dimensions differ from live tensors")
+        if self.candidate_train_prefix_count != (
+            self.training.num_prompts * self.training.num_candidates
+        ):
+            raise ValueError("control candidate prefix count differs from train nodes")
+        expected = _control_input_capability_payload(
+            seed=self.seed,
+            science_semantic_sha256=self.science_semantic_sha256,
+            science_file_sha256=self.science_file_sha256,
+            source_config_hash=self.source_config_hash,
+            parent_registry_file_sha256=self.parent_registry_file_sha256,
+            parent_seed_entry_sha256=self.parent_seed_entry_sha256,
+            artifact_metadata_sha256=self.artifact_metadata_sha256,
+            artifact_tensors_sha256=self.artifact_tensors_sha256,
+            artifact_candidates_sha256=self.artifact_candidates_sha256,
+            candidate_train_prefix_sha256=self.candidate_train_prefix_sha256,
+            candidate_train_prefix_count=self.candidate_train_prefix_count,
+            artifact_materialization_sha256=self.artifact_materialization_sha256,
+            artifact_verification_sha256=self.artifact_verification_sha256,
+            source_run_manifest_sha256=self.source_run_manifest_sha256,
+            source_producer_identity_sha256=self.source_producer_identity_sha256,
+            oracle_chat_template_sha256=self.oracle_chat_template_sha256,
+            oracle_transform_sha256=self.oracle_transform_sha256,
+            input_training_sha256=self.input_training_sha256,
+            train_oracle_rewards_sha256=self.train_oracle_rewards_sha256,
+            num_train_prompts=self.num_train_prompts,
+            num_candidates=self.num_candidates,
+            policy_dimension=self.policy_dimension,
+            reward_dimension=self.reward_dimension,
+        )
+        _digest(self.capability_sha256, name="capability_sha256")
+        if self.capability_sha256 != _canonical_sha256(expected):
+            raise ValueError("control input capability self-hash is invalid")
+
+    @property
+    def input_dimensions(self) -> dict[str, int]:
+        return {
+            "num_train_prompts": self.num_train_prompts,
+            "num_candidates": self.num_candidates,
+            "policy_dimension": self.policy_dimension,
+            "reward_dimension": self.reward_dimension,
+        }
+
+    def validate_integrity(self) -> None:
+        self.__post_init__()
+
+    def to_dict(self) -> dict[str, object]:
+        payload = _control_input_capability_payload(
+            seed=self.seed,
+            science_semantic_sha256=self.science_semantic_sha256,
+            science_file_sha256=self.science_file_sha256,
+            source_config_hash=self.source_config_hash,
+            parent_registry_file_sha256=self.parent_registry_file_sha256,
+            parent_seed_entry_sha256=self.parent_seed_entry_sha256,
+            artifact_metadata_sha256=self.artifact_metadata_sha256,
+            artifact_tensors_sha256=self.artifact_tensors_sha256,
+            artifact_candidates_sha256=self.artifact_candidates_sha256,
+            candidate_train_prefix_sha256=self.candidate_train_prefix_sha256,
+            candidate_train_prefix_count=self.candidate_train_prefix_count,
+            artifact_materialization_sha256=self.artifact_materialization_sha256,
+            artifact_verification_sha256=self.artifact_verification_sha256,
+            source_run_manifest_sha256=self.source_run_manifest_sha256,
+            source_producer_identity_sha256=self.source_producer_identity_sha256,
+            oracle_chat_template_sha256=self.oracle_chat_template_sha256,
+            oracle_transform_sha256=self.oracle_transform_sha256,
+            input_training_sha256=self.input_training_sha256,
+            train_oracle_rewards_sha256=self.train_oracle_rewards_sha256,
+            num_train_prompts=self.num_train_prompts,
+            num_candidates=self.num_candidates,
+            policy_dimension=self.policy_dimension,
+            reward_dimension=self.reward_dimension,
+        )
+        return {**payload, "capability_sha256": self.capability_sha256}
+
+
+def _issue_control_train_input_capability(
+    *,
+    training: TrainingTensorData,
+    train_oracle_rewards: torch.Tensor,
+    science_bundle: R3ScienceConfigBundle,
+    seed: int,
+    source_config_hash: str,
+    parent_registry_file_sha256: str,
+    parent_seed_entry_sha256: str,
+    artifact_metadata_sha256: str,
+    artifact_tensors_sha256: str,
+    artifact_candidates_sha256: str,
+    candidate_train_prefix_sha256: str,
+    candidate_train_prefix_count: int,
+    artifact_materialization_sha256: str,
+    artifact_verification_sha256: str,
+    source_run_manifest_sha256: str,
+    source_producer_identity_sha256: str,
+    oracle_chat_template_sha256: str,
+    oracle_transform_sha256: str,
+) -> R3ControlTrainInputCapability:
+    input_training_sha256 = _training._input_training_sha256(training)
+    train_oracle_rewards_sha256 = _training._tensor_sha256(train_oracle_rewards)
+    payload = _control_input_capability_payload(
+        seed=seed,
+        science_semantic_sha256=science_bundle.semantic_sha256,
+        science_file_sha256=science_bundle.file_sha256,
+        source_config_hash=source_config_hash,
+        parent_registry_file_sha256=parent_registry_file_sha256,
+        parent_seed_entry_sha256=parent_seed_entry_sha256,
+        artifact_metadata_sha256=artifact_metadata_sha256,
+        artifact_tensors_sha256=artifact_tensors_sha256,
+        artifact_candidates_sha256=artifact_candidates_sha256,
+        candidate_train_prefix_sha256=candidate_train_prefix_sha256,
+        candidate_train_prefix_count=candidate_train_prefix_count,
+        artifact_materialization_sha256=artifact_materialization_sha256,
+        artifact_verification_sha256=artifact_verification_sha256,
+        source_run_manifest_sha256=source_run_manifest_sha256,
+        source_producer_identity_sha256=source_producer_identity_sha256,
+        oracle_chat_template_sha256=oracle_chat_template_sha256,
+        oracle_transform_sha256=oracle_transform_sha256,
+        input_training_sha256=input_training_sha256,
+        train_oracle_rewards_sha256=train_oracle_rewards_sha256,
+        num_train_prompts=training.num_prompts,
+        num_candidates=training.num_candidates,
+        policy_dimension=training.policy_dimension,
+        reward_dimension=training.reward_dimension,
+    )
+    capability = object.__new__(R3ControlTrainInputCapability)
+    object.__setattr__(capability, "training", training)
+    object.__setattr__(capability, "train_oracle_rewards", train_oracle_rewards)
+    object.__setattr__(capability, "science_bundle", science_bundle)
+    for name, value in payload.items():
+        if name in {
+            "input_dimensions",
+            "byte_sources_reverified",
+            "train_tensor_keys_decoded",
+            "heldout_tensor_values_decoded",
+            "candidate_suffix_decoded",
+            "policy_session_opened",
+            "primary_label_stream_constructed",
+            "primary_label_stream_accessed",
+            "raw_tensors_serialized",
+            "raw_oracle_rewards_serialized",
+        }:
+            continue
+        object.__setattr__(capability, name, value)
+    dimensions = payload["input_dimensions"]
+    if not isinstance(dimensions, Mapping):
+        raise RuntimeError("internal control input dimensions are malformed")
+    for name, value in dimensions.items():
+        object.__setattr__(capability, name, value)
+    object.__setattr__(
+        capability,
+        "capability_sha256",
+        _canonical_sha256(payload),
+    )
+    object.__setattr__(capability, "_seal", _CONTROL_CAPABILITY_SEAL)
+    capability.validate_integrity()
+    return capability
+
+
+def _control_timing_payload(
+    *,
+    input_capability_sha256: str,
+    artifact_verification_wall_seconds: float,
+    oracle_rescore_wall_seconds: float,
+    control_attestation_wall_seconds: float,
+) -> dict[str, object]:
+    artifact = _positive_seconds(
+        artifact_verification_wall_seconds,
+        name="artifact_verification_wall_seconds",
+    )
+    oracle = _positive_seconds(
+        oracle_rescore_wall_seconds,
+        name="oracle_rescore_wall_seconds",
+    )
+    attestation = _positive_seconds(
+        control_attestation_wall_seconds,
+        name="control_attestation_wall_seconds",
+    )
+    return {
+        "schema_version": R3_CONTROL_INPUT_PREPARATION_TIMINGS_SCHEMA,
+        "input_capability_sha256": _digest(
+            input_capability_sha256,
+            name="input_capability_sha256",
+        ),
+        "artifact_verification_wall_seconds": artifact,
+        "oracle_rescore_wall_seconds": oracle,
+        "control_attestation_wall_seconds": attestation,
+        "total_preparation_wall_seconds": math.fsum((artifact, oracle, attestation)),
+        "source_artifacts_reverified": True,
+        "local_only_oracle_session": True,
+        "policy_session_opened": False,
+        "heldout_bytes_decoded": False,
+        "primary_label_stream_constructed": False,
+        "primary_label_stream_accessed": False,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class R3ControlInputPreparationTimings:
+    """Upstream timing evidence with no primary-label construction phase."""
+
+    schema_version: str
+    input_capability_sha256: str
+    artifact_verification_wall_seconds: float
+    oracle_rescore_wall_seconds: float
+    control_attestation_wall_seconds: float
+    total_preparation_wall_seconds: float
+    source_artifacts_reverified: bool
+    local_only_oracle_session: bool
+    policy_session_opened: bool
+    heldout_bytes_decoded: bool
+    primary_label_stream_constructed: bool
+    primary_label_stream_accessed: bool
+    timings_sha256: str
+
+    def __post_init__(self) -> None:
+        expected = _control_timing_payload(
+            input_capability_sha256=self.input_capability_sha256,
+            artifact_verification_wall_seconds=self.artifact_verification_wall_seconds,
+            oracle_rescore_wall_seconds=self.oracle_rescore_wall_seconds,
+            control_attestation_wall_seconds=self.control_attestation_wall_seconds,
+        )
+        observed = {
+            "schema_version": self.schema_version,
+            "input_capability_sha256": self.input_capability_sha256,
+            "artifact_verification_wall_seconds": (self.artifact_verification_wall_seconds),
+            "oracle_rescore_wall_seconds": self.oracle_rescore_wall_seconds,
+            "control_attestation_wall_seconds": self.control_attestation_wall_seconds,
+            "total_preparation_wall_seconds": self.total_preparation_wall_seconds,
+            "source_artifacts_reverified": self.source_artifacts_reverified,
+            "local_only_oracle_session": self.local_only_oracle_session,
+            "policy_session_opened": self.policy_session_opened,
+            "heldout_bytes_decoded": self.heldout_bytes_decoded,
+            "primary_label_stream_constructed": self.primary_label_stream_constructed,
+            "primary_label_stream_accessed": self.primary_label_stream_accessed,
+        }
+        if observed != expected:
+            raise ValueError("R3 control input preparation timings are not closed")
+        _digest(self.timings_sha256, name="timings_sha256")
+        if self.timings_sha256 != _canonical_sha256(expected):
+            raise ValueError("R3 control input preparation timings self-hash is invalid")
+
+    def validate_integrity(self) -> None:
+        self.__post_init__()
+
+    def to_dict(self) -> dict[str, object]:
+        payload = _control_timing_payload(
+            input_capability_sha256=self.input_capability_sha256,
+            artifact_verification_wall_seconds=self.artifact_verification_wall_seconds,
+            oracle_rescore_wall_seconds=self.oracle_rescore_wall_seconds,
+            control_attestation_wall_seconds=self.control_attestation_wall_seconds,
+        )
+        return {**payload, "timings_sha256": self.timings_sha256}
+
+
+@dataclass(frozen=True, slots=True)
+class R3ControlTrainOnlyMaterializationResult:
+    """Sealed control input and non-authorizing preparation timings."""
+
+    capability: R3ControlTrainInputCapability
+    preparation_timings: R3ControlInputPreparationTimings
+
+    def __post_init__(self) -> None:
+        if type(self.capability) is not R3ControlTrainInputCapability:
+            raise TypeError("capability must be an exact R3ControlTrainInputCapability")
+        if type(self.preparation_timings) is not R3ControlInputPreparationTimings:
+            raise TypeError("preparation_timings must be exact R3 control input timings")
+        self.capability.validate_integrity()
+        self.preparation_timings.validate_integrity()
+        if self.preparation_timings.input_capability_sha256 != self.capability.capability_sha256:
+            raise ValueError("control preparation timings bind another input capability")
+
+    @property
+    def training(self) -> TrainingTensorData:
+        return self.capability.training
+
+    @property
+    def train_oracle_rewards(self) -> torch.Tensor:
+        return self.capability.train_oracle_rewards
+
+    def validate_integrity(self) -> None:
+        self.__post_init__()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "control_input_capability": self.capability.to_dict(),
+            "preparation_timings": self.preparation_timings.to_dict(),
+            "gate_p_capability_issued": False,
+            "primary_label_stream_constructed": False,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class R3TrainMaterializationCapability:
     """Process-local authority issued only by the real R3 input validator.
@@ -1409,7 +1914,8 @@ def _materialize_r3_train_only_from_parent(
     clock_ns: _Clock,
     safe_open_factory: _SafeOpenFactory,
     line_stream_factory: _LineStreamFactory,
-) -> R3TrainOnlyMaterializationResult:
+    control_only: bool = False,
+) -> R3TrainOnlyMaterializationResult | R3ControlTrainOnlyMaterializationResult:
     """Dependency-injected implementation; production wraps it with CUDA."""
 
     if type(science_bundle) is not R3ScienceConfigBundle:
@@ -1424,6 +1930,8 @@ def _materialize_r3_train_only_from_parent(
         raise TypeError("oracle_rescorer must be callable")
     if not callable(clock_ns):
         raise TypeError("clock_ns must be callable")
+    if type(control_only) is not bool:
+        raise TypeError("control_only must be bool")
 
     root = _require_real_root(project_root)
     registry_path = _resolve_file_argument(
@@ -1584,6 +2092,58 @@ def _materialize_r3_train_only_from_parent(
     t2 = _clock_value(clock_ns, name="preparation clock")
 
     train = train_cpu.to(target_device)
+    if control_only:
+        producer_sha = _canonical_sha256(campaign["producer"])
+        capability = _issue_control_train_input_capability(
+            training=train,
+            train_oracle_rewards=train_rewards,
+            science_bundle=science_bundle,
+            seed=requested_seed,
+            source_config_hash=campaign["base_config_hash"],
+            parent_registry_file_sha256=registry_sha,
+            parent_seed_entry_sha256=_canonical_sha256(entry),
+            artifact_metadata_sha256=metadata_sha,
+            artifact_tensors_sha256=tensor_sha,
+            artifact_candidates_sha256=candidate_sha,
+            candidate_train_prefix_sha256=candidate_prefix_sha,
+            candidate_train_prefix_count=len(candidates),
+            artifact_materialization_sha256=binding_sha,
+            artifact_verification_sha256=verification_sha,
+            source_run_manifest_sha256=manifest_sha,
+            source_producer_identity_sha256=producer_sha,
+            oracle_chat_template_sha256=oracle_template_sha,
+            oracle_transform_sha256=_canonical_sha256({"b": transform.b, "tau": transform.tau}),
+        )
+        t3 = _clock_value(clock_ns, name="preparation clock")
+        timing_payload = _control_timing_payload(
+            input_capability_sha256=capability.capability_sha256,
+            artifact_verification_wall_seconds=_elapsed_seconds(
+                t0,
+                t1,
+                name="artifact verification",
+            ),
+            oracle_rescore_wall_seconds=_elapsed_seconds(
+                t1,
+                t2,
+                name="oracle rescore",
+            ),
+            control_attestation_wall_seconds=_elapsed_seconds(
+                t2,
+                t3,
+                name="control attestation",
+            ),
+        )
+        timings = R3ControlInputPreparationTimings(
+            **timing_payload,
+            timings_sha256=_canonical_sha256(timing_payload),
+        )
+        result = R3ControlTrainOnlyMaterializationResult(
+            capability=capability,
+            preparation_timings=timings,
+        )
+        result.validate_integrity()
+        return result
+
     context = prepare_neutral_phase2_context(
         train,
         train_rewards,
@@ -1719,7 +2279,7 @@ def materialize_r3_train_only_from_parent(
     """
 
     target = _require_single_cuda(device)
-    return _materialize_r3_train_only_from_parent(
+    result = _materialize_r3_train_only_from_parent(
         project_root=project_root,
         parent_registry_path=parent_registry_path,
         expected_parent_registry_file_sha256=(expected_parent_registry_file_sha256),
@@ -1732,13 +2292,54 @@ def materialize_r3_train_only_from_parent(
         safe_open_factory=_default_safe_open,
         line_stream_factory=_default_line_stream,
     )
+    if type(result) is not R3TrainOnlyMaterializationResult:
+        raise RuntimeError("primary R3 materialization returned a control-only result")
+    return result
+
+
+def materialize_r3_control_train_only_from_parent(
+    *,
+    project_root: str | os.PathLike[str],
+    parent_registry_path: str | os.PathLike[str],
+    expected_parent_registry_file_sha256: str,
+    source_config_path: str | os.PathLike[str],
+    science_bundle: R3ScienceConfigBundle,
+    seed: int,
+    device: str | torch.device = "cuda",
+) -> R3ControlTrainOnlyMaterializationResult:
+    """Materialize one Gate-C input before any primary label stream exists."""
+
+    target = _require_single_cuda(device)
+    result = _materialize_r3_train_only_from_parent(
+        project_root=project_root,
+        parent_registry_path=parent_registry_path,
+        expected_parent_registry_file_sha256=(expected_parent_registry_file_sha256),
+        source_config_path=source_config_path,
+        science_bundle=science_bundle,
+        seed=seed,
+        target_device=target,
+        oracle_rescorer=_production_oracle_rescore,
+        clock_ns=time.perf_counter_ns,
+        safe_open_factory=_default_safe_open,
+        line_stream_factory=_default_line_stream,
+        control_only=True,
+    )
+    if type(result) is not R3ControlTrainOnlyMaterializationResult:
+        raise RuntimeError("Gate-C materialization returned a primary-label result")
+    return result
 
 
 __all__ = [
+    "R3_CONTROL_INPUT_PREPARATION_TIMINGS_SCHEMA",
+    "R3_CONTROL_TRAIN_INPUT_CAPABILITY_SCHEMA",
     "R3_INPUT_PREPARATION_TIMINGS_SCHEMA",
     "R3_TRAIN_MATERIALIZATION_CAPABILITY_SCHEMA",
+    "R3ControlInputPreparationTimings",
+    "R3ControlTrainInputCapability",
+    "R3ControlTrainOnlyMaterializationResult",
     "R3InputPreparationTimings",
     "R3TrainMaterializationCapability",
     "R3TrainOnlyMaterializationResult",
+    "materialize_r3_control_train_only_from_parent",
     "materialize_r3_train_only_from_parent",
 ]

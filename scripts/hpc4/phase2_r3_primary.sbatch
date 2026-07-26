@@ -95,6 +95,9 @@ image="$(realpath -e -- "${PRORM_R3_IMAGE}")"
 hf_cache="$(realpath -e -- "${PRORM_R3_HF_CACHE}")"
 science_config="$(realpath -e -- "${PRORM_R3_SCIENCE_CONFIG}")"
 attempt_root="$(realpath -e -- "${PRORM_R3_PRIMARY_ATTEMPT_ROOT}")"
+[[ "${attempt_root}" == \
+  "${project_root}/runs/phase2-recovery-r3/"* ]] \
+  || die "primary attempt root is outside the canonical R3 namespace"
 task_root_base="$(realpath -e -- "${PRORM_R3_PRIMARY_TASK_ROOT_BASE}")"
 submission_plan="$(realpath -e -- "${PRORM_R3_PRIMARY_SUBMISSION_PLAN}")"
 input_root="${project_root}/runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}"
@@ -106,6 +109,9 @@ input_root="$(realpath -e -- "${input_root}")"
   || die "commit input namespace is not canonical"
 expected_source_config="${input_root}/common_beta_recovery_pilot.yaml"
 expected_parent_registry="${input_root}/phase2_recovery_parent_failures.json"
+expected_science_config="${input_root}/phase2_recovery_r3_science.yaml"
+[[ "${PRORM_R3_SCIENCE_CONFIG}" == "${expected_science_config}" ]] \
+  || die "science config is not the exact retained clean-commit copy"
 [[ "${PRORM_R3_SOURCE_CONFIG}" == "${expected_source_config}" ]] \
   || die "source config is not the exact retained clean-commit copy"
 [[ "${PRORM_R3_PARENT_REGISTRY}" == "${expected_parent_registry}" ]] \
@@ -114,6 +120,9 @@ expected_parent_registry="${input_root}/phase2_recovery_parent_failures.json"
   || die "retained source config is not a regular file"
 [[ -f "${expected_parent_registry}" && ! -L "${expected_parent_registry}" ]] \
   || die "retained parent registry is not a regular file"
+[[ -f "${expected_science_config}" && ! -L "${expected_science_config}" ]] \
+  || die "retained science config is not a regular file"
+science_config="$(realpath -e -- "${expected_science_config}")"
 source_config="$(realpath -e -- "${expected_source_config}")"
 parent_registry="$(realpath -e -- "${expected_parent_registry}")"
 
@@ -123,9 +132,8 @@ parent_registry="$(realpath -e -- "${expected_parent_registry}")"
   || die "unexpected persistent materialization root"
 [[ "${scratch_root}" == "/scratch/yyangjo" ]] \
   || die "unexpected production scratch root"
-[[ "${science_config}" == \
-  "${repo_root}/configs/phase2_recovery_r3_science.yaml" ]] \
-  || die "science config must be the frozen R3 production config"
+[[ "${science_config}" == "${expected_science_config}" ]] \
+  || die "science config must be the retained R3 production config"
 [[ "${attempt_root}" == /project/sigroup/* ]] \
   || die "primary attempt root must be durable project evidence"
 [[ "${task_root_base}" == "${scratch_root}/phase2-r3/"* ]] \
@@ -141,6 +149,10 @@ observed_commit="$(git -C "${repo_root}" rev-parse HEAD)"
 [[ "${observed_commit}" == "${PRORM_R3_GIT_COMMIT}" ]] || die "Git commit drift"
 [[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=all)" ]] \
   || die "production checkout is not clean"
+cmp --silent -- \
+  "${repo_root}/configs/phase2_recovery_r3_science.yaml" \
+  "${science_config}" \
+  || die "retained science config differs from the clean commit"
 cmp --silent -- \
   "${repo_root}/configs/common_beta_recovery_pilot.yaml" \
   "${source_config}" \
@@ -320,6 +332,11 @@ apptainer exec \
       "${PRORM_R3_PROFILE_TERMINAL_MANIFEST_FILE_SHA256}" \
     --profile-terminal-raw-sacct-sha256 \
       "${PRORM_R3_PROFILE_TERMINAL_RAW_SACCT_SHA256}" \
+    --primary-submission-plan "${submission_plan}" \
+    --primary-submission-plan-file-sha256 \
+      "${PRORM_R3_PRIMARY_SUBMISSION_PLAN_FILE_SHA256}" \
+    --primary-submission-plan-sha256 \
+      "${PRORM_R3_PRIMARY_SUBMISSION_PLAN_SHA256}" \
     "${continuation_arguments[@]}" \
     --task-root "${task_root}" \
     --runtime-closure "${runtime_closure}" &

@@ -13,6 +13,9 @@
 set -euo pipefail
 umask 027
 
+readonly HOST_PYTHON="/opt/shared/spack/local/linux-rocky9-x86_64_v4/gcc-11.4.1/miniconda3-24.3.0-quc3pyudmzikgo2r4qsyqpwnrvzpin63/bin/python3.12"
+readonly HOST_PYTHON_SHA256="9c91f9aa231c61c6bf2eabb9b93ebc5a8269a4126a36125e9548d8853e32da9c"
+
 die() { echo "error: $*" >&2; exit 2; }
 
 for name in \
@@ -60,10 +63,19 @@ while IFS= read -r variable; do
   esac
 done < <(compgen -e)
 for command_name in \
-  apptainer git python3 realpath sha256sum awk mktemp cp mv ln tee id; do
+  apptainer git realpath sha256sum awk mktemp cp mv ln tee id; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || die "required command is unavailable: ${command_name}"
 done
+host_python="$(realpath -e -- "${HOST_PYTHON}")" \
+  || die "fixed host Python is unavailable"
+[[ "${host_python}" = "${HOST_PYTHON}" && -f "${host_python}" \
+  && -x "${host_python}" && ! -L "${host_python}" ]] \
+  || die "fixed host Python must be a canonical non-symlink executable"
+printf '%s  %s\n' "${HOST_PYTHON_SHA256}" "${host_python}" \
+  | sha256sum --check --status || die "fixed host Python SHA256 mismatch"
+[[ "$("${host_python}" --version 2>&1)" = "Python 3.12.2" ]] \
+  || die "fixed host Python version mismatch"
 
 require_directory() {
   local name="$1" raw="${!1}" resolved=""
@@ -248,7 +260,7 @@ runtime_export_spec_sha256="$(
   printf '%s' "${runtime_export_spec}" | sha256sum | awk '{print $1}'
 )"
 submission_validation="$(
-python3 \
+"${host_python}" \
   "${PRORM_REPO_ROOT}/scripts/hpc4/validate_phase2_post_recovery_submission.py" \
   "${submission_registry}" \
   --project-root "${PRORM_PROJECT_ROOT}" \
@@ -268,7 +280,7 @@ python3 \
   --submitter-user "$(id -un)"
 )" || die "post-recovery array submission registry validation failed"
 mapfile -t submission_hashes < <(
-  python3 -I -S - "${submission_validation}" <<'PY'
+  "${host_python}" -I -S - "${submission_validation}" <<'PY'
 import json
 import re
 import sys
@@ -373,7 +385,8 @@ finalize() {
   set +e
   for file in \
     authorization-check-host-before.json authorization-check-container.json \
-    authorization-check-host-after.json phase2-config-check.json \
+    authorization-check-host-after.json authorization-check-container-after.json \
+    phase2-config-check.json \
     base-config-check.json post-recovery-predecessor-check.json \
     hf-inventory-verification.json gpu-check.json \
     run-manifest.json env-report.log materialize.log memory-materialize.json \
@@ -388,7 +401,8 @@ finalize() {
   if [[ "${workload}" = "0" ]]; then
     for file in \
       authorization-check-host-before.json authorization-check-container.json \
-      authorization-check-host-after.json phase2-config-check.json \
+      authorization-check-host-after.json authorization-check-container-after.json \
+      phase2-config-check.json \
       base-config-check.json post-recovery-predecessor-check.json \
       hf-inventory-verification.json gpu-check.json \
       run-manifest.json env-report.log materialize.log memory-materialize.json \
@@ -430,11 +444,61 @@ assert_checkout() {
 }
 assert_checkout
 
-PYTHONPATH="${execution_repo}/src" python3 \
-  "${execution_repo}/scripts/hpc4/validate_phase2_recovery_authorization.py" \
-  "${PRORM_RECOVERY_AUTHORIZATION}" "${execution_overlay}" \
+authorization_inspector="$(
+  realpath -e -- \
+    "${execution_repo}/scripts/hpc4/inspect_phase2_post_recovery_stdlib.py"
+)" || die "detached authorization transport inspector is missing"
+[[ -f "${authorization_inspector}" && ! -L "${authorization_inspector}" ]] \
+  || die "detached authorization transport inspector is unsafe"
+"${host_python}" -I -S "${authorization_inspector}" authorization \
+  "${PRORM_RECOVERY_AUTHORIZATION}" \
   --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+  --project-root "${PRORM_PROJECT_ROOT}" --format json \
   >"${job_dir}/authorization-check-host-before.json"
+mapfile -t authorization_transport < <(
+  "${host_python}" -I -S "${authorization_inspector}" authorization \
+    "${PRORM_RECOVERY_AUTHORIZATION}" \
+    --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+    --project-root "${PRORM_PROJECT_ROOT}"
+)
+[[ "${#authorization_transport[@]}" -ge 3 \
+  && "${authorization_transport[2]}" =~ ^[0-9]+$ \
+  && "${#authorization_transport[@]}" = \
+    "$((3 + authorization_transport[2]))" ]] \
+  || die "authorization transport inspector returned an invalid bind plan"
+authorization_dependency_binds=()
+for (( index=3; index<${#authorization_transport[@]}; index++ )); do
+  IFS=$'\t' read -r dependency_kind dependency_path dependency_sha256 \
+    <<<"${authorization_transport[index]}"
+  [[ -n "${dependency_kind}" && -n "${dependency_path}" \
+    && -n "${dependency_sha256}" ]] \
+    || die "authorization dependency binding is malformed"
+  reject_delimiters authorization_dependency_path "${dependency_path}"
+  contained authorization_dependency_path "${dependency_path}" "${PRORM_PROJECT_ROOT}"
+  case "${dependency_kind}" in
+    file)
+      [[ "${dependency_sha256}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "authorization file dependency lacks a SHA256"
+      [[ -f "${dependency_path}" && ! -L "${dependency_path}" \
+        && "$(realpath -e -- "${dependency_path}")" = "${dependency_path}" ]] \
+        || die "authorization file dependency is unsafe"
+      printf '%s  %s\n' "${dependency_sha256}" "${dependency_path}" \
+        | sha256sum --check --status \
+        || die "authorization file dependency changed after inspection"
+      ;;
+    directory)
+      [[ "${dependency_sha256}" = "-" ]] \
+        || die "authorization directory dependency unexpectedly carries a hash"
+      [[ -d "${dependency_path}" && ! -L "${dependency_path}" \
+        && "$(realpath -e -- "${dependency_path}")" = "${dependency_path}" ]] \
+        || die "authorization directory dependency is unsafe"
+      ;;
+    *) die "authorization dependency kind is invalid" ;;
+  esac
+  authorization_dependency_binds+=(
+    --bind "${dependency_path}:${dependency_path}:ro"
+  )
+done
 
 datasets_cache="${job_dir}/hf-datasets-cache"
 tmp_dir="${job_dir}/tmp"
@@ -447,12 +511,16 @@ for path in "${datasets_cache}" "${tmp_dir}" "${xdg_cache}"; do
 done
 
 # Only this job directory is writable in the container.  The immutable HF
-# root and the exact authorization file are mounted individually read-only;
-# no recovery run, artifact, trained head, or optimizer directory is mounted.
+# root, final authorization, and the inspector-approved Gate-R evidence closure
+# are mounted individually read-only. No recovery head, checkpoint, optimizer
+# state, task-output directory, or broad Gate-R root is mounted.
 container=(
   apptainer exec --cleanenv --nv --no-mount home,cwd,bind-paths
   --pwd "${execution_repo}"
-  --bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}:ro,${PRORM_RECOVERY_AUTHORIZATION}:${PRORM_RECOVERY_AUTHORIZATION}:ro"
+  --bind "${job_dir}:${job_dir}"
+  --bind "${PRORM_HF_CACHE}:${PRORM_HF_CACHE}:ro"
+  --bind "${PRORM_RECOVERY_AUTHORIZATION}:${PRORM_RECOVERY_AUTHORIZATION}:ro"
+  "${authorization_dependency_binds[@]}"
   --env "PYTHONPATH=${execution_repo}/src"
   --env "PYTHONNOUSERSITE=1"
   --env "PYTHONDONTWRITEBYTECODE=1"
@@ -514,12 +582,13 @@ container+=("${PRORM_IMAGE}")
   "${execution_repo}/scripts/hpc4/validate_phase2_recovery_authorization.py" \
   "${PRORM_RECOVERY_AUTHORIZATION}" "${execution_overlay}" \
   --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+  --project-root "${PRORM_PROJECT_ROOT}" \
   >"${job_dir}/authorization-check-container.json"
 "${container[@]}" python -m smart_reward.cli phase2-config-check \
   "${execution_overlay}" | tee "${job_dir}/phase2-config-check.json"
 "${container[@]}" python -m smart_reward.cli config-check \
   "${execution_base}" | tee "${job_dir}/base-config-check.json"
-python3 -I -S - \
+"${host_python}" -I -S - \
   "${job_dir}/phase2-config-check.json" "${job_dir}/base-config-check.json" \
   "${PRORM_POST_RECOVERY_DESIGN_SHA256}" "${PRORM_PHASE2_BASE_CONFIG_HASH}" <<'PY'
 import json,sys
@@ -620,7 +689,7 @@ artifact_dir="${job_dir}/artifact"
 artifact_metadata_sha256="$(
   sha256sum -- "${artifact_dir}/metadata.json" | awk '{print $1}'
 )"
-python3 -I -S - \
+"${host_python}" -I -S - \
   "${job_dir}/artifact-materialization.json" \
   "${seed}" "${PRORM_POST_RECOVERY_DESIGN_SHA256}" \
   "${PRORM_PHASE2_BASE_CONFIG_HASH}" "${artifact_metadata_sha256}" \
@@ -731,11 +800,17 @@ artifact_relative="$(realpath --relative-to="${project_run}" "${project_artifact
 [[ "${artifact_relative}" != /* ]] || die "artifact link target must be relative"
 ln -s -- "${artifact_relative}" "${project_run}/artifact"
 
-PYTHONPATH="${execution_repo}/src" python3 \
+"${host_python}" -I -S "${authorization_inspector}" authorization \
+  "${PRORM_RECOVERY_AUTHORIZATION}" \
+  --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+  --project-root "${PRORM_PROJECT_ROOT}" --format json \
+  >"${job_dir}/authorization-check-host-after.json"
+"${container[@]}" python \
   "${execution_repo}/scripts/hpc4/validate_phase2_recovery_authorization.py" \
   "${PRORM_RECOVERY_AUTHORIZATION}" "${execution_overlay}" \
   --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
-  >"${job_dir}/authorization-check-host-after.json"
+  --project-root "${PRORM_PROJECT_ROOT}" \
+  >"${job_dir}/authorization-check-container-after.json"
 for binding in \
   "${PRORM_IMAGE}:${PRORM_IMAGE_SHA256}" \
   "${PRORM_HF_INVENTORY}:${PRORM_HF_INVENTORY_SHA256}" \

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,11 @@ from prepare_phase2_r3_continuation_submission import reopen_continuation_plan
 
 from smart_reward.phase2_checkpoint import CheckpointSignal
 from smart_reward.phase2_r3_config import load_r3_science_config
+from smart_reward.phase2_r3_execution_evidence import (
+    identity_receipt_path,
+    publish_segment_evidence_receipt,
+    reopen_primary_identity_receipt,
+)
 from smart_reward.phase2_r3_gate0 import verify_live_r3_gate0_in_container
 from smart_reward.phase2_r3_gate1 import verify_live_r3_gate1_in_container
 from smart_reward.phase2_r3_identity import (
@@ -81,6 +87,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--profile-terminal-manifest-file-sha256", required=True)
     parser.add_argument("--profile-terminal-raw-sacct-sha256", required=True)
+    parser.add_argument("--primary-submission-plan", type=Path, required=True)
+    parser.add_argument("--primary-submission-plan-file-sha256", required=True)
+    parser.add_argument("--primary-submission-plan-sha256", required=True)
     parser.add_argument("--continuation-plan", type=Path, required=True)
     parser.add_argument("--continuation-plan-file-sha256", required=True)
     parser.add_argument("--task-root", type=Path, required=True)
@@ -197,6 +206,34 @@ def main(argv: list[str] | None = None) -> int:
         seed=seed,
         device="cuda",
     )
+    identity_path = identity_receipt_path(arguments.project_root, task_id=task_id)
+    identity_file_sha256 = hashlib.sha256(identity_path.read_bytes()).hexdigest()
+    identity_receipt = reopen_primary_identity_receipt(
+        arguments.project_root,
+        task_id=task_id,
+        expected_file_sha256=identity_file_sha256,
+        expected_design=design,
+        expected_materialization_capability=materialized.capability,
+    )
+    plan_ref = identity_receipt["base_primary_submission_plan"]
+    if not isinstance(plan_ref, dict):
+        raise TypeError("retained identity base-plan ref must be a mapping")
+    expected_plan_path = arguments.primary_submission_plan.resolve(strict=True)
+    retained_plan_path = arguments.project_root.joinpath(*Path(str(plan_ref["path"])).parts)
+    if (
+        retained_plan_path != expected_plan_path
+        or plan_ref["file_sha256"]
+        != _digest(
+            arguments.primary_submission_plan_file_sha256,
+            name="primary submission plan file SHA-256",
+        )
+        or plan_ref["submission_plan_sha256"]
+        != _digest(
+            arguments.primary_submission_plan_sha256,
+            name="primary submission plan semantic SHA-256",
+        )
+    ):
+        raise ValueError("continuation identity receipt belongs to another base plan")
 
     continuation_evidence = None
     for expected_segment, entry in enumerate(route["history"], start=1):
@@ -220,6 +257,11 @@ def main(argv: list[str] | None = None) -> int:
             materialization_capability=materialized.capability,
             continuation_evidence=continuation_evidence,
         )
+        if (
+            expected_segment == 1
+            and predecessor.to_dict() != identity_receipt["segment_1_admission"]
+        ):
+            raise ValueError("segment-1 predecessor differs from the retained identity receipt")
         terminal = revalidate_continuable_primary_terminal(
             bundle,
             runtime_closure=closure,
@@ -265,6 +307,13 @@ def main(argv: list[str] | None = None) -> int:
         outcome=outcome,
         operational_bundle=bundle,
     )
+    segment_evidence = publish_segment_evidence_receipt(
+        arguments.project_root,
+        task_root=arguments.task_root,
+        identity_receipt_file_sha256=identity_file_sha256,
+        closure=closure,
+        runtime=runtime,
+    )
     _emit(
         {
             "status": "r3_primary_continuation_closed_pending_scheduler_terminal",
@@ -279,6 +328,11 @@ def main(argv: list[str] | None = None) -> int:
             "segment_outcome_sha256": outcome.outcome_sha256,
             "runtime_closure_sha256": closure.closure_sha256,
             "runtime_closure_file_sha256": closure.file_sha256,
+            "primary_identity_receipt_file_sha256": identity_file_sha256,
+            "segment_evidence_receipt_file_sha256": segment_evidence.file_sha256,
+            "segment_evidence_receipt_sha256": (
+                segment_evidence.payload["segment_evidence_receipt_sha256"]
+            ),
             "external_scheduler_terminal_required": True,
         }
     )

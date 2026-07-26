@@ -16,6 +16,10 @@ from pathlib import Path
 
 from smart_reward.phase2_checkpoint import CheckpointSignal
 from smart_reward.phase2_r3_config import load_r3_science_config
+from smart_reward.phase2_r3_execution_evidence import (
+    publish_primary_identity_receipt,
+    publish_segment_evidence_receipt,
+)
 from smart_reward.phase2_r3_gate0 import verify_live_r3_gate0_in_container
 from smart_reward.phase2_r3_gate1 import verify_live_r3_gate1_in_container
 from smart_reward.phase2_r3_identity import (
@@ -97,6 +101,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-terminal-manifest-file-sha256", required=True)
     parser.add_argument("--profile-terminal-raw-sacct-sha256", required=True)
 
+    parser.add_argument("--primary-submission-plan", type=Path, required=True)
+    parser.add_argument("--primary-submission-plan-file-sha256", required=True)
+    parser.add_argument("--primary-submission-plan-sha256", required=True)
     parser.add_argument("--task-root", type=Path, required=True)
     parser.add_argument("--runtime-closure", type=Path, required=True)
     return parser
@@ -193,6 +200,21 @@ def main(argv: list[str] | None = None) -> int:
         segment_index=1,
         continuation_evidence=None,
     )
+    identity_receipt = publish_primary_identity_receipt(
+        arguments.project_root,
+        base_primary_submission_plan_path=arguments.primary_submission_plan,
+        base_primary_submission_plan_file_sha256=_digest(
+            arguments.primary_submission_plan_file_sha256,
+            name="primary submission plan file SHA-256",
+        ),
+        base_primary_submission_plan_sha256=_digest(
+            arguments.primary_submission_plan_sha256,
+            name="primary submission plan semantic SHA-256",
+        ),
+        design=design,
+        materialization_capability=materialized.capability,
+        admission=admission,
+    )
     runtime = capture_slurm_segment_runtime(
         admission,
         requested_walltime_seconds=bundle.requested_walltime_seconds_per_segment,
@@ -212,6 +234,13 @@ def main(argv: list[str] | None = None) -> int:
         outcome=outcome,
         operational_bundle=bundle,
     )
+    segment_evidence = publish_segment_evidence_receipt(
+        arguments.project_root,
+        task_root=arguments.task_root,
+        identity_receipt_file_sha256=identity_receipt.file_sha256,
+        closure=closure,
+        runtime=runtime,
+    )
     _emit(
         {
             "status": ("r3_primary_segment_closed_pending_external_scheduler_terminal"),
@@ -226,6 +255,11 @@ def main(argv: list[str] | None = None) -> int:
             "segment_outcome_file_sha256": outcome.file_sha256,
             "runtime_closure_sha256": closure.closure_sha256,
             "runtime_closure_file_sha256": closure.file_sha256,
+            "primary_identity_receipt_file_sha256": identity_receipt.file_sha256,
+            "segment_evidence_receipt_file_sha256": segment_evidence.file_sha256,
+            "segment_evidence_receipt_sha256": (
+                segment_evidence.payload["segment_evidence_receipt_sha256"]
+            ),
             "external_scheduler_terminal_required": True,
         }
     )

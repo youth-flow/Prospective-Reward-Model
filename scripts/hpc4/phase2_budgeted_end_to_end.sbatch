@@ -18,6 +18,10 @@ readonly BUDGETED_STAGE="budgeted_end_to_end"
 readonly BUDGETED_EVIDENCE_ROLE="budgeted_end_to_end_fixed_three_exploratory_only"
 readonly ADOPTED_SCHEDULE_SHA256="46e0b0fdc70c507b0325c445068326ba7bc30326d70b65fa33803cc3c876c216"
 readonly SBATCH_RELATIVE="scripts/hpc4/phase2_budgeted_end_to_end.sbatch"
+readonly R3_AUTHORIZATION_RELATIVE="runs/phase2-recovery-r3-controls/gate-c-success-authorization.json"
+readonly R3_BIND_PLAN_RELATIVE="scripts/hpc4/phase2_budgeted_r3_bind_plan_stdlib.py"
+readonly HOST_PYTHON="/opt/shared/spack/local/linux-rocky9-x86_64_v4/gcc-11.4.1/miniconda3-24.3.0-quc3pyudmzikgo2r4qsyqpwnrvzpin63/bin/python3.12"
+readonly HOST_PYTHON_SHA256="9c91f9aa231c61c6bf2eabb9b93ebc5a8269a4126a36125e9548d8853e32da9c"
 verification_complete=0
 
 die() { echo "error: $*" >&2; exit 2; }
@@ -51,9 +55,18 @@ case "${SLURM_GPUS_ON_NODE:-}" in 1|gpu:1) ;; *) die "exactly one GPU is require
 [[ "${SLURM_ARRAY_TASK_MIN:-}" = 0 && "${SLURM_ARRAY_TASK_MAX:-}" = 2 && "${SLURM_ARRAY_TASK_STEP:-}" = 1 ]] || die "array must be exactly 0-2 step 1"
 [[ "${SLURM_ARRAY_TASK_ID}" =~ ^[0-2]$ ]] || die "array task must be 0..2"
 
-for command_name in apptainer git python3 realpath sha256sum awk mktemp cp rm ln id; do
+for command_name in apptainer git realpath sha256sum awk mktemp cp rm ln id; do
   command -v "${command_name}" >/dev/null 2>&1 || die "missing command: ${command_name}"
 done
+host_python="$(realpath -e -- "${HOST_PYTHON}")" \
+  || die "fixed host Python is unavailable"
+[[ "${host_python}" == "${HOST_PYTHON}" && -f "${host_python}" \
+  && -x "${host_python}" && ! -L "${host_python}" ]] \
+  || die "fixed host Python must be a canonical executable"
+printf '%s  %s\n' "${HOST_PYTHON_SHA256}" "${host_python}" \
+  | sha256sum --check --status || die "fixed host Python SHA-256 mismatch"
+[[ "$("${host_python}" --version 2>&1)" == "Python 3.12.2" ]] \
+  || die "fixed host Python version mismatch"
 while IFS= read -r variable; do
   case "${variable}" in APPTAINER*|SINGULARITY*) die "ambient container control is forbidden: ${variable}" ;; esac
 done < <(compgen -e)
@@ -76,6 +89,9 @@ for name in PRORM_IMAGE PRORM_HF_INVENTORY PRORM_RECOVERY_AUTHORIZATION PRORM_BU
 contained image "${PRORM_IMAGE}" "${PRORM_PROJECT_ROOT}"
 contained inventory "${PRORM_HF_INVENTORY}" "${PRORM_HF_CACHE}"
 contained authorization "${PRORM_RECOVERY_AUTHORIZATION}" "${PRORM_PROJECT_ROOT}"
+[[ "${PRORM_RECOVERY_AUTHORIZATION}" == \
+  "${PRORM_PROJECT_ROOT}/${R3_AUTHORIZATION_RELATIVE}" ]] \
+  || die "GateE requires the exact fixed R3 combined authorization"
 contained freeze-evidence "${PRORM_BUDGETED_FREEZE_EVIDENCE}" "${PRORM_PROJECT_ROOT}"
 case "${PRORM_PROJECT_ROOT}" in "${PRORM_SCRATCH_ROOT}"|"${PRORM_SCRATCH_ROOT}"/*) die "project and scratch roots overlap" ;; esac
 case "${PRORM_SCRATCH_ROOT}" in "${PRORM_PROJECT_ROOT}"|"${PRORM_PROJECT_ROOT}"/*) die "project and scratch roots overlap" ;; esac
@@ -84,7 +100,7 @@ for name in PRORM_IMAGE_SHA256 PRORM_HF_INVENTORY_SHA256 PRORM_BUDGETED_OVERLAY_
 done
 [[ "${PRORM_GIT_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]] || die "PRORM_GIT_COMMIT must be a full lowercase object id"
 [[ "${PRORM_OPTIMIZER_SCHEDULE_SHA256}" = "${ADOPTED_SCHEDULE_SHA256}" ]] || die "optimizer schedule is not the adopted recovery schedule"
-python3 - "${PRORM_BUDGETED_FROZEN_BETA}" <<'PY'
+"${host_python}" - "${PRORM_BUDGETED_FROZEN_BETA}" <<'PY'
 import math, sys
 value = float(sys.argv[1])
 if not math.isfinite(value) or value <= 0:
@@ -149,7 +165,7 @@ runtime_export_spec_sha256="$(
 
 # The submitter API is intentionally invoked directly below: it binds this
 # task to the exact held-and-ledgered array, rather than trusting a path alone.
-mapfile -t submission_hashes < <(PYTHONPATH="${PRORM_REPO_ROOT}/src" python3 - "${ledger}" "${PRORM_PROJECT_ROOT}" "${PRORM_REPO_ROOT}" "${PRORM_BUDGETED_DESIGN_SHA256}" "${PRORM_BUDGETED_BASE_CONFIG_HASH}" "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" "${PRORM_OPTIMIZER_SCHEDULE_SHA256}" "${PRORM_GIT_COMMIT}" "${PRORM_IMAGE_SHA256}" "${PRORM_HF_INVENTORY_SHA256}" "${PRORM_BUDGETED_OVERLAY_SHA256}" "${PRORM_BUDGETED_BASE_SHA256}" "${runtime_export_spec_sha256}" "${SLURM_ARRAY_JOB_ID}" "$(id -un)" <<'PY'
+mapfile -t submission_hashes < <(PYTHONPATH="${PRORM_REPO_ROOT}/src" "${host_python}" - "${ledger}" "${PRORM_PROJECT_ROOT}" "${PRORM_REPO_ROOT}" "${PRORM_BUDGETED_DESIGN_SHA256}" "${PRORM_BUDGETED_BASE_CONFIG_HASH}" "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" "${PRORM_OPTIMIZER_SCHEDULE_SHA256}" "${PRORM_GIT_COMMIT}" "${PRORM_IMAGE_SHA256}" "${PRORM_HF_INVENTORY_SHA256}" "${PRORM_BUDGETED_OVERLAY_SHA256}" "${PRORM_BUDGETED_BASE_SHA256}" "${runtime_export_spec_sha256}" "${SLURM_ARRAY_JOB_ID}" "$(id -un)" <<'PY'
 import importlib.util, json, sys
 # Load from the committed submission checkout, not from a package registry.
 path = sys.argv[3] + "/scripts/hpc4/submit_phase2_budgeted_end_to_end_once.py"
@@ -173,7 +189,7 @@ mkdir -p -- "$(dirname -- "${job_dir}")" "${seed_root}" "$(dirname -- "${project
 mkdir -- "${job_dir}" "${project_run}"
 
 fsync_directory() {
-  python3 -I -S - "$1" <<'PY'
+  "${host_python}" -I -S - "$1" <<'PY'
 import os
 import stat
 import sys
@@ -198,7 +214,7 @@ finally:
 PY
 }
 install_file_no_replace() {
-  python3 -I -S - "$1" "$2" <<'PY'
+  "${host_python}" -I -S - "$1" "$2" <<'PY'
 import os
 import stat
 import sys
@@ -342,7 +358,7 @@ atomic_copy() {
   install_file_no_replace "${temporary}" "${target}"
 }
 atomic_directory_publish_no_replace() {
-  python3 -I -S - "$1" "$2" "$3" <<'PY'
+  "${host_python}" -I -S - "$1" "$2" "$3" <<'PY'
 import ctypes
 import errno
 import hashlib
@@ -503,7 +519,7 @@ write_marker() {
   install_file_no_replace "${temporary}" "${project_run}/${status}"
 }
 verify_published_success_closure() {
-  python3 -I -S - \
+  "${host_python}" -I -S - \
     "${project_run}" "${project_artifact}" "${verification_complete}" \
     "${seed}" "${PRORM_BUDGETED_DESIGN_SHA256}" \
     "${PRORM_BUDGETED_BASE_CONFIG_HASH}" \
@@ -737,13 +753,13 @@ PY
 finalize() {
   local workload=$? final marker file sync=0
   trap - EXIT; set +e
-  for file in authorization-check-host.json authorization-check-container.json accepted-freeze-preflight.json phase2-config-check.json base-config-check.json budgeted-overlay-binding-check.json hf-inventory-verification.json gpu-check.json run-manifest.json materialize.log memory-materialize.json artifact-materialization.json artifact-verification.json phase2-run.log memory-phase2.json phase2-result.json phase2-result.rollouts.jsonl phase2-budgeted-output-verification.json phase2-failure-evidence.json; do
+  for file in authorization-check-container.json accepted-freeze-preflight.json phase2-config-check.json base-config-check.json budgeted-overlay-binding-check.json hf-inventory-verification.json gpu-check.json run-manifest.json materialize.log memory-materialize.json artifact-materialization.json artifact-verification.json phase2-run.log memory-phase2.json phase2-result.json phase2-result.rollouts.jsonl phase2-budgeted-output-verification.json phase2-failure-evidence.json; do
     if [[ -e "${job_dir}/${file}" || -L "${job_dir}/${file}" ]]; then
       atomic_copy "${job_dir}/${file}" "${file}" || sync=1
     fi
   done
   if [[ "${workload}" = 0 ]]; then
-    for file in authorization-check-host.json authorization-check-container.json accepted-freeze-preflight.json budgeted-overlay-binding-check.json run-manifest.json artifact-materialization.json phase2-result.json phase2-result.rollouts.jsonl phase2-budgeted-output-verification.json; do [[ -f "${project_run}/${file}" && ! -L "${project_run}/${file}" ]] || sync=1; done
+    for file in authorization-check-container.json accepted-freeze-preflight.json budgeted-overlay-binding-check.json run-manifest.json artifact-materialization.json phase2-result.json phase2-result.rollouts.jsonl phase2-budgeted-output-verification.json; do [[ -f "${project_run}/${file}" && ! -L "${project_run}/${file}" ]] || sync=1; done
     [[ -L "${project_run}/artifact" && -d "${project_run}/artifact" ]] || sync=1
     [[ "${verification_complete}" = 1 ]] || sync=1
     if (( sync == 0 )); then
@@ -778,9 +794,27 @@ for evidence_root in \
   "${PRORM_PROJECT_ROOT}/artifacts/phase2-post-recovery-freeze"; do
   [[ -d "${evidence_root}" && ! -L "${evidence_root}" ]] || die "accepted-freeze evidence root is missing or unsafe: ${evidence_root}"
 done
+mapfile -t r3_bind_paths < <(
+  "${host_python}" -I -S "${execution_repo}/${R3_BIND_PLAN_RELATIVE}" \
+    "${PRORM_RECOVERY_AUTHORIZATION}" \
+    --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+    --project-root "${PRORM_PROJECT_ROOT}" \
+    --emit paths
+) || die "minimal R3 authorization bind-plan construction failed"
+[[ "${#r3_bind_paths[@]}" -ge 10 ]] \
+  || die "minimal R3 authorization bind plan is incomplete"
+r3_bind_arguments=()
+for path in "${r3_bind_paths[@]}"; do
+  [[ "${path}" == "${PRORM_PROJECT_ROOT}/"* \
+    && "${path}" != *","* && "${path}" != *":"* \
+    && "${path}" != *$'\n'* && "${path}" != *$'\r'* ]] \
+    || die "unsafe R3 verification bind path"
+  r3_bind_arguments+=(--bind "${path}:${path}:ro")
+done
 container=(
   apptainer exec --cleanenv --nv --no-mount home,cwd,bind-paths --pwd "${execution_repo}"
-  --bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}:ro,${PRORM_RECOVERY_AUTHORIZATION}:${PRORM_RECOVERY_AUTHORIZATION}:ro,${PRORM_BUDGETED_FREEZE_EVIDENCE}:${PRORM_BUDGETED_FREEZE_EVIDENCE}:ro"
+  --bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}:ro,${PRORM_BUDGETED_FREEZE_EVIDENCE}:${PRORM_BUDGETED_FREEZE_EVIDENCE}:ro"
+  "${r3_bind_arguments[@]}"
   --bind "${PRORM_PROJECT_ROOT}/aggregates:${PRORM_PROJECT_ROOT}/aggregates:ro"
   --bind "${PRORM_PROJECT_ROOT}/runs/phase2-post-recovery-calibration:${PRORM_PROJECT_ROOT}/runs/phase2-post-recovery-calibration:ro"
   --bind "${PRORM_PROJECT_ROOT}/artifacts/phase2-post-recovery-calibration:${PRORM_PROJECT_ROOT}/artifacts/phase2-post-recovery-calibration:ro"
@@ -804,21 +838,15 @@ for variable in \
   [[ -v "${variable}" ]] && container+=(--env "${variable}=${!variable}")
 done
 container+=("${PRORM_IMAGE}")
-PYTHONPATH="${execution_repo}/src" python3 \
-  "${execution_repo}/scripts/hpc4/validate_phase2_recovery_authorization.py" \
-  "${PRORM_RECOVERY_AUTHORIZATION}" "${execution_overlay}" \
-  --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
-  --expected-stage budgeted_end_to_end \
-  >"${job_dir}/authorization-check-host.json"
 "${container[@]}" python \
-  "${execution_repo}/scripts/hpc4/validate_phase2_recovery_authorization.py" \
+  "${execution_repo}/scripts/hpc4/verify_phase2_budgeted_r3_authorization.py" \
   "${PRORM_RECOVERY_AUTHORIZATION}" "${execution_overlay}" \
   --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
-  --expected-stage budgeted_end_to_end \
+  --project-root "${PRORM_PROJECT_ROOT}" \
   >"${job_dir}/authorization-check-container.json"
 "${container[@]}" python -m smart_reward.cli phase2-config-check "${execution_overlay}" | tee "${job_dir}/phase2-config-check.json"
 "${container[@]}" python -m smart_reward.cli config-check "${execution_base}" | tee "${job_dir}/base-config-check.json"
-python3 -I -S - "${job_dir}/phase2-config-check.json" "${job_dir}/base-config-check.json" "${PRORM_BUDGETED_DESIGN_SHA256}" "${PRORM_BUDGETED_BASE_CONFIG_HASH}" <<'PY'
+"${host_python}" -I -S - "${job_dir}/phase2-config-check.json" "${job_dir}/base-config-check.json" "${PRORM_BUDGETED_DESIGN_SHA256}" "${PRORM_BUDGETED_BASE_CONFIG_HASH}" <<'PY'
 import json, sys
 from pathlib import Path
 phase2=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); base=json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
@@ -876,7 +904,7 @@ PY
 artifact_dir="${job_dir}/artifact"
 "${container[@]}" env "PRORM_MEMORY_REPORT=${job_dir}/memory-materialize.json" python -m smart_reward.cli controlled-materialize "${execution_base}" "${artifact_dir}" --seed "${seed}" --device cuda 2>&1 | tee "${job_dir}/materialize.log"
 artifact_metadata_sha256="$(sha256 "${artifact_dir}/metadata.json")"
-python3 -I -S - "${job_dir}/artifact-materialization.json" "${seed}" "${PRORM_BUDGETED_DESIGN_SHA256}" "${PRORM_BUDGETED_BASE_CONFIG_HASH}" "${artifact_metadata_sha256}" <<'PY'
+"${host_python}" -I -S - "${job_dir}/artifact-materialization.json" "${seed}" "${PRORM_BUDGETED_DESIGN_SHA256}" "${PRORM_BUDGETED_BASE_CONFIG_HASH}" "${artifact_metadata_sha256}" <<'PY'
 import json, sys
 from pathlib import Path
 output, seed, design, base, metadata = sys.argv[1:]

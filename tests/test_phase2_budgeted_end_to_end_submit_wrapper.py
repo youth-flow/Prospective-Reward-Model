@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,11 +21,16 @@ from smart_reward.phase2_config import (
     PHASE2_BUDGETED_END_TO_END_EVIDENCE_ROLE,
     PHASE2_BUDGETED_END_TO_END_SEEDS,
     PHASE2_BUDGETED_END_TO_END_STAGE,
+    build_post_recovery_authorization_reference,
 )
-from smart_reward.phase2_post_recovery_control import OPTIMIZER_SCHEDULE_SHA256
+from smart_reward.phase2_r3_post_recovery_contract import (
+    R3_FINAL_AUTHORIZATION_RELATIVE,
+    R3_OPTIMIZER_SCHEDULE_SHA256,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / "scripts" / "hpc4" / "submit_phase2_budgeted_end_to_end.sh"
+DRIVER = ROOT / "scripts" / "hpc4" / "phase2_budgeted_end_to_end_submission.sbatch"
 SBATCH = ROOT / "scripts" / "hpc4" / "phase2_budgeted_end_to_end.sbatch"
 
 EXPECTED_EXPORT_ORDER = (
@@ -70,7 +74,7 @@ def _export_keys(template: str) -> tuple[str, ...]:
 
 
 def _validator_source() -> str:
-    source = _source(WRAPPER)
+    source = _source(DRIVER)
     begin = source.index("# BEGIN BUDGETED_DEEP_VALIDATOR")
     end = source.index("# END BUDGETED_DEEP_VALIDATOR")
     return source[begin:end]
@@ -95,6 +99,18 @@ def _write_canonical_json(path: Path, value: object) -> None:
     )
 
 
+def _r3_authorization(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    path = ROOT / "tests" / "test_phase2_r3_post_recovery_bridge.py"
+    spec = importlib.util.spec_from_file_location(
+        "_budgeted_submit_r3_authorization_helpers",
+        path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._combined(monkeypatch)[2]
+
+
 def _execute_deep_validator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -107,6 +123,7 @@ def _execute_deep_validator(
     import smart_reward.phase2_config as phase2_config
     import smart_reward.phase2_pilot_aggregate as pilot_aggregate
     import smart_reward.phase2_post_recovery_control as post_recovery_control
+    import smart_reward.phase2_r3_post_recovery_authorization as r3_authorization
     import smart_reward.phase2_training as phase2_training
 
     overlay = tmp_path / Path(PHASE2_BUDGETED_END_TO_END_CONFIG).name
@@ -118,6 +135,7 @@ def _execute_deep_validator(
     base.write_text("base\n", encoding="utf-8", newline="\n")
     authorization.write_text("{}\n", encoding="utf-8", newline="\n")
     authorization_sha256 = _sha256(authorization)
+    authorization_payload = _r3_authorization(monkeypatch)
 
     freeze_value: dict[str, Any] = {
         "schema_version": "common-beta-pilot-selection-aggregate/v3",
@@ -184,6 +202,10 @@ def _execute_deep_validator(
                 "parent_pilot_aggregate_sha256": freeze_sha256,
             }
         },
+        "recovery_success_reference": build_post_recovery_authorization_reference(
+            authorization_payload,
+            artifact_sha256=authorization_sha256,
+        ),
     }
     bundle = SimpleNamespace(
         config=config,
@@ -212,7 +234,7 @@ def _execute_deep_validator(
 
     protocol = SimpleNamespace(
         mode="adopted",
-        schedule_sha256=OPTIMIZER_SCHEDULE_SHA256,
+        schedule_sha256=R3_OPTIMIZER_SCHEDULE_SHA256,
         source_recovery_authorization_sha256=authorization_sha256,
         to_dict=lambda: {"scope": "every_phase2_first_order_convergence_trainer"},
     )
@@ -233,16 +255,9 @@ def _execute_deep_validator(
         lambda _path: bundle,
     )
     monkeypatch.setattr(
-        post_recovery_control,
-        "verify_recovery_authorization_config_binding",
-        lambda *_args, **_kwargs: {
-            "authorization_sha256": authorization_sha256,
-            "phase2_design_sha256": design_sha256,
-            "base_config_hash": base_hash,
-            "optimizer_schedule_sha256": OPTIMIZER_SCHEDULE_SHA256,
-            "stage": PHASE2_BUDGETED_END_TO_END_STAGE,
-            "pilot_phase": None,
-        },
+        r3_authorization,
+        "verify_r3_final_authorization",
+        lambda *_args, **_kwargs: authorization_payload,
     )
     monkeypatch.setattr(
         post_recovery_control,
@@ -283,6 +298,7 @@ def _execute_deep_validator(
         authorization_sha256,
         os.fspath(freeze),
         freeze_sha256,
+        os.fspath(tmp_path),
         PHASE2_BUDGETED_END_TO_END_CONFIG,
         PHASE2_BUDGETED_END_TO_END_BASE_CONFIG,
         "configs/.common_beta_post_recovery_budgeted_end_to_end.materialized.json",
@@ -302,7 +318,7 @@ def _execute_deep_validator(
 
 
 def test_wrapper_and_sbatch_share_one_canonical_export_field_order() -> None:
-    wrapper_template = _assignment(_source(WRAPPER), "export_spec")
+    wrapper_template = _assignment(_source(DRIVER), "export_spec")
     sbatch_template = _assignment(_source(SBATCH), "runtime_export_spec")
 
     assert _export_keys(wrapper_template) == EXPECTED_EXPORT_ORDER
@@ -312,7 +328,7 @@ def test_wrapper_and_sbatch_share_one_canonical_export_field_order() -> None:
 
 
 def test_wrapper_locks_exact_budgeted_files_and_deep_production_gates() -> None:
-    source = _source(WRAPPER)
+    source = _source(DRIVER)
     for required in (
         'readonly OVERLAY_RELATIVE="configs/common_beta_post_recovery_budgeted_end_to_end.yaml"',
         (
@@ -323,13 +339,14 @@ def test_wrapper_locks_exact_budgeted_files_and_deep_production_gates() -> None:
             'readonly MATERIALIZATION_RECEIPT_RELATIVE="configs/'
             '.common_beta_post_recovery_budgeted_end_to_end.materialized.json"'
         ),
-        'readonly AUTHORIZATION_RELATIVE="runs/phase2-recovery-pilot/'
-        'recovery-success-authorization.json"',
-        "verify_recovery_authorization_config_binding(",
+        f'readonly AUTHORIZATION_RELATIVE="{R3_FINAL_AUTHORIZATION_RELATIVE.as_posix()}"',
+        "verify_r3_final_authorization(",
+        "validate_post_recovery_authorization_reference(",
+        "phase2_budgeted_r3_bind_plan_stdlib.py",
         "verify_post_recovery_aggregate_success_receipt(",
         "verify_beta_source_aggregate(config, freeze)",
         "verify_horizon_parent_aggregate(config, freeze)",
-        "expected_stage=PHASE2_BUDGETED_END_TO_END_STAGE",
+        "settings.stage != PHASE2_BUDGETED_END_TO_END_STAGE",
         "settings.convergence.max_steps != 12760",
         "settings.convergence.check_interval != 20",
         "settings.convergence.consecutive_checks != 3",
@@ -348,7 +365,7 @@ def test_wrapper_locks_exact_budgeted_files_and_deep_production_gates() -> None:
 
 @pytest.mark.parametrize("walltime", ("12:00:00", "2-00:00:00"))
 def test_legal_walltimes_pass_the_dedicated_nonexport_validation(walltime: str) -> None:
-    source = _source(WRAPPER)
+    source = _source(DRIVER)
     match = re.search(
         r'\[\[ "\$\{walltime\}" =~ \^\(([^\\\n]+)\)\$ \]\]',
         source,
@@ -397,91 +414,21 @@ def test_executable_deep_validator_emits_only_locked_submission_identity(
                 "run": {"seeds": list(PHASE2_BUDGETED_END_TO_END_SEEDS)},
             }
         ),
-        OPTIMIZER_SCHEDULE_SHA256,
+        R3_OPTIMIZER_SCHEDULE_SHA256,
         "2.5",
         "a" * 40,
     )
 
 
-def test_executable_wrapper_rejects_a_dirty_checkout_before_submission(
-    tmp_path: Path,
-) -> None:
-    bash = shutil.which("bash")
-    git = shutil.which("git")
-    if bash is None or git is None:
-        pytest.skip("bash and git are required for the executable shell check")
-    repo = tmp_path / "repo"
-    script = repo / "scripts" / "hpc4" / WRAPPER.name
-    script.parent.mkdir(parents=True)
-    shutil.copyfile(WRAPPER, script)
-    subprocess.run([git, "-C", os.fspath(repo), "init"], check=True, capture_output=True)
-    subprocess.run(
-        [git, "-C", os.fspath(repo), "config", "user.name", "Budgeted Wrapper Test"],
-        check=True,
-    )
-    subprocess.run(
-        [
-            git,
-            "-C",
-            os.fspath(repo),
-            "config",
-            "user.email",
-            "budgeted-wrapper@example.invalid",
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [git, "-C", os.fspath(repo), "add", "--", "scripts"],
-        check=True,
-    )
-    subprocess.run(
-        [git, "-C", os.fspath(repo), "commit", "-m", "wrapper"],
-        check=True,
-        capture_output=True,
-    )
-    (repo / "dirty.txt").write_text("untracked\n", encoding="utf-8")
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not (
-            key.startswith(("APPTAINER", "SINGULARITY", "SBATCH_", "PRORM_BUDGETED_"))
-            or key
-            in {
-                "PRORM_RECOVERY_AUTHORIZATION",
-                "PRORM_OPTIMIZER_SCHEDULE_SHA256",
-                "PRORM_GIT_COMMIT",
-                "PRORM_HF_INVENTORY",
-                "PRORM_HF_INVENTORY_SHA256",
-                "PRORM_REPO_ROOT",
-            }
-        )
-    }
-    environment.update(
-        {
-            "PRORM_PROJECT_ROOT": "/not-reached/project",
-            "PRORM_SCRATCH_ROOT": "/not-reached/scratch",
-            "PRORM_IMAGE": "images/prorm.sif",
-            "PRORM_IMAGE_SHA256": "a" * 64,
-            "PRORM_HF_CACHE": "hf-cache",
-        }
-    )
-
-    completed = subprocess.run(
-        [
-            bash,
-            os.fspath(script),
-            "overlay.yaml",
-            "authorization.json",
-            "accepted-freeze.json",
-            "12:00:00",
-        ],
-        cwd=repo,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 2
-    assert "clean committed worktree" in completed.stderr
-    assert "sbatch" not in completed.stderr
+def test_login_wrapper_is_thin_and_dispatches_only_to_short_l20_compute() -> None:
+    source = _source(WRAPPER)
+    assert '"/home/yyangjo/Smart-Reward-Model"' in source
+    assert "exec srun" in source
+    assert "--partition=gpu-l20" in source
+    assert "--gpus-per-node=1" in source
+    assert "--cpus-per-task=2" in source
+    assert "--mem=4G" in source
+    assert "--time=00:30:00" in source
+    assert "phase2_budgeted_end_to_end_submission.sbatch" in source
+    for forbidden in ("python3", "apptainer", "git -C", "sha256sum", "\nsbatch "):
+        assert forbidden not in source

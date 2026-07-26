@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=prorm-p2-post-agg
 #SBATCH --account=sigroup
+#SBATCH --partition=gpu-l20
+#SBATCH --qos=l20_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
+#SBATCH --gpus-per-node=1
 #SBATCH --no-requeue
 
 set -euo pipefail
 umask 027
+readonly HOST_PYTHON="/opt/shared/spack/local/linux-rocky9-x86_64_v4/gcc-11.4.1/miniconda3-24.3.0-quc3pyudmzikgo2r4qsyqpwnrvzpin63/bin/python3.12"
+readonly HOST_PYTHON_SHA256="9c91f9aa231c61c6bf2eabb9b93ebc5a8269a4126a36125e9548d8853e32da9c"
 die() { echo "error: $*" >&2; exit 2; }
 
 for name in \
@@ -40,27 +45,39 @@ done
   || die "post-recovery aggregation must be one non-array job"
 [[ "${SLURM_CLUSTER_NAME:-}" = "hpc4" ]] || die "aggregation requires hpc4"
 [[ "${SLURM_JOB_ACCOUNT:-}" = "sigroup" ]] || die "aggregation requires sigroup"
-case "${SLURM_JOB_PARTITION:-}" in amd|intel) ;; *) die "aggregation requires amd/intel" ;; esac
+[[ "${SLURM_JOB_PARTITION:-}" = "gpu-l20" ]] \
+  || die "aggregation requires the verified gpu-l20 SIF runtime"
 [[ "${SLURM_RESTART_COUNT:-0}" = "0" ]] || die "aggregation refuses restart/requeue"
 [[ "${SLURM_NNODES:-}" = "1" && "${SLURM_NTASKS:-}" = "1" ]] \
   || die "aggregation requires one node/task"
-[[ -z "${CUDA_VISIBLE_DEVICES:-}" ]] || die "aggregation must not receive CUDA visibility"
-for variable in SLURM_JOB_GRES SLURM_STEP_GRES SLURM_TRES_PER_JOB SLURM_TRES_PER_NODE; do
-  [[ "${!variable:-}" != *gpu* ]] || die "aggregation must not receive GPU GRES"
-done
+case "${SLURM_GPUS_ON_NODE:-}" in
+  1|gpu:1) ;;
+  *) die "aggregation requires exactly one allocated L20" ;;
+esac
+[[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_VISIBLE_DEVICES}" != *,* ]] \
+  || die "aggregation requires exactly one visible allocated GPU"
 while IFS= read -r variable; do
   case "${variable}" in
     APPTAINER*|SINGULARITY*) die "unset exported ${variable}" ;;
   esac
 done < <(compgen -e)
 for command_name in \
-  apptainer git python3 realpath sha256sum awk mktemp cp mv tee id; do
+  apptainer git realpath sha256sum awk mktemp cp mv tee id; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || die "required command is unavailable: ${command_name}"
 done
+host_python="$(realpath -e -- "${HOST_PYTHON}")" \
+  || die "fixed host Python is unavailable"
+[[ "${host_python}" = "${HOST_PYTHON}" && -f "${host_python}" \
+  && -x "${host_python}" && ! -L "${host_python}" ]] \
+  || die "fixed host Python must be a canonical non-symlink executable"
+printf '%s  %s\n' "${HOST_PYTHON_SHA256}" "${host_python}" \
+  | sha256sum --check --status || die "fixed host Python SHA256 mismatch"
+[[ "$("${host_python}" --version 2>&1)" = "Python 3.12.2" ]] \
+  || die "fixed host Python version mismatch"
 
 fsync_file() {
-  python3 -I -S - "$1" <<'PY'
+  "${host_python}" -I -S - "$1" <<'PY'
 import os
 import stat
 import sys
@@ -77,7 +94,7 @@ PY
 }
 
 fsync_directory() {
-  python3 -I -S - "$1" <<'PY'
+  "${host_python}" -I -S - "$1" <<'PY'
 import os
 import stat
 import sys
@@ -99,7 +116,7 @@ PY
 }
 
 fsync_tree() {
-  python3 -I -S - "$1" <<'PY'
+  "${host_python}" -I -S - "$1" <<'PY'
 import os
 import stat
 import sys
@@ -294,7 +311,7 @@ aggregate_workload_export_sha256="$(
   "${PRORM_POST_RECOVERY_AGGREGATE_WORKLOAD_EXPORT_SHA256}" ]] \
   || die "aggregate workload export differs from its precommitted intent"
 aggregate_submission_validation="$(
-python3 \
+"${host_python}" \
   "${PRORM_REPO_ROOT}/scripts/hpc4/validate_phase2_post_recovery_aggregate_submission.py" \
   "${PRORM_POST_RECOVERY_AGGREGATE_SUBMISSION_REGISTRY}" \
   --intent-sha256 "${PRORM_POST_RECOVERY_AGGREGATE_INTENT_SHA256}" \
@@ -305,9 +322,9 @@ python3 \
   --output "${PRORM_POST_RECOVERY_AGGREGATE_OUTPUT}" \
   --workload-export-sha256 \
   "${PRORM_POST_RECOVERY_AGGREGATE_WORKLOAD_EXPORT_SHA256}"
-)" || die "CPU aggregate submission registry validation failed"
+)" || die "gpu-l20 aggregate submission registry validation failed"
 mapfile -t aggregate_submission_fields < <(
-  python3 -I -S - "${aggregate_submission_validation}" <<'PY'
+  "${host_python}" -I -S - "${aggregate_submission_validation}" <<'PY'
 import json
 import re
 import sys
@@ -382,7 +399,7 @@ pilot_export_spec_sha256="$(
   printf '%s' "${pilot_export_spec}" | sha256sum | awk '{print $1}'
 )"
 submission_validation="$(
-python3 \
+"${host_python}" \
   "${PRORM_REPO_ROOT}/scripts/hpc4/validate_phase2_post_recovery_submission.py" \
   "${submission_registry}" \
   --project-root "${PRORM_PROJECT_ROOT}" \
@@ -403,7 +420,7 @@ python3 \
   --submitter-user "$(id -un)"
 )" || die "pilot submission registry validation failed before aggregation"
 mapfile -t submission_hashes < <(
-  python3 -I -S - "${submission_validation}" <<'PY'
+  "${host_python}" -I -S - "${submission_validation}" <<'PY'
 import json
 import re
 import sys
@@ -498,7 +515,60 @@ assert_checkout() {
 }
 assert_checkout
 
+authorization_inspector="$(
+  realpath -e -- \
+    "${execution_repo}/scripts/hpc4/inspect_phase2_post_recovery_stdlib.py"
+)" || die "detached authorization transport inspector is missing"
+[[ -f "${authorization_inspector}" && ! -L "${authorization_inspector}" ]] \
+  || die "detached authorization transport inspector is unsafe"
+"${host_python}" -I -S "${authorization_inspector}" authorization \
+  "${PRORM_RECOVERY_AUTHORIZATION}" \
+  --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+  --project-root "${PRORM_PROJECT_ROOT}" --format json \
+  >"${job_dir}/authorization-check-host.json"
+mapfile -t authorization_transport < <(
+  "${host_python}" -I -S "${authorization_inspector}" authorization \
+    "${PRORM_RECOVERY_AUTHORIZATION}" \
+    --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+    --project-root "${PRORM_PROJECT_ROOT}"
+)
+[[ "${#authorization_transport[@]}" -ge 3 \
+  && "${authorization_transport[2]}" =~ ^[0-9]+$ \
+  && "${#authorization_transport[@]}" = \
+    "$((3 + authorization_transport[2]))" ]] \
+  || die "authorization transport inspector returned an invalid bind plan"
+
 binds="${job_dir}:${job_dir},${PRORM_RECOVERY_AUTHORIZATION}:${PRORM_RECOVERY_AUTHORIZATION}:ro,${PRORM_POST_RECOVERY_TERMINAL}:${PRORM_POST_RECOVERY_TERMINAL}:ro,${PRORM_POST_RECOVERY_TERMINAL_RAW}:${PRORM_POST_RECOVERY_TERMINAL_RAW}:ro"
+for (( index=3; index<${#authorization_transport[@]}; index++ )); do
+  IFS=$'\t' read -r dependency_kind dependency_path dependency_sha256 \
+    <<<"${authorization_transport[index]}"
+  [[ -n "${dependency_kind}" && -n "${dependency_path}" \
+    && -n "${dependency_sha256}" ]] \
+    || die "authorization dependency binding is malformed"
+  reject_delimiters authorization_dependency_path "${dependency_path}"
+  contained authorization_dependency_path "${dependency_path}" "${PRORM_PROJECT_ROOT}"
+  case "${dependency_kind}" in
+    file)
+      [[ "${dependency_sha256}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "authorization file dependency lacks a SHA256"
+      [[ -f "${dependency_path}" && ! -L "${dependency_path}" \
+        && "$(realpath -e -- "${dependency_path}")" = "${dependency_path}" ]] \
+        || die "authorization file dependency is unsafe"
+      printf '%s  %s\n' "${dependency_sha256}" "${dependency_path}" \
+        | sha256sum --check --status \
+        || die "authorization file dependency changed after inspection"
+      ;;
+    directory)
+      [[ "${dependency_sha256}" = "-" ]] \
+        || die "authorization directory dependency unexpectedly carries a hash"
+      [[ -d "${dependency_path}" && ! -L "${dependency_path}" \
+        && "$(realpath -e -- "${dependency_path}")" = "${dependency_path}" ]] \
+        || die "authorization directory dependency is unsafe"
+      ;;
+    *) die "authorization dependency kind is invalid" ;;
+  esac
+  binds+=",${dependency_path}:${dependency_path}:ro"
+done
 for task in 0 1 2; do
   name="PRORM_POST_RECOVERY_RUN_${task}"
   binds+=",${!name}:${!name}:ro,${artifacts[$task]}:${artifacts[$task]}:ro"
@@ -541,6 +611,7 @@ container=(
   "${execution_repo}/scripts/hpc4/validate_phase2_recovery_authorization.py" \
   "${PRORM_RECOVERY_AUTHORIZATION}" "${execution_overlay}" \
   --expected-sha256 "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
+  --project-root "${PRORM_PROJECT_ROOT}" \
   >"${job_dir}/authorization-check.json"
 "${container[@]}" python \
   "${execution_repo}/scripts/hpc4/capture_phase2_post_recovery_terminal.py" verify \
@@ -589,7 +660,7 @@ fi
 "${container[@]}" "${aggregate_command[@]}" \
   | tee "${job_dir}/post-recovery-aggregate.log"
 
-python3 -I -S - \
+"${host_python}" -I -S - \
   "${staged}" "${PRORM_POST_RECOVERY_DESIGN_SHA256}" \
   "${PRORM_RECOVERY_AUTHORIZATION_SHA256}" \
   "${PRORM_POST_RECOVERY_TERMINAL_SHA256}" \
@@ -699,7 +770,7 @@ for failure in \
     "${attempt_evidence}/aggregate-submission/failures/$(basename "${failure}")"
 done
 shopt -u nullglob
-python3 -I -S - \
+"${host_python}" -I -S - \
   "${aggregate_submission_validation}" \
   "${attempt_evidence}/aggregate-submission/failure-chain.json" <<'PY'
 import json

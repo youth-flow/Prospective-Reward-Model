@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,25 @@ def test_budgeted_sbatch_is_an_exploratory_fixed_three_hpc4_array() -> None:
         assert check in source
     assert "20261004" not in source
     assert "20261005" not in source
+
+
+def test_budgeted_sbatch_pins_every_host_python_call_to_verified_312() -> None:
+    source = _source()
+
+    assert (
+        'readonly HOST_PYTHON="/opt/shared/spack/local/linux-rocky9-x86_64_v4/'
+        "gcc-11.4.1/miniconda3-24.3.0-quc3pyudmzikgo2r4qsyqpwnrvzpin63/"
+        'bin/python3.12"'
+    ) in source
+    assert (
+        'readonly HOST_PYTHON_SHA256="9c91f9aa231c61c6bf2eabb9b93ebc5a8269a4126'
+        'a36125e9548d8853e32da9c"'
+    ) in source
+    assert "sha256sum --check --status" in source
+    assert '"Python 3.12.2"' in source
+    assert ('"${host_python}" -I -S "${execution_repo}/${R3_BIND_PLAN_RELATIVE}"') in source
+    assert 'PYTHONPATH="${PRORM_REPO_ROOT}/src" "${host_python}" -' in source
+    assert re.search(r"(?<![/A-Za-z0-9_.])python3(?=[ \t])", source) is None
 
 
 def test_budgeted_sbatch_fails_closed_on_ledger_commit_and_immutable_inputs() -> None:
@@ -125,9 +145,11 @@ def test_budgeted_sbatch_uses_actual_sidecar_and_explicit_cleanenv_identity() ->
         "CUDA_VISIBLE_DEVICES",
         "NVIDIA_VISIBLE_DEVICES",
         "GPU_DEVICE_ORDINAL",
-        "authorization-check-host.json",
         "authorization-check-container.json",
-        "--expected-stage budgeted_end_to_end",
+        "phase2_budgeted_r3_bind_plan_stdlib.py",
+        "verify_phase2_budgeted_r3_authorization.py",
+        "--expected-sha256",
+        "--project-root",
         "accepted-freeze-preflight.json",
         "budgeted-overlay-binding-check.json",
         "verify_beta_source_aggregate",
@@ -139,6 +161,8 @@ def test_budgeted_sbatch_uses_actual_sidecar_and_explicit_cleanenv_identity() ->
         "fsync_directory",
     ):
         assert required in source
+    assert "authorization-check-host.json" not in source
+    assert "--expected-stage budgeted_end_to_end" not in source
 
 
 def test_ledger_precedes_seed_namespace_and_pre_oracle_gate_precedes_success() -> None:

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly HOST_PYTHON="/opt/shared/spack/local/linux-rocky9-x86_64_v4/gcc-11.4.1/miniconda3-24.3.0-quc3pyudmzikgo2r4qsyqpwnrvzpin63/bin/python3.12"
+readonly HOST_PYTHON_SHA256="9c91f9aa231c61c6bf2eabb9b93ebc5a8269a4126a36125e9548d8853e32da9c"
+
 die() { echo "error: $*" >&2; exit 2; }
 
 if [[ $# -lt 3 ]]; then
@@ -45,10 +48,19 @@ for name in \
   [[ -n "${!name:-}" ]] || die "${name} is required"
 done
 for command_name in \
-  git python3 realpath sha256sum awk sbatch scontrol squeue sacct id; do
+  git realpath sha256sum awk sbatch scontrol squeue sacct id; do
   command -v "${command_name}" >/dev/null 2>&1 \
     || die "required command is unavailable: ${command_name}"
 done
+host_python="$(realpath -e -- "${HOST_PYTHON}")" \
+  || die "fixed host Python is unavailable"
+[[ "${host_python}" = "${HOST_PYTHON}" && -f "${host_python}" \
+  && -x "${host_python}" && ! -L "${host_python}" ]] \
+  || die "fixed host Python must be a canonical non-symlink executable"
+printf '%s  %s\n' "${HOST_PYTHON_SHA256}" "${host_python}" \
+  | sha256sum --check --status || die "fixed host Python SHA256 mismatch"
+[[ "$("${host_python}" --version 2>&1)" = "Python 3.12.2" ]] \
+  || die "fixed host Python version mismatch"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 git_commit="$(git -C "${repo_root}" rev-parse --verify HEAD)"
@@ -88,55 +100,27 @@ case "${scratch_root}" in "${project_root}"|"${project_root}"/*) die "roots over
 image="$(project_path "${PRORM_IMAGE}" file)"
 hf_cache="$(project_path "${PRORM_HF_CACHE}" directory)"
 authorization="$(project_path "${authorization_input}" file)"
-[[ "${authorization}" = \
-  "${project_root}/runs/phase2-recovery-pilot/recovery-success-authorization.json" ]] \
-  || die "authorization must be the locked recovery receipt"
 authorization_sha256="$(sha256sum -- "${authorization}" | awk '{print $1}')"
+inspector="${repo_root}/scripts/hpc4/inspect_phase2_post_recovery_stdlib.py"
+[[ -f "${inspector}" && ! -L "${inspector}" ]] \
+  || die "post-recovery stdlib inspector is missing or unsafe"
+mapfile -t authorization_transport < <(
+  "${host_python}" -I -S "${inspector}" authorization "${authorization}" \
+    --expected-sha256 "${authorization_sha256}" \
+    --project-root "${project_root}"
+)
+[[ "${#authorization_transport[@]}" -ge 3 \
+  && "${authorization_transport[2]}" =~ ^[0-9]+$ \
+  && "${#authorization_transport[@]}" = \
+    "$((3 + authorization_transport[2]))" ]] \
+  || die "authorization transport inspection returned an invalid binding set"
+authorization_schema="${authorization_transport[0]}"
+authorization_schedule_sha256="${authorization_transport[1]}"
 
 overlay="$(realpath -e -- "${overlay_input}")" || die "overlay cannot be resolved"
 [[ -f "${overlay}" && ! -L "${overlay}" ]] || die "overlay is unsafe"
 case "${overlay}" in "${repo_root}"/configs/*.yaml) ;; *) die "overlay must be configs/*.yaml" ;; esac
 overlay_relative="$(realpath --relative-to="${repo_root}" "${overlay}")"
-base="$(
-  PYTHONPATH="${repo_root}/src" python3 - "${overlay}" <<'PY'
-import sys
-from smart_reward.phase2_config import load_phase2_config_bundle
-print(load_phase2_config_bundle(sys.argv[1]).base_config_path)
-PY
-)" || die "could not resolve the overlay's declared base config"
-base="$(realpath -e -- "${base}")" || die "declared base config cannot be resolved"
-case "${base}" in "${repo_root}"/configs/*.yaml) ;; *)
-  die "declared base config must be a tracked configs/*.yaml file"
-  ;;
-esac
-base_relative="$(realpath --relative-to="${repo_root}" "${base}")"
-for relative in \
-  "${overlay_relative}" "${base_relative}" \
-  "src/smart_reward/phase2_post_recovery_control.py" \
-  "src/smart_reward/phase2_post_recovery_output.py" \
-  "src/smart_reward/phase2_pilot_aggregate.py" \
-  "scripts/hpc4/submit_phase2_post_recovery_calibration.sh" \
-  "scripts/hpc4/submit_phase2_post_recovery_pilot.sh" \
-  "scripts/hpc4/submit_phase2_post_recovery_array_once.py" \
-  "scripts/hpc4/validate_phase2_post_recovery_submission.py" \
-  "scripts/hpc4/validate_phase2_recovery_authorization.py" \
-  "scripts/hpc4/validate_phase2_post_recovery_output.py" \
-  "scripts/hpc4/phase2_post_recovery_calibration.sbatch"; do
-  git -C "${repo_root}" ls-files --error-unmatch -- "${relative}" >/dev/null \
-    || die "required source is not tracked: ${relative}"
-done
-overlay_sha256="$(sha256sum -- "${overlay}" | awk '{print $1}')"
-base_sha256="$(sha256sum -- "${base}" | awk '{print $1}')"
-for binding in "${overlay_relative}:${overlay_sha256}" "${base_relative}:${base_sha256}"; do
-  relative="${binding%%:*}"
-  expected="${binding#*:}"
-  observed="$(
-    git -C "${repo_root}" cat-file blob "${git_commit}:${relative}" \
-      | sha256sum | awk '{print $1}'
-  )"
-  [[ "${observed}" = "${expected}" ]] \
-    || die "worktree config differs from submitted commit: ${relative}"
-done
 
 beta_source_present=0
 beta_source=""
@@ -160,95 +144,64 @@ if [[ -n "${horizon_parent_input}" ]]; then
 fi
 
 mapfile -t identities < <(
-  PYTHONPATH="${repo_root}/src" python3 - \
-    "${overlay}" "${authorization}" "${authorization_sha256}" \
-    "${beta_source_present}" "${beta_source:-none}" \
-    "${horizon_parent_present}" "${horizon_parent:-none}" \
-    "${overlay_relative}" <<'PY'
-import sys
-from pathlib import Path
-from smart_reward.config import config_hash
-from smart_reward.phase2_config import load_phase2_config_bundle
-from smart_reward.phase2_pilot_aggregate import (
-    verify_beta_source_aggregate,
-    verify_horizon_parent_aggregate,
+  inspector_arguments=(
+    overlay "${overlay}"
+    --repo-root "${repo_root}"
+    --authorization-schema "${authorization_schema}"
+    --authorization-sha256 "${authorization_sha256}"
+  )
+  if (( beta_source_present )); then
+    inspector_arguments+=(--beta-source-sha256 "${beta_source_sha256}")
+  fi
+  if (( horizon_parent_present )); then
+    inspector_arguments+=(--horizon-parent-sha256 "${horizon_parent_sha256}")
+  fi
+  "${host_python}" -I -S "${inspector}" "${inspector_arguments[@]}"
 )
-from smart_reward.phase2_post_recovery_control import (
-    OPTIMIZER_SCHEDULE_SHA256,
-    verify_post_recovery_aggregate_success_receipt,
-    verify_recovery_authorization_config_binding,
-)
-(
-    overlay,
-    authorization,
-    authorization_sha,
-    beta_present,
-    beta_path,
-    horizon_present,
-    horizon_path,
-    overlay_relative,
-) = sys.argv[1:]
-bundle = load_phase2_config_bundle(overlay)
-config = bundle.config
-design = config["design"]
-if design["stage"] != "pilot" or design["pilot_phase"] not in {"calibration", "freeze"}:
-    raise SystemExit("post-recovery submit accepts only a pilot identity")
-binding = verify_recovery_authorization_config_binding(
-    authorization,
-    overlay,
-    expected_sha256=authorization_sha,
-    expected_pilot_phase=design["pilot_phase"],
-)
-for present, path in (
-    (beta_present, beta_path),
-    (horizon_present, horizon_path),
-):
-    if present == "1":
-        verify_post_recovery_aggregate_success_receipt(path)
-beta = verify_beta_source_aggregate(
-    config,
-    None if beta_present == "0" else beta_path,
-)
-horizon = verify_horizon_parent_aggregate(
-    config,
-    None if horizon_present == "0" else horizon_path,
-)
-if design["pilot_phase"] == "calibration":
-    index = config["evaluation"]["max_length"]["horizon_grid_index"]
-    expected = (
-        "configs/common_beta_post_recovery_calibration.yaml"
-        if index == 0
-        else f"configs/common_beta_post_recovery_calibration_horizon_{index}.yaml"
-    )
-    if beta is not None or (index == 0) != (horizon is None):
-        raise SystemExit("calibration predecessor bindings are invalid")
-else:
-    if beta is None or horizon is None:
-        raise SystemExit("freeze requires both deeply verified predecessors")
-    index = beta["beta_grid_index"]
-    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
-        raise SystemExit("freeze beta-grid index is invalid")
-    expected = (
-        "configs/common_beta_post_recovery_freeze.yaml"
-        if index == 0
-        else f"configs/common_beta_post_recovery_freeze_retry_{index}.yaml"
-    )
-if overlay_relative != expected:
-    raise SystemExit("overlay filename differs from its deep semantic identity")
-if binding["optimizer_schedule_sha256"] != OPTIMIZER_SCHEDULE_SHA256:
-    raise SystemExit("overlay lost the recovery-authorized optimizer schedule")
-print(design["pilot_phase"])
-print(bundle.design_identity)
-print(config_hash(bundle.base_config))
-print(binding["optimizer_schedule_sha256"])
-PY
-)
-[[ "${#identities[@]}" = 4 ]] || die "could not resolve post-recovery identity"
+[[ "${#identities[@]}" = 7 ]] || die "could not inspect post-recovery identity"
 pilot_phase="${identities[0]}"
 design_sha256="${identities[1]}"
 base_hash="${identities[2]}"
-schedule_sha256="${identities[3]}"
+base="$(realpath -e -- "${identities[3]}")" \
+  || die "declared base config cannot be resolved"
+base_relative="${identities[4]}"
+schedule_sha256="${identities[5]}"
+[[ "${schedule_sha256}" = "${authorization_schedule_sha256}" ]] \
+  || die "overlay and authorization optimizer schedules differ"
 namespace="${pilot_phase}"
+
+case "${base}" in "${repo_root}"/configs/*.yaml) ;; *)
+  die "declared base config must be a tracked configs/*.yaml file"
+  ;;
+esac
+for relative in \
+  "${overlay_relative}" "${base_relative}" \
+  "src/smart_reward/phase2_post_recovery_control.py" \
+  "src/smart_reward/phase2_post_recovery_output.py" \
+  "src/smart_reward/phase2_pilot_aggregate.py" \
+  "scripts/hpc4/inspect_phase2_post_recovery_stdlib.py" \
+  "scripts/hpc4/submit_phase2_post_recovery_calibration.sh" \
+  "scripts/hpc4/submit_phase2_post_recovery_pilot.sh" \
+  "scripts/hpc4/submit_phase2_post_recovery_array_once.py" \
+  "scripts/hpc4/validate_phase2_post_recovery_submission.py" \
+  "scripts/hpc4/validate_phase2_recovery_authorization.py" \
+  "scripts/hpc4/validate_phase2_post_recovery_output.py" \
+  "scripts/hpc4/phase2_post_recovery_calibration.sbatch"; do
+  git -C "${repo_root}" ls-files --error-unmatch -- "${relative}" >/dev/null \
+    || die "required source is not tracked: ${relative}"
+done
+overlay_sha256="$(sha256sum -- "${overlay}" | awk '{print $1}')"
+base_sha256="$(sha256sum -- "${base}" | awk '{print $1}')"
+for binding in "${overlay_relative}:${overlay_sha256}" "${base_relative}:${base_sha256}"; do
+  relative="${binding%%:*}"
+  expected="${binding#*:}"
+  observed="$(
+    git -C "${repo_root}" cat-file blob "${git_commit}:${relative}" \
+      | sha256sum | awk '{print $1}'
+  )"
+  [[ "${observed}" = "${expected}" ]] \
+    || die "worktree config differs from submitted commit: ${relative}"
+done
 
 inventory="$(realpath -e -- "${hf_cache}/inventories/${base_hash}.json")" \
   || die "base-identity HF inventory is missing"
@@ -291,7 +244,8 @@ fi
 if (( horizon_parent_present )); then
   export_spec+=",PRORM_PHASE2_HORIZON_PARENT_AGGREGATE=${horizon_parent},PRORM_PHASE2_HORIZON_PARENT_AGGREGATE_SHA256=${horizon_parent_sha256}"
 fi
-python3 "${repo_root}/scripts/hpc4/submit_phase2_post_recovery_array_once.py" \
+"${host_python}" -I -S \
+  "${repo_root}/scripts/hpc4/submit_phase2_post_recovery_array_once.py" \
   --project-root "${project_root}" \
   --repo-root "${repo_root}" \
   --pilot-phase "${pilot_phase}" \

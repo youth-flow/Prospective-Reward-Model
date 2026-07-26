@@ -548,6 +548,30 @@ def test_crash_after_aggregate_resumes_exact_receipt(
     assert Path(f"{campaign.output}.evidence.json").is_file()
 
 
+def test_cli_requires_exactly_three_ordered_run_paths(tmp_path: Path) -> None:
+    module = _load()
+    output = tmp_path / "aggregate.json"
+    shared_options = [
+        "--project-root",
+        str(tmp_path),
+        "--repo-root",
+        str(tmp_path),
+        "--terminal-evidence",
+        str(tmp_path / "terminal.json"),
+        "--terminal-evidence-sha256",
+        "0" * 64,
+        "--array-job-id",
+        ARRAY,
+    ]
+    runs = [str(tmp_path / f"run-{index}") for index in range(5)]
+
+    parsed = module.build_parser().parse_args([str(output), *runs[:3], *shared_options])
+    assert parsed.runs == [Path(path) for path in runs[:3]]
+    for invalid in (runs[:2], runs[:4], runs):
+        with pytest.raises(SystemExit):
+            module.build_parser().parse_args([str(output), *invalid, *shared_options])
+
+
 def test_dirty_or_wrong_head_publication_checkout_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

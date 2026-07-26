@@ -30,7 +30,7 @@ from smart_reward.phase2_r3_terminal import (
     revalidate_successful_profile_terminal,
 )
 
-_SCHEMA = "phase2-recovery-r3-primary-submission-plan/v1"
+_SCHEMA = "phase2-recovery-r3-primary-submission-plan/v2"
 _ROLE = "formal_primary_segment_1_submission_plan"
 _TASK_IDS = [0, 1, 2]
 _MIB = 1024 * 1024
@@ -67,6 +67,21 @@ _PLAN_KEYS = frozenset(
         "profile_terminal_manifest_file_sha256",
         "profile_terminal_raw_sacct_sha256",
         "profile_terminal_sha256",
+        "git_commit",
+        "container_image_path",
+        "container_image_file_sha256",
+        "science_config_path",
+        "science_config_file_sha256",
+        "source_config_path",
+        "source_config_file_sha256",
+        "parent_registry_path",
+        "parent_registry_file_sha256",
+        "gate0_path",
+        "gate0_file_sha256",
+        "gate1_path",
+        "gate1_file_sha256",
+        "source_test_receipt_path",
+        "source_test_receipt_file_sha256",
         "submission_plan_sha256",
     }
 )
@@ -87,6 +102,32 @@ _SBATCH_FIELD_ORDER = (
     "advance_signal_lead_seconds",
     "audit_cadence_updates",
     "durable_checkpoint_cadence_updates",
+)
+_BINDING_FIELD_ORDER = (
+    "git_commit",
+    "container_image_path",
+    "container_image_file_sha256",
+    "science_config_path",
+    "science_config_file_sha256",
+    "source_config_path",
+    "source_config_file_sha256",
+    "parent_registry_path",
+    "parent_registry_file_sha256",
+    "gate0_path",
+    "gate0_file_sha256",
+    "gate1_path",
+    "gate1_file_sha256",
+    "source_test_receipt_path",
+    "source_test_receipt_file_sha256",
+    "operational_bundle_path",
+    "operational_bundle_file_sha256",
+    "profile_allocation_intent_path",
+    "profile_allocation_intent_file_sha256",
+    "profile_runtime_receipt_path",
+    "profile_runtime_receipt_file_sha256",
+    "profile_terminal_evidence_directory",
+    "profile_terminal_manifest_file_sha256",
+    "profile_terminal_raw_sacct_sha256",
 )
 
 
@@ -110,6 +151,36 @@ def _absolute_path(value: object, *, name: str) -> str:
     return value
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _bound_file(
+    path_value: object,
+    digest_value: object,
+    *,
+    name: str,
+) -> tuple[str, str]:
+    path_text = _absolute_path(path_value, name=f"{name} path")
+    expected = _digest(digest_value, name=f"{name} file SHA-256")
+    path = Path(path_text)
+    if path.is_symlink():
+        raise ValueError(f"{name} must not be a symbolic link")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(f"{name} is unavailable") from error
+    if resolved != path or not path.is_file():
+        raise ValueError(f"{name} must be a canonical regular file")
+    if _file_sha256(path) != expected:
+        raise ValueError(f"{name} bytes differ from their pinned SHA-256")
+    return path_text, expected
+
+
 def _slurm_walltime(seconds: int) -> str:
     value = _positive_int(seconds, name="requested walltime seconds")
     days, remainder = divmod(value, 86400)
@@ -122,7 +193,11 @@ def _semantic_sha256(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
-def _validated_plan(value: object) -> dict[str, object]:
+def _validated_plan(
+    value: object,
+    *,
+    verify_bound_files: bool = False,
+) -> dict[str, object]:
     if not isinstance(value, Mapping) or set(value) != _PLAN_KEYS:
         raise ValueError("primary submission plan fields are invalid")
     plan = dict(value)
@@ -173,6 +248,13 @@ def _validated_plan(value: object) -> dict[str, object]:
         "profile_terminal_manifest_file_sha256",
         "profile_terminal_raw_sacct_sha256",
         "profile_terminal_sha256",
+        "container_image_file_sha256",
+        "science_config_file_sha256",
+        "source_config_file_sha256",
+        "parent_registry_file_sha256",
+        "gate0_file_sha256",
+        "gate1_file_sha256",
+        "source_test_receipt_file_sha256",
         "submission_plan_sha256",
     ):
         _digest(plan[name], name=name)
@@ -183,6 +265,28 @@ def _validated_plan(value: object) -> dict[str, object]:
         "profile_terminal_evidence_directory",
     ):
         _absolute_path(plan[name], name=name)
+    if (
+        type(plan["git_commit"]) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", plan["git_commit"]) is None
+    ):
+        raise ValueError("git_commit must be a lowercase 40-character Git object ID")
+    for path_name, digest_name, label in (
+        ("container_image_path", "container_image_file_sha256", "container image"),
+        ("science_config_path", "science_config_file_sha256", "science config"),
+        ("source_config_path", "source_config_file_sha256", "source config"),
+        ("parent_registry_path", "parent_registry_file_sha256", "parent registry"),
+        ("gate0_path", "gate0_file_sha256", "Gate-0 artifact"),
+        ("gate1_path", "gate1_file_sha256", "Gate-1 artifact"),
+        (
+            "source_test_receipt_path",
+            "source_test_receipt_file_sha256",
+            "source-test receipt",
+        ),
+    ):
+        if verify_bound_files:
+            _bound_file(plan[path_name], plan[digest_name], name=label)
+        else:
+            _absolute_path(plan[path_name], name=f"{label} path")
 
     semantic = plan.pop("submission_plan_sha256")
     if semantic != _semantic_sha256(plan):
@@ -269,8 +373,26 @@ def _build_plan(arguments: argparse.Namespace) -> dict[str, object]:
         "profile_terminal_manifest_file_sha256": terminal.manifest_file_sha256,
         "profile_terminal_raw_sacct_sha256": terminal.inspection.raw_sacct_sha256,
         "profile_terminal_sha256": terminal.terminal_sha256,
+        "git_commit": arguments.git_commit,
+        "container_image_path": str(arguments.container_image.resolve(strict=True)),
+        "container_image_file_sha256": arguments.container_image_file_sha256,
+        "science_config_path": str(arguments.science_config.resolve(strict=True)),
+        "science_config_file_sha256": arguments.science_config_file_sha256,
+        "source_config_path": str(arguments.source_config.resolve(strict=True)),
+        "source_config_file_sha256": arguments.source_config_file_sha256,
+        "parent_registry_path": str(arguments.parent_registry.resolve(strict=True)),
+        "parent_registry_file_sha256": arguments.parent_registry_file_sha256,
+        "gate0_path": str(arguments.gate0.resolve(strict=True)),
+        "gate0_file_sha256": arguments.gate0_file_sha256,
+        "gate1_path": str(arguments.gate1.resolve(strict=True)),
+        "gate1_file_sha256": arguments.gate1_file_sha256,
+        "source_test_receipt_path": str(arguments.source_test_receipt.resolve(strict=True)),
+        "source_test_receipt_file_sha256": (arguments.source_test_receipt_file_sha256),
     }
-    return _validated_plan({**body, "submission_plan_sha256": _semantic_sha256(body)})
+    return _validated_plan(
+        {**body, "submission_plan_sha256": _semantic_sha256(body)},
+        verify_bound_files=True,
+    )
 
 
 def _emit(value: Mapping[str, object]) -> None:
@@ -310,6 +432,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     create.add_argument("--profile-terminal-manifest-file-sha256", required=True)
     create.add_argument("--profile-terminal-raw-sacct-sha256", required=True)
+    create.add_argument("--git-commit", required=True)
+    create.add_argument("--container-image", type=Path, required=True)
+    create.add_argument("--container-image-file-sha256", required=True)
+    create.add_argument("--science-config", type=Path, required=True)
+    create.add_argument("--science-config-file-sha256", required=True)
+    create.add_argument("--source-config", type=Path, required=True)
+    create.add_argument("--source-config-file-sha256", required=True)
+    create.add_argument("--parent-registry", type=Path, required=True)
+    create.add_argument("--parent-registry-file-sha256", required=True)
+    create.add_argument("--gate0", type=Path, required=True)
+    create.add_argument("--gate0-file-sha256", required=True)
+    create.add_argument("--gate1", type=Path, required=True)
+    create.add_argument("--gate1-file-sha256", required=True)
+    create.add_argument("--source-test-receipt", type=Path, required=True)
+    create.add_argument("--source-test-receipt-file-sha256", required=True)
     create.add_argument("--output", type=Path, required=True)
 
     inspect = commands.add_parser(
@@ -320,7 +457,7 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--plan-file-sha256", required=True)
     inspect.add_argument(
         "--format",
-        choices=("json", "sbatch-lines"),
+        choices=("json", "sbatch-lines", "binding-lines"),
         default="json",
     )
     return parser
@@ -351,6 +488,9 @@ def main(argv: list[str] | None = None) -> int:
     plan = _validated_plan(artifact.payload)
     if arguments.format == "sbatch-lines":
         for name in _SBATCH_FIELD_ORDER:
+            print(f"{name}={plan[name]}", flush=True)
+    elif arguments.format == "binding-lines":
+        for name in _BINDING_FIELD_ORDER:
             print(f"{name}={plan[name]}", flush=True)
     else:
         _emit(plan)

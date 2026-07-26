@@ -1216,7 +1216,7 @@ def write_budgeted_end_to_end_aggregate(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
-    parser.add_argument("runs", type=Path, nargs=5)
+    parser.add_argument("runs", type=Path, nargs=3)
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--terminal-evidence", type=Path, required=True)

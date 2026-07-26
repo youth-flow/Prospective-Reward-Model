@@ -18,10 +18,8 @@ generic_submit="${repo_root}/scripts/hpc4/submit_phase2_post_recovery_pilot.sh"
 [[ -f "${generic_submit}" && ! -L "${generic_submit}" ]] \
   || die "generic post-recovery submitter is missing or unsafe"
 
-# All authorization, source, and scheduler checks are intentionally owned by
-# the generic path.  In particular it invokes/locks:
-# - validate_phase2_recovery_authorization.py;
-# - submit_phase2_post_recovery_array_once.py;
-# - authorized action issue_schedule_frozen_full_common_beta_calibration_pilot;
-# - authorization must be the locked recovery receipt.
+# All schema-specific R2/R3 authorization transport, source, and scheduler
+# checks are owned by the generic path. It inspects the final authorization
+# with the fixed stdlib verifier, then performs deep SIF verification before
+# submitting exactly one immutable three-seed array.
 exec bash "${generic_submit}" "${overlay}" "${authorization}" "${walltime}"

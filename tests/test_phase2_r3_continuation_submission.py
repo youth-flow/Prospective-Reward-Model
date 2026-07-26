@@ -11,7 +11,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "scripts" / "hpc4" / "prepare_phase2_r3_continuation_submission.py"
 RUNNER = ROOT / "scripts" / "hpc4" / "run_phase2_r3_primary_continuation.py"
-SUBMIT = ROOT / "scripts" / "hpc4" / "submit_phase2_r3_continuation.sh"
+LAUNCHER = ROOT / "scripts" / "hpc4" / "submit_phase2_r3_continuation.sh"
+SUBMIT = ROOT / "scripts" / "hpc4" / "phase2_r3_continuation_submission.sbatch"
 SBATCH = ROOT / "scripts" / "hpc4" / "phase2_r3_primary.sbatch"
 
 
@@ -153,6 +154,7 @@ def test_continuation_plan_extends_full_sealed_history_and_stops_at_completion(
         2,
         2,
     ]
+    assert first_plan["active_array_task_ids"] == [0, 1, 2]
 
     state["segment"] = 2
     second = tmp_path / "continuation-2.json"
@@ -164,6 +166,25 @@ def test_continuation_plan_extends_full_sealed_history_and_stops_at_completion(
         3,
         3,
     ]
+    lineage = prepare.reopen_continuation_plan_lineage(
+        second,
+        expected_file_sha256=hashlib.sha256(second.read_bytes()).hexdigest(),
+    )
+    assert len(lineage) == 2
+
+    forged = dict(second_plan)
+    forged["previous_continuation_plan_path"] = None
+    forged["previous_continuation_plan_file_sha256"] = None
+    forged_unsigned = dict(forged)
+    forged_unsigned.pop("continuation_plan_sha256")
+    forged["continuation_plan_sha256"] = prepare._semantic_sha256(forged_unsigned)
+    forged_path = tmp_path / "forged-skipped-lineage.json"
+    forged_artifact = prepare.publish_canonical_artifact(forged_path, forged)
+    with pytest.raises(ValueError, match="initial continuation plan"):
+        prepare.reopen_continuation_plan_lineage(
+            forged_path,
+            expected_file_sha256=forged_artifact.file_sha256,
+        )
 
     state["kind"] = "completed"
     completed = tmp_path / "completed.json"
@@ -171,14 +192,17 @@ def test_continuation_plan_extends_full_sealed_history_and_stops_at_completion(
     completed_plan = json.loads(completed.read_bytes())
     assert completed_plan["all_tasks_complete"] is True
     assert completed_plan["continuation_array_required"] is False
+    assert completed_plan["active_array_task_ids"] == []
     assert completed_plan["dependency_array_job_ids"] == []
     assert all(route["next_segment_index"] is None for route in completed_plan["task_routes"])
 
 
-def _runner_argv() -> list[str]:
+def _runner_argv(tmp_path: Path | None = None) -> list[str]:
+    project_root = "project" if tmp_path is None else str(tmp_path)
+    primary_plan = "primary-plan.json" if tmp_path is None else str(tmp_path / "primary-plan.json")
     return [
         "--project-root",
-        "project",
+        project_root,
         "--science-config",
         "science.yaml",
         "--source-config",
@@ -211,6 +235,12 @@ def _runner_argv() -> list[str]:
         _digest("8"),
         "--profile-terminal-raw-sacct-sha256",
         _digest("9"),
+        "--primary-submission-plan",
+        primary_plan,
+        "--primary-submission-plan-file-sha256",
+        _digest("b"),
+        "--primary-submission-plan-sha256",
+        _digest("c"),
         "--continuation-plan",
         "continuation.json",
         "--continuation-plan-file-sha256",
@@ -223,6 +253,7 @@ def _runner_argv() -> list[str]:
 
 
 def test_runner_rebuilds_every_predecessor_before_admitting_next_segment(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.syspath_prepend(str(RUNNER.parent))
@@ -308,11 +339,31 @@ def test_runner_rebuilds_every_predecessor_before_admitting_next_segment(
         "reopen_primary_segment_runtime_closure",
         lambda *_a, **_k: closures.pop(0),
     )
-    predecessors = [object(), object()]
+    predecessor_payloads = [{"segment_index": 1}, {"segment_index": 2}]
+    predecessors = [
+        SimpleNamespace(to_dict=lambda payload=payload: payload) for payload in predecessor_payloads
+    ]
     monkeypatch.setattr(
         runner,
         "rehydrate_primary_segment_admission",
         lambda *_a, **_k: predecessors.pop(0),
+    )
+    primary_plan = tmp_path / "primary-plan.json"
+    primary_plan.write_text("{}\n", encoding="utf-8")
+    identity_path = tmp_path / "identity.json"
+    identity_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "identity_receipt_path", lambda *_a, **_k: identity_path)
+    monkeypatch.setattr(
+        runner,
+        "reopen_primary_identity_receipt",
+        lambda *_a, **_k: {
+            "base_primary_submission_plan": {
+                "path": "primary-plan.json",
+                "file_sha256": _digest("b"),
+                "submission_plan_sha256": _digest("c"),
+            },
+            "segment_1_admission": predecessor_payloads[0],
+        },
     )
     monkeypatch.setattr(
         runner,
@@ -343,6 +394,15 @@ def test_runner_rebuilds_every_predecessor_before_admitting_next_segment(
         "publish_primary_segment_runtime_closure",
         lambda *_a, **_k: closure,
     )
+    segment_receipt = SimpleNamespace(
+        file_sha256=_digest("4"),
+        payload={"segment_evidence_receipt_sha256": _digest("5")},
+    )
+    monkeypatch.setattr(
+        runner,
+        "publish_segment_evidence_receipt",
+        lambda *_a, **_k: segment_receipt,
+    )
 
     class Signal:
         def __enter__(self) -> Signal:
@@ -353,7 +413,7 @@ def test_runner_rebuilds_every_predecessor_before_admitting_next_segment(
 
     monkeypatch.setattr(runner, "CheckpointSignal", Signal)
     monkeypatch.setattr(runner, "_emit", lambda _value: None)
-    assert runner.main(_runner_argv()) == 0
+    assert runner.main(_runner_argv(tmp_path)) == 0
     assert admitted[0]["segment_index"] == 3
     assert admitted[0]["task_id"] == 1
     assert admitted[0]["seed"] == 20260802
@@ -391,10 +451,16 @@ def test_completed_task_and_unsealed_failure_paths_never_run_or_resubmit(
         runner.main(_runner_argv())
 
     submit = SUBMIT.read_text(encoding="utf-8")
+    launcher = LAUNCHER.read_text(encoding="utf-8")
     sbatch = SBATCH.read_text(encoding="utf-8")
+    assert "apptainer exec" not in launcher
+    assert "phase2_r3_continuation_submission.sbatch" in launcher
+    assert "exec srun" in launcher
+    assert "--partition=gpu-l20" in launcher
+    assert "--gpus-per-node=1" in launcher
     assert '--dependency="afterok:${dependency_job_ids}"' in submit
     assert "afternotok:%s" in submit
-    assert '--array="0-2%${array_concurrency}"' in submit
+    assert '--array="${active_array_task_ids}%${array_concurrency}"' in submit
     assert "all_three_tasks_compute_complete_no_resubmission" in submit
     assert "sealed_completed_task_not_resubmitted" in sbatch
     assert "kill-on-invalid-dep=yes" in submit
@@ -408,8 +474,34 @@ def test_completed_task_and_unsealed_failure_paths_never_run_or_resubmit(
     assert "cp --no-clobber" in submit
     assert "cmp --silent" in submit
     assert 'input_root="${input_parent}/${commit}"' in submit
+    assert 'science_config="${input_root}/phase2_recovery_r3_science.yaml"' in submit
     assert 'source_config="${input_root}/common_beta_recovery_pilot.yaml"' in submit
     assert 'parent_registry="${input_root}/phase2_recovery_parent_failures.json"' in submit
+    assert 'export PRORM_R3_SCIENCE_CONFIG="${science_config}"' in submit
+    assert 'export PRORM_R3_CONTINUATION_PLAN_SHA256="${continuation_plan_sha256}"' in submit
+    assert "--format binding-lines" in submit
+    assert 'die "base primary ${base_binding_names[index]} binding drifted"' in submit
+    for binding_name in (
+        "git_commit",
+        "container_image_file_sha256",
+        "science_config_path",
+        "operational_bundle_path",
+        "profile_terminal_raw_sacct_sha256",
+    ):
+        assert f"\n  {binding_name}\n" in submit
+    assert "PRORM_R3_CONTINUATION_ATTEMPT_ROOT|PRORM_R3_TASK_*" in submit
+    for canonical_export in (
+        'export PRORM_R3_IMAGE="${image}"',
+        'export PRORM_R3_REPO_ROOT="${repo_root}"',
+        'export PRORM_R3_PROJECT_ROOT="${project_root}"',
+        'export PRORM_R3_SCRATCH_ROOT="${scratch_root}"',
+        'export PRORM_R3_HF_CACHE="${hf_cache}"',
+        'export PRORM_R3_OPERATIONAL_BUNDLE="${operational_bundle}"',
+        'export PRORM_R3_PROFILE_INTENT="${profile_intent}"',
+        'export PRORM_R3_PROFILE_RUNTIME_RECEIPT="${profile_runtime_receipt}"',
+        ('export PRORM_R3_PROFILE_TERMINAL_EVIDENCE_DIRECTORY="${profile_terminal_directory}"'),
+    ):
+        assert canonical_export in submit
     assert "retained input copy differs from clean repository bytes" in submit
     assert "runs/phase2-recovery-r3/inputs/${PRORM_R3_GIT_COMMIT}" in sbatch
     assert '    --source-config "${source_config}" \\' in sbatch

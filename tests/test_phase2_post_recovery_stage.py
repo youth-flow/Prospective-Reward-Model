@@ -244,12 +244,15 @@ def test_shell_control_plane_covers_all_v3_phases_and_keeps_v2_replay() -> None:
     pilot_submit_once = (
         ROOT / "scripts" / "hpc4" / "submit_phase2_post_recovery_array_once.py"
     ).read_text(encoding="utf-8")
+    stdlib_inspector = (
+        ROOT / "scripts" / "hpc4" / "inspect_phase2_post_recovery_stdlib.py"
+    ).read_text(encoding="utf-8")
 
     for text in (pilot_submit, aggregate_submit):
-        assert "verify_beta_source_aggregate" in text
-        assert "verify_horizon_parent_aggregate" in text
-        assert "common_beta_post_recovery_calibration_horizon_" in text
-        assert "common_beta_post_recovery_freeze_retry_" in text
+        assert "--beta-source-sha256" in text
+        assert "--horizon-parent-sha256" in text
+    assert "common_beta_post_recovery_calibration_horizon_" in stdlib_inspector
+    assert "common_beta_post_recovery_freeze_retry_" in stdlib_inspector
     assert "submit_phase2_post_recovery_array_once.py" in pilot_submit
     assert 'ARRAY_SPEC = "0-2%2"' in pilot_submit_once
     assert "--no-requeue" in pilot_submit_once

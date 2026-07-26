@@ -1,0 +1,178 @@
+schema_version: phase2-recovery-r3-controls-config/v1
+
+campaign:
+  name: phase2-recovery-r3-separated-controls
+  campaign_kind: phase2_recovery_revision3_separated_controls
+  execution_revision: 3
+  execution_scope: separated_mechanism_controls
+  evidence_role: train_only_nonconfirmatory_gate_c
+  confirmatory: false
+  formal_eligibility: false
+  families:
+    - exact_margin_prorm_plus
+    - exact_soft_label_bt
+    - low_dimensional_prorm_plus
+
+science_binding:
+  source_path: configs/phase2_recovery_r3_science.yaml
+  source_schema_version: phase2-recovery-r3-science-config/v1
+  source_semantic_sha256: 782195dc35c3b40639a6aa2316b70b4aa7aacb7012f2ceb4855efecec6e7d5b2
+  source_file_sha256: 2afa8ec36e634c37caf2d1f73e361c6a654afe728a57b4528cf3b58a70d76f96
+  reuse_scope: frozen_science_constants_only
+  primary_head_artifact_reuse: false
+  primary_optimizer_state_reuse: false
+  primary_checkpoint_reuse: false
+  primary_label_artifact_reuse: false
+
+run:
+  seeds: [20260801, 20260802, 20260803]
+  matrix: every_family_for_every_seed
+  partial_seed_or_family_success_allowed: false
+
+profiling:
+  fixed_updates_per_family: 100
+  evidence_role: throughput_projection_only
+  reusable_as_formal_control_result: false
+  head_or_optimizer_state_reusable: false
+
+optimizer:
+  dtype: float32
+  optimizer: adamw
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  microbatch_size: 64
+  max_grad_norm: 1.0
+  initialization: exact_zero_head_and_fresh_optimizer_state
+  learning_rate_schedule:
+    update_indexing: one_indexed_inclusive
+    application: set_learning_rate_immediately_before_optimizer_update
+    stages:
+      - {first_update: 1, last_update: 5760, learning_rate: 1.0e-3}
+      - {first_update: 5761, last_update: 6760, learning_rate: 3.0e-4}
+      - {first_update: 6761, last_update: 8760, learning_rate: 1.0e-4}
+      - {first_update: 8761, last_update: 10760, learning_rate: 3.0e-5}
+      - {first_update: 10761, last_update: 12760, learning_rate: 1.0e-5}
+    schedule_sha256: 46e0b0fdc70c507b0325c445068326ba7bc30326d70b65fa33803cc3c876c216
+  state_transition: preserve_all_adamw_moments_across_learning_rate_boundaries
+  first_order_audit_dtype: float64
+  microbatch_order: canonical_edge_order_contiguous_ascending_no_shuffle
+  optimizer_state_reset_at_lr_milestone: false
+  one_optimizer_update_per_step: true
+  tie_break: exact_zero_initialized_deterministic_adamw_lr_decay_path
+  validation_or_test_selection: false
+
+first_order_gate:
+  relative_gradient_ratio_tolerance: 1.0e-3
+  minimum_steps: 100
+  maximum_steps: 12760
+  check_interval_steps: 20
+  consecutive_passing_checks: 3
+  gradient_measurement: post_update_full_data_unclipped
+  denominator: exact_zero_initialization_gradient_l2_norm
+  denominator_floor: 1.0e-30
+  fail_closed: true
+  solution_tie_break: exact_zero_initialized_deterministic_adamw_lr_decay_path
+  unique_solution_claim: false
+  validation_or_test_selection: false
+
+families:
+  exact_margin_prorm_plus:
+    target: transformed_oracle_reward_difference
+    objective: prorm_plus
+    fixed_training_objective_scale: 1.0
+    full_tangent_ridge:
+      enabled: true
+      rule: relative_to_mean_fisher_diagonal
+      relative_coefficient: 0.001
+    direct_oracle_identity_required: true
+    solver:
+      kind: pcg
+      dtype: float64
+      relative_tolerance: 1.0e-5
+      absolute_tolerance: 0.0
+      max_iterations: 8192
+      residual_recompute_interval: 20
+      require_convergence: true
+      initialization: cold_start_zero
+    eligible_for_primary_claim: false
+  exact_soft_label_bt:
+    target: sigmoid_of_train_transformed_oracle_margin
+    objective: exact_expected_bernoulli_cross_entropy
+    noise_free: true
+    bernoulli_sampling_used: false
+    sampled_label_stream_accessed: false
+    eligible_for_primary_claim: false
+  low_dimensional_prorm_plus:
+    target: family_local_r4_mean_h_regenerated_from_train_oracle
+    objective: prorm_plus
+    fixed_training_objective_scale: 1.0
+    annotation_scheme: geometric_randomized_truncation
+    annotation_gamma: 0.9
+    independent_replicates_per_edge: 4
+    replicate_reduction: arithmetic_mean
+    prohibit_clipping: true
+    label_rng_namespace: prorm-common-beta-r4-labels-v1
+    primary_label_stream_accessed: false
+    construction: seeded_orthonormal_projection
+    dimension: 256
+    projection_seed_namespace: prorm-common-beta-low-dimensional-tangent-v1
+    source_layout_id: training-policy-score-flatten-order/v1
+    regularization: moore_penrose_pseudoinverse
+    relative_eigenvalue_tolerance: 1.0e-10
+    ridge_enabled: false
+    eligible_for_primary_claim: false
+
+numeric_gate_tolerances:
+  direct_identity_absolute_error: 1.0e-10
+  direct_identity_relative_error: 1.0e-10
+  objective_binding_relative_error: 2.0e-5
+  objective_binding_absolute_error: 2.0e-7
+  outer_relative_gradient_ratio: 1.0e-3
+  low_dimensional_orthonormality_max_absolute_error: 1.0e-10
+  low_dimensional_pseudoinverse_relative_residual: 1.0e-6
+  low_dimensional_scatter_max_absolute_error: 1.0e-4
+  low_dimensional_score_identity_max_absolute_error: 1.0e-4
+
+decision_gates:
+  action: fail_closed
+  unit: per_family_per_seed
+  exact_margin_prorm_plus:
+    - exact_margin_objective_decrease
+    - exact_margin_first_order_convergence
+    - direct_oracle_moment_identity
+    - all_required_pcg_solves_converged
+  exact_soft_label_bt:
+    - exact_soft_label_objective_decrease
+    - exact_soft_label_first_order_convergence
+    - saved_head_objective_binding
+  low_dimensional_prorm_plus:
+    - low_dimensional_objective_decrease
+    - low_dimensional_first_order_convergence
+    - low_dimensional_exact_rank
+    - low_dimensional_orthonormality
+    - low_dimensional_pseudoinverse_residual
+    - low_dimensional_scatter_identity
+    - low_dimensional_score_identity
+
+execution_boundary:
+  information_boundary: train_only
+  primary_head_access_allowed: false
+  primary_optimizer_state_access_allowed: false
+  primary_checkpoint_access_allowed: false
+  heldout_or_validation_access_allowed: false
+  policy_optimization_allowed: false
+  policy_rollout_allowed: false
+  downstream_utility_access_allowed: false
+  calibration_beta_access_allowed: false
+  final_oracle_access_allowed: false
+  family_jobs_must_be_independent: true
+
+result_contract:
+  vectors_retained: false
+  head_weights_retained: false
+  optimizer_state_retained: false
+  checkpoint_state_retained: false
+  raw_oracle_rewards_retained: false
+  raw_labels_retained: false
+  hashes_and_gate_evidence_only: true
+  self_hash_required: true

@@ -304,7 +304,7 @@ def _terminalize_staged_aggregate(
         project_root=project,
         repository_root=repository_root,
         output=aggregate_path,
-        partition="amd",
+        partition="gpu-l20",
         walltime="01:00:00",
         workload_export_spec=workload_export,
         script_relative=script_relative,
@@ -326,11 +326,13 @@ def _terminalize_staged_aggregate(
     raw_scontrol = (
         f"JobId={cpu_job_id} JobName={job_name} UserId=tester(1) "
         "Account=sigroup JobState=PENDING Reason=JobHeldUser Requeue=0 "
-        "Restarts=0 Partition=amd NumNodes=1 NumTasks=1 NumCPUs=4 "
+        "Restarts=0 Partition=gpu-l20 QOS=l20_qos "
+        "NumNodes=1 NumTasks=1 NumCPUs=4 "
         "CPUs/Task=4 MinMemoryNode=16G TimeLimit=01:00:00 "
         f"Command={script} WorkDir={repository_root} "
         f"Comment=prorm-aggregate:{intent_sha256}:attempt-1 "
-        "TRES=cpu=4,mem=16G,node=1 TresPerNode=\n"
+        "TRES=cpu=4,mem=16G,node=1,gres/gpu=1 "
+        "TresPerNode=gres/gpu:l20:1\n"
     )
     state, scheduler = helper._parse_scontrol(
         raw_scontrol,
@@ -377,7 +379,7 @@ def _terminalize_staged_aggregate(
         "slurm_job_is_array": "false",
         "cluster": "hpc4",
         "account": "sigroup",
-        "partition": "amd",
+        "partition": "gpu-l20",
         "restart_count": "0",
         "pilot_array_job_id": array_job_id,
         "pilot_phase": pilot_phase,
@@ -416,13 +418,14 @@ def _terminalize_staged_aggregate(
 
     authority_raw = (
         f"{cpu_job_id}|{cpu_job_id}|{job_name}|COMPLETED|0:0|0:0|"
-        "hpc4|sigroup|amd|1|4|2026-07-25T00:01:00|01:00:00|"
-        "billing=4,cpu=4,mem=16G,node=1|billing=4,cpu=4,mem=16G,node=1\n"
+        "hpc4|sigroup|gpu-l20|1|4|2026-07-25T00:01:00|01:00:00|"
+        "billing=4,cpu=4,gres/gpu=1,mem=16G,node=1|"
+        "billing=4,cpu=4,gres/gpu:l20=1,gres/gpu=1,mem=16G,node=1\n"
     )
     terminal_raw = (
-        f"{cpu_job_id}|{cpu_job_id}|COMPLETED|0:0|0:0|hpc4|sigroup|amd|"
-        "1|4|billing=4,cpu=4,mem=16G,node=1|"
-        "billing=4,cpu=4,mem=16G,node=1\n"
+        f"{cpu_job_id}|{cpu_job_id}|COMPLETED|0:0|0:0|hpc4|sigroup|gpu-l20|"
+        "1|4|billing=4,cpu=4,gres/gpu=1,mem=16G,node=1|"
+        "billing=4,cpu=4,gres/gpu:l20=1,gres/gpu=1,mem=16G,node=1\n"
     ).encode()
     previous_run = subprocess.run
 
@@ -1101,6 +1104,9 @@ def test_v3_deep_lineage_horizon_retry_and_confirmatory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path
+    if os.name == "nt":
+        project = tmp_path.parent / f"p2-{os.urandom(4).hex()}"
+        project.mkdir()
     recovery = _recovery_helpers()
     recovery_paths, scheduler, authorization, _ = recovery._campaign(
         project,
@@ -1902,6 +1908,9 @@ def test_written_v3_is_consumable_and_deep_tamper_survives_no_rehash_attack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path
+    if os.name == "nt":
+        project = tmp_path.parent / f"p2-{os.urandom(4).hex()}"
+        project.mkdir()
     recovery = _recovery_helpers()
     recovery_paths, scheduler, authorization, _ = recovery._campaign(
         project,

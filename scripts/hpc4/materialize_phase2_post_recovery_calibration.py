@@ -18,8 +18,8 @@ import yaml
 from smart_reward.config import config_hash, load_config
 from smart_reward.phase2_config import (
     PHASE2_POST_RECOVERY_SCHEMA_VERSION,
-    PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA,
-    PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA,
+    build_post_recovery_authorization_reference,
+    load_phase2_config,
     load_phase2_config_bundle,
     phase2_design_identity,
     validate_phase2_config,
@@ -28,25 +28,15 @@ from smart_reward.phase2_post_recovery_control import (
     POST_RECOVERY_DESIGN_NAME,
     verify_recovery_authorization_file,
 )
+from smart_reward.phase2_r3_post_recovery_contract import (
+    R3_PRODUCTION_PROJECT_ROOT,
+)
 from smart_reward.phase2_training import compile_phase2_training_settings
 
 _OUTPUT_RELATIVE = Path("configs/common_beta_post_recovery_calibration.yaml")
 _TEMPLATE_RELATIVE = Path("configs/common_beta_pilot.yaml")
 _BASE_RELATIVE = Path("configs/common_beta_pilot_base.yaml")
 _RECOVERY_RELATIVE = Path("configs/common_beta_recovery_pilot.yaml")
-_PROJECTION_FIELDS = (
-    "recovery_design_sha256",
-    "optimizer_schedule_sha256",
-    "source_array_job_id",
-    "execution_revision",
-    "ordered_seeds",
-    "recovery_status",
-    "full_calibration_authorized",
-    "authorized_information",
-    "recovery_outputs_reusable",
-    "validation_or_heldout_access_authorized",
-    "policy_or_final_utility_access_authorized",
-)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("authorization", type=Path)
     parser.add_argument("--expected-sha256", required=True)
     parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=R3_PRODUCTION_PROJECT_ROOT,
+    )
     return parser
 
 
@@ -141,16 +136,10 @@ def _candidate(
     if not isinstance(design, dict) or not isinstance(reward, dict):
         raise TypeError("pilot template does not have the expected complete overlay shape")
     design["name"] = POST_RECOVERY_DESIGN_NAME
-    projection = {
-        "schema_version": PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA,
-        "source_schema_version": authorization["schema_version"],
-        **{field: copy.deepcopy(authorization[field]) for field in _PROJECTION_FIELDS},
-    }
-    candidate["recovery_success_reference"] = {
-        "schema_version": PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA,
-        "artifact_sha256": authorization_sha256,
-        "authorization_projection": projection,
-    }
+    candidate["recovery_success_reference"] = build_post_recovery_authorization_reference(
+        authorization,
+        artifact_sha256=authorization_sha256,
+    )
 
     recovery_reward = recovery["reward_model"]
     if not isinstance(recovery_reward, dict):
@@ -214,10 +203,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     authorization = verify_recovery_authorization_file(
         authorization_path,
         expected_sha256=arguments.expected_sha256,
+        project_root=arguments.project_root,
     )
-    template = load_config(repo_root / _TEMPLATE_RELATIVE)
+    template = load_phase2_config(repo_root / _TEMPLATE_RELATIVE)
     base = load_config(repo_root / _BASE_RELATIVE)
-    recovery = load_config(repo_root / _RECOVERY_RELATIVE)
+    recovery = load_phase2_config(repo_root / _RECOVERY_RELATIVE)
     candidate = _candidate(
         template=template,
         recovery=recovery,
@@ -237,6 +227,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         or protocol.source_recovery_authorization_sha256 != arguments.expected_sha256
         or protocol.schedule_sha256 != authorization["optimizer_schedule_sha256"]
         or protocol.to_dict().get("scope") != "every_phase2_first_order_convergence_trainer"
+        or protocol.to_dict().get("initialization") != "exact_zero_head_and_fresh_optimizer_state"
+        or settings.low_dimensional_enabled is not True
+        or settings.exact_soft_label_bt_enabled is not True
+        or authorization["validation_or_heldout_access_authorized"] is not False
+        or authorization["policy_or_final_utility_access_authorized"] is not False
     ):
         raise ValueError("candidate did not compile the one adopted schedule for all five trainers")
     raw = yaml.safe_dump(
@@ -265,6 +260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "phase2_design_sha256": candidate_identity,
                 "base_config_hash": config_hash(bundle.base_config),
                 "authorization_sha256": arguments.expected_sha256,
+                "authorization_schema_version": authorization["schema_version"],
                 "git_commit_used_for_templates": git_commit,
                 "next_action": "review_then_commit_push_and_sync_before_submission",
             },

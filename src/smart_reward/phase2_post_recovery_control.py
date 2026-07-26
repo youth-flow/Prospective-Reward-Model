@@ -26,9 +26,11 @@ from .phase2_config import (
     PHASE2_BUDGETED_END_TO_END_SEEDS,
     PHASE2_BUDGETED_END_TO_END_STAGE,
     PHASE2_POST_RECOVERY_SCHEMA_VERSION,
+    PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA,
     load_phase2_config_bundle,
     validate_post_recovery_authorization_reference,
 )
+from .phase2_r3_post_recovery_contract import R3_FINAL_AUTHORIZATION_SCHEMA
 from .phase2_recovery_aggregate import verify_phase2_recovery_authorization
 
 ORDERED_SEEDS = (20260801, 20260802, 20260803)
@@ -271,8 +273,8 @@ _AGGREGATE_PUBLICATION_OWNER_KEYS = frozenset(
         "created_at_utc",
     }
 )
-_EXPECTED_AGGREGATE_REQ_TRES = "billing=4,cpu=4,mem=16G,node=1"
-_EXPECTED_AGGREGATE_ALLOC_TRES = "billing=4,cpu=4,mem=16G,node=1"
+_EXPECTED_AGGREGATE_REQ_TRES = "billing=4,cpu=4,gres/gpu=1,mem=16G,node=1"
+_EXPECTED_AGGREGATE_ALLOC_TRES = "billing=4,cpu=4,gres/gpu:l20=1,gres/gpu=1,mem=16G,node=1"
 _ARRAY_SPEC = "0-2%2"
 _SUBMISSION_INTENT_KEYS = frozenset(
     {
@@ -386,6 +388,7 @@ _AGGREGATE_SUBMIT_INTENT_KEYS = frozenset(
         "repository_root",
         "final_output",
         "partition",
+        "qos",
         "walltime",
         "workload_export_spec",
         "workload_export_spec_sha256",
@@ -398,6 +401,7 @@ _AGGREGATE_SUBMIT_INTENT_KEYS = frozenset(
         "tasks",
         "cpus_per_task",
         "memory",
+        "gpus_per_node",
         "requeue",
         "retry_only_after_exact_terminal_failure",
         "created_at_utc",
@@ -883,10 +887,44 @@ def verify_recovery_authorization_file(
     path: str | os.PathLike[str],
     *,
     expected_sha256: str,
+    project_root: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
-    """Expose the recovery module's canonical, head-free authorization gate."""
+    """Dispatch only the exact R2 or exact R3 file-level authorization gate."""
 
-    return verify_phase2_recovery_authorization(path, expected_sha256)
+    expected = _digest(expected_sha256, name="expected authorization SHA-256")
+    source = Path(path).absolute()
+    _require_real_file(source, name="recovery authorization")
+    if source.stat().st_size > 16 * 1024 * 1024:
+        raise ValueError("recovery authorization exceeds the maximum byte length")
+    raw = source.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError("recovery authorization SHA256 mismatch")
+    try:
+        hint = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_pairs,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("recovery authorization is not strict UTF-8 JSON") from error
+    if not isinstance(hint, Mapping):
+        raise ValueError("recovery authorization must be a JSON object")
+    schema = hint.get("schema_version")
+    if schema == R3_FINAL_AUTHORIZATION_SCHEMA:
+        # Keep the scientific R3 import lazy: the host-Python submission plane
+        # has no torch/yaml, while the formal SIF runtime does.
+        from .phase2_r3_post_recovery_authorization import (
+            verify_r3_final_authorization,
+        )
+
+        return verify_r3_final_authorization(
+            source,
+            expected_sha256=expected,
+            project_root=project_root,
+        )
+    if schema == PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA:
+        return verify_phase2_recovery_authorization(source, expected)
+    raise ValueError("recovery authorization schema is neither exact R2 nor exact R3")
 
 
 def verify_recovery_authorization_config_binding(
@@ -896,12 +934,14 @@ def verify_recovery_authorization_config_binding(
     expected_sha256: str,
     expected_pilot_phase: str | None = None,
     expected_stage: str = "pilot",
+    project_root: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
     """Verify the actual receipt and its exact hash-bound config projection."""
 
     payload = verify_recovery_authorization_file(
         authorization_path,
         expected_sha256=expected_sha256,
+        project_root=project_root,
     )
     bundle = load_phase2_config_bundle(overlay_path)
     config = bundle.config
@@ -1590,6 +1630,7 @@ def _verify_aggregate_submit_held_request(
         or not fields.get("UserId", "").startswith(f"{intent['submitter_user']}(")
         or fields.get("Account") != "sigroup"
         or fields.get("Partition") != intent["partition"]
+        or fields.get("QOS") != "l20_qos"
         or fields.get("Requeue") != "0"
         or fields.get("Restarts") != "0"
         or fields.get("NumNodes") not in {"1", "1-1"}
@@ -1607,8 +1648,12 @@ def _verify_aggregate_submit_held_request(
         or tres.get("cpu") != "4"
         or tres.get("mem") != "16G"
         or tres.get("node") != "1"
-        or any("gpu" in key.lower() for key in tres)
-        or "gpu" in fields.get("TresPerNode", "").lower()
+        or tres.get("gres/gpu") != "1"
+        or re.fullmatch(
+            r"gres(?::|/)gpu(?::[A-Za-z0-9_.-]+)?:1",
+            fields.get("TresPerNode", ""),
+        )
+        is None
     ):
         raise ValueError("aggregate held scheduler request differs from intent")
     normalized = _exact_mapping(
@@ -1620,11 +1665,14 @@ def _verify_aggregate_submit_held_request(
             "cluster",
             "account",
             "partition",
+            "qos",
             "nodes",
             "tasks",
             "cpus",
             "cpus_per_task",
             "memory",
+            "gpus_per_node",
+            "tres_per_node",
             "walltime",
             "requeue",
             "restarts",
@@ -1639,11 +1687,14 @@ def _verify_aggregate_submit_held_request(
         "cluster": "hpc4",
         "account": "sigroup",
         "partition": intent["partition"],
+        "qos": "l20_qos",
         "nodes": 1,
         "tasks": 1,
         "cpus": 4,
         "cpus_per_task": 4,
         "memory": "16G",
+        "gpus_per_node": 1,
+        "tres_per_node": fields["TresPerNode"],
         "walltime": intent["walltime"],
         "requeue": False,
         "restarts": 0,
@@ -1690,10 +1741,12 @@ def _aggregate_sbatch_command(
         "--clusters=hpc4",
         "--account=sigroup",
         f"--partition={intent['partition']}",
+        "--qos=l20_qos",
         "--nodes=1",
         "--ntasks=1",
         "--cpus-per-task=4",
         "--mem=16G",
+        "--gpus-per-node=1",
         f"--time={intent['walltime']}",
         "--no-requeue",
         f"--comment=prorm-aggregate:{intent_sha256}:attempt-{attempt_index}",
@@ -1842,12 +1895,14 @@ def _verify_aggregate_submission_bundle(
         or intent["project_root"] != os.fspath(project_root)
         or intent["final_output"] != os.fspath(aggregate_file)
         or intent["partition"] != ready["partition"]
+        or intent["qos"] != "l20_qos"
         or intent["cluster"] != "hpc4"
         or intent["account"] != "sigroup"
         or intent["nodes"] != 1
         or intent["tasks"] != 1
         or intent["cpus_per_task"] != 4
         or intent["memory"] != "16G"
+        or intent["gpus_per_node"] != 1
         or intent["requeue"] is not False
         or intent["retry_only_after_exact_terminal_failure"] is not True
         or not _valid_utc(intent["created_at_utc"])
@@ -2700,7 +2755,7 @@ def verify_post_recovery_aggregate_attempt_ready(
         or ready["slurm_job_is_array"] != "false"
         or ready["cluster"] != "hpc4"
         or ready["account"] != "sigroup"
-        or ready["partition"] not in {"amd", "intel"}
+        or ready["partition"] != "gpu-l20"
         or ready["restart_count"] != "0"
         or ready["final_output"] != os.fspath(aggregate_file)
         or ready["final_evidence_root"] != f"{aggregate_file}.evidence"
@@ -3264,7 +3319,7 @@ def _parse_post_recovery_aggregate_sacct_raw(
         or cluster != "hpc4"
         or account != "sigroup"
         or partition != expected_partition
-        or partition not in {"amd", "intel"}
+        or partition != "gpu-l20"
         or n_nodes != "1"
         or n_cpus != "4"
         or req_tres != _EXPECTED_AGGREGATE_REQ_TRES
@@ -4187,7 +4242,7 @@ def _capture_post_recovery_aggregate_terminal_evidence_locked(
     queried_command: tuple[str, ...],
     queried_raw: bytes,
 ) -> dict[str, object]:
-    """Claim, publish, and terminalize one already successful CPU attempt."""
+    """Claim, publish, and terminalize one successful gpu-l20 SIF attempt."""
 
     aggregate_file = Path(aggregate_path).absolute()
     success_path = Path(f"{aggregate_file}.SUCCESS").absolute()
@@ -4202,12 +4257,11 @@ def _capture_post_recovery_aggregate_terminal_evidence_locked(
     )
     aggregate_submission = attempt["aggregate_submission"]
     if not isinstance(aggregate_submission, Mapping):
-        raise TypeError("aggregate CPU submission context is invalid")
+        raise TypeError("aggregate gpu-l20 submission context is invalid")
     authority = _verify_aggregate_submission_scheduler_authority(aggregate_submission)
-    if attempt["ready"]["partition"] not in {
-        "amd",
-        "intel",
-    } or queried_command != post_recovery_aggregate_sacct_command(attempt_job_id):
+    if attempt["ready"][
+        "partition"
+    ] != "gpu-l20" or queried_command != post_recovery_aggregate_sacct_command(attempt_job_id):
         raise ValueError("aggregate attempt terminal query identity is invalid")
     _parse_post_recovery_aggregate_sacct_raw(
         queried_raw,

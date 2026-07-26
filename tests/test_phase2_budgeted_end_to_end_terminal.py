@@ -201,6 +201,31 @@ def test_capture_never_overwrites_either_publication_file(
     assert raw_path.read_bytes() == original_raw
 
 
+def test_raw_query_is_preserved_before_failed_seed_states_are_interpreted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load()
+    failed_raw = _raw(mutation=(1, 2, "FAILED"))
+    observed: list[tuple[str, ...]] = []
+
+    def run(arguments: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        observed.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, failed_raw, b"")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    output = tmp_path / "array-7000.all.sacct.psv"
+
+    payload = module.capture_raw_terminal_query(ARRAY_JOB_ID, output)
+
+    assert observed == [module.sacct_command(ARRAY_JOB_ID)]
+    assert output.read_bytes() == failed_raw
+    assert payload["status"] == "raw_terminal_captured"
+    assert payload["sha256"] == hashlib.sha256(failed_raw).hexdigest()
+    with pytest.raises(FileExistsError, match="overwrite"):
+        module.capture_raw_terminal_query(ARRAY_JOB_ID, output)
+
+
 def test_noncanonical_or_duplicate_envelope_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

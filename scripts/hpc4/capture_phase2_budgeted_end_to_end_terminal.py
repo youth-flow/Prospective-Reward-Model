@@ -361,6 +361,39 @@ def capture_terminal_evidence(
     return payload
 
 
+def capture_raw_terminal_query(
+    array_job_id: str,
+    destination: str | os.PathLike[str],
+) -> dict[str, object]:
+    """Persist the locked raw query before interpreting success or failure."""
+
+    checked_id = _array_job_id(array_job_id)
+    output = Path(destination).absolute()
+    if output.exists() or output.is_symlink():
+        raise FileExistsError("refusing to overwrite raw terminal query")
+    command = sacct_command(checked_id)
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError("could not execute the locked raw sacct query") from error
+    if completed.returncode != 0 or completed.stderr or not completed.stdout:
+        raise RuntimeError("the locked raw sacct query failed or returned no evidence")
+    _write_exclusive(output, completed.stdout, name="raw terminal query")
+    return {
+        "status": "raw_terminal_captured",
+        "array_job_id": checked_id,
+        "output": str(output),
+        "sha256": _sha256(completed.stdout),
+        "size_bytes": len(completed.stdout),
+        "query": list(command),
+    }
+
+
 def verify_terminal_evidence(
     path: str | os.PathLike[str],
     *,
@@ -431,6 +464,9 @@ def build_parser() -> argparse.ArgumentParser:
     capture = subparsers.add_parser("capture")
     capture.add_argument("array_job_id")
     capture.add_argument("output", type=Path)
+    capture_raw = subparsers.add_parser("capture-raw")
+    capture_raw.add_argument("array_job_id")
+    capture_raw.add_argument("output", type=Path)
     verify = subparsers.add_parser("verify")
     verify.add_argument("evidence", type=Path)
     verify.add_argument("--expected-sha256", required=True)
@@ -449,6 +485,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "output": str(arguments.output),
             "sha256": digest,
         }
+    elif arguments.command == "capture-raw":
+        result = capture_raw_terminal_query(
+            arguments.array_job_id,
+            arguments.output,
+        )
     else:
         payload = verify_terminal_evidence(
             arguments.evidence,

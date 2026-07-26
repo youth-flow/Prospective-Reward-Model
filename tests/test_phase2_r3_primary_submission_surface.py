@@ -3,8 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBMIT = ROOT / "scripts" / "hpc4" / "submit_phase2_r3_primary.sh"
+LAUNCHER = ROOT / "scripts" / "hpc4" / "submit_phase2_r3_primary.sh"
+SUBMIT = ROOT / "scripts" / "hpc4" / "phase2_r3_primary_submission.sbatch"
 SBATCH = ROOT / "scripts" / "hpc4" / "phase2_r3_primary.sbatch"
+
+
+def test_login_launcher_never_executes_the_container() -> None:
+    text = LAUNCHER.read_text(encoding="utf-8")
+
+    assert "apptainer exec" not in text
+    assert "phase2_r3_primary_submission.sbatch" in text
+    assert "exec srun" in text
+    assert "--partition=gpu-l20" in text
+    assert "--gpus-per-node=1" in text
+    assert 'export_spec="PATH=/usr/bin:/bin"' in text
 
 
 def test_submitter_derives_all_scheduler_resources_from_the_pinned_plan() -> None:
@@ -36,6 +48,18 @@ def test_submitter_derives_all_scheduler_resources_from_the_pinned_plan() -> Non
     assert '--cpus-per-task="${cpus_per_task}"' in text
     assert '--mem="${memory_mib}M"' in text
     assert '--time="${slurm_walltime}"' in text
+    for canonical_export in (
+        'export PRORM_R3_IMAGE="${image}"',
+        'export PRORM_R3_REPO_ROOT="${repo_root}"',
+        'export PRORM_R3_PROJECT_ROOT="${project_root}"',
+        'export PRORM_R3_SCRATCH_ROOT="${scratch_root}"',
+        'export PRORM_R3_HF_CACHE="${hf_cache}"',
+        'export PRORM_R3_OPERATIONAL_BUNDLE="${operational_bundle}"',
+        'export PRORM_R3_PROFILE_INTENT="${profile_intent}"',
+        'export PRORM_R3_PROFILE_RUNTIME_RECEIPT="${profile_runtime_receipt}"',
+        ('export PRORM_R3_PROFILE_TERMINAL_EVIDENCE_DIRECTORY="${profile_terminal_directory}"'),
+    ):
+        assert canonical_export in text
 
     create_command = text.split('python3 "${prepare_cli}" create', 1)[1].split(
         'submission_plan_file_sha256="$(',

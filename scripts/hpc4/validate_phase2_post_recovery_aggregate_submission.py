@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the running CPU aggregate against its held submission ledger."""
+"""Validate the running gpu-l20 aggregate against its held submission ledger."""
 
 from __future__ import annotations
 

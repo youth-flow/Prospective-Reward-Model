@@ -30,6 +30,21 @@ from .config import (
     load_config,
     validate_config,
 )
+from .phase2_r3_post_recovery_contract import (
+    R3_AUTHORIZED_INFORMATION,
+    R3_AUTHORIZED_NEXT_ACTION,
+    R3_EXECUTION_REVISION,
+    R3_FINAL_AUTHORIZATION_PROJECTION_FIELDS,
+    R3_FINAL_AUTHORIZATION_PROJECTION_SCHEMA,
+    R3_FINAL_AUTHORIZATION_REFERENCE_SCHEMA,
+    R3_FINAL_AUTHORIZATION_ROLE,
+    R3_FINAL_AUTHORIZATION_SCHEMA,
+    R3_GATE_C_AGGREGATE_RELATIVE,
+    R3_GATE_R_AUTHORIZATION_RELATIVE,
+    R3_OPTIMIZER_SCHEDULE_SHA256,
+    R3_ORDERED_RECOVERY_SEEDS,
+    R3_TRANSPORT_BOUNDARY,
+)
 
 PHASE2_SCHEMA_VERSION = "prorm-common-beta-config/v2"
 PHASE2_RECOVERY_SCHEMA_VERSION = "prorm-common-beta-recovery-config/v1"
@@ -2660,7 +2675,7 @@ def _validate_recovery_experiment_scope(root: Mapping[str, object]) -> None:
         )
 
 
-def _validate_recovery_success_projection(
+def _validate_r2_recovery_success_projection(
     value: object,
     *,
     path: str,
@@ -2781,6 +2796,190 @@ def _contains_reward_head_field(value: object) -> bool:
     return False
 
 
+def _validate_r3_final_authorization_projection(
+    value: object,
+    *,
+    path: str,
+    reference_projection: bool,
+) -> tuple[dict[str, Any], tuple[int, ...]]:
+    schema_fields = (
+        {"schema_version", "source_schema_version"} if reference_projection else {"schema_version"}
+    )
+    authorization = _keys(
+        value,
+        path=path,
+        required=schema_fields | set(R3_FINAL_AUTHORIZATION_PROJECTION_FIELDS),
+    )
+    if reference_projection:
+        _locked_string(
+            authorization["schema_version"],
+            f"{path}.schema_version",
+            R3_FINAL_AUTHORIZATION_PROJECTION_SCHEMA,
+        )
+        _locked_string(
+            authorization["source_schema_version"],
+            f"{path}.source_schema_version",
+            R3_FINAL_AUTHORIZATION_SCHEMA,
+        )
+    else:
+        _locked_string(
+            authorization["schema_version"],
+            f"{path}.schema_version",
+            R3_FINAL_AUTHORIZATION_SCHEMA,
+        )
+    _locked_string(
+        authorization["role"],
+        f"{path}.role",
+        R3_FINAL_AUTHORIZATION_ROLE,
+    )
+    recovery_design_sha256 = _string(
+        authorization["recovery_design_sha256"],
+        f"{path}.recovery_design_sha256",
+    )
+    if (
+        _HEX_DIGEST_PATTERN.fullmatch(recovery_design_sha256) is None
+        or recovery_design_sha256 == _RECOVERY_DESIGN_SHA256
+    ):
+        raise ConfigError(f"{path}.recovery_design_sha256 must bind one non-R2 R3 design")
+    _locked_string(
+        authorization["optimizer_schedule_sha256"],
+        f"{path}.optimizer_schedule_sha256",
+        R3_OPTIMIZER_SCHEDULE_SHA256,
+    )
+    _locked_boolean(
+        authorization["optimizer_schedule_is_unique"],
+        f"{path}.optimizer_schedule_is_unique",
+        True,
+    )
+    _locked_integer(
+        authorization["execution_revision"],
+        f"{path}.execution_revision",
+        R3_EXECUTION_REVISION,
+    )
+    ordered_seeds = tuple(
+        _unique_integers(
+            authorization["ordered_seeds"],
+            f"{path}.ordered_seeds",
+        )
+    )
+    if ordered_seeds != R3_ORDERED_RECOVERY_SEEDS:
+        raise ConfigError(
+            f"{path}.ordered_seeds must equal {list(R3_ORDERED_RECOVERY_SEEDS)!r} in that order"
+        )
+    _locked_string(
+        authorization["gate_r_authorization_path"],
+        f"{path}.gate_r_authorization_path",
+        R3_GATE_R_AUTHORIZATION_RELATIVE.as_posix(),
+    )
+    _locked_string(
+        authorization["gate_c_aggregate_path"],
+        f"{path}.gate_c_aggregate_path",
+        R3_GATE_C_AGGREGATE_RELATIVE.as_posix(),
+    )
+    for field in (
+        "gate_r_authorization_file_sha256",
+        "gate_r_authorization_sha256",
+        "gate_c_aggregate_file_sha256",
+        "gate_c_aggregate_sha256",
+        "gate_c_source_set_sha256",
+        "authorization_sha256",
+    ):
+        digest = _string(authorization[field], f"{path}.{field}")
+        if _HEX_DIGEST_PATTERN.fullmatch(digest) is None:
+            raise ConfigError(f"{path}.{field} must be a lowercase SHA256 digest")
+    for field in (
+        "gate_r_passed",
+        "gate_c_passed",
+        "fresh_calibration_authorized",
+    ):
+        _locked_boolean(authorization[field], f"{path}.{field}", True)
+    for field in (
+        "formal_efficacy_claim_authorized",
+        "recovery_or_control_outputs_reusable",
+        "validation_or_heldout_access_authorized",
+        "policy_or_final_utility_access_authorized",
+    ):
+        _locked_boolean(authorization[field], f"{path}.{field}", False)
+    _locked_string(
+        authorization["authorized_information"],
+        f"{path}.authorized_information",
+        R3_AUTHORIZED_INFORMATION,
+    )
+    _locked_string(
+        authorization["authorized_next_action"],
+        f"{path}.authorized_next_action",
+        R3_AUTHORIZED_NEXT_ACTION,
+    )
+    transport = _keys(
+        authorization["transport_boundary"],
+        path=f"{path}.transport_boundary",
+        required=set(R3_TRANSPORT_BOUNDARY),
+    )
+    for field, expected in R3_TRANSPORT_BOUNDARY.items():
+        _locked_boolean(
+            transport[field],
+            f"{path}.transport_boundary.{field}",
+            expected,
+        )
+    normalized = copy.deepcopy(dict(authorization))
+    if reference_projection:
+        normalized["schema_version"] = normalized.pop("source_schema_version")
+    return normalized, ordered_seeds
+
+
+_R2_RECOVERY_SUCCESS_PROJECTION_FIELDS = (
+    "recovery_design_sha256",
+    "optimizer_schedule_sha256",
+    "source_array_job_id",
+    "execution_revision",
+    "ordered_seeds",
+    "recovery_status",
+    "full_calibration_authorized",
+    "authorized_information",
+    "recovery_outputs_reusable",
+    "validation_or_heldout_access_authorized",
+    "policy_or_final_utility_access_authorized",
+)
+
+
+def build_post_recovery_authorization_reference(
+    authorization_payload: Mapping[str, object],
+    *,
+    artifact_sha256: str,
+) -> dict[str, Any]:
+    """Build the exact R2 or R3 projection from a file-verified payload."""
+
+    payload = _mapping(authorization_payload, "authorization_payload")
+    if _contains_reward_head_field(payload):
+        raise ConfigError("authorization payload must not expose reward-head fields")
+    schema = _string(payload.get("schema_version"), "authorization_payload.schema_version")
+    if schema == PHASE2_RECOVERY_SUCCESS_AUTHORIZATION_SCHEMA:
+        reference_schema = PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA
+        projection_schema = PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA
+        fields = _R2_RECOVERY_SUCCESS_PROJECTION_FIELDS
+    elif schema == R3_FINAL_AUTHORIZATION_SCHEMA:
+        reference_schema = R3_FINAL_AUTHORIZATION_REFERENCE_SCHEMA
+        projection_schema = R3_FINAL_AUTHORIZATION_PROJECTION_SCHEMA
+        fields = R3_FINAL_AUTHORIZATION_PROJECTION_FIELDS
+    else:
+        raise ConfigError("authorization payload schema is neither exact R2 nor exact R3")
+    projection = {
+        "schema_version": projection_schema,
+        "source_schema_version": schema,
+        **{field: copy.deepcopy(payload.get(field)) for field in fields},
+    }
+    reference = {
+        "schema_version": reference_schema,
+        "artifact_sha256": artifact_sha256,
+        "authorization_projection": projection,
+    }
+    return validate_post_recovery_authorization_reference(
+        reference,
+        authorization_payload_sha256=artifact_sha256,
+        authorization_payload=payload,
+    )
+
+
 def validate_post_recovery_authorization_reference(
     value: object,
     *,
@@ -2804,10 +3003,9 @@ def validate_post_recovery_authorization_reference(
             "authorization_projection",
         },
     )
-    _locked_string(
+    reference_schema = _string(
         reference["schema_version"],
         "recovery_success_reference.schema_version",
-        PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA,
     )
     artifact_sha256 = _string(
         reference["artifact_sha256"],
@@ -2817,7 +3015,16 @@ def validate_post_recovery_authorization_reference(
         raise ConfigError(
             "recovery_success_reference.artifact_sha256 must be a lowercase SHA256 digest"
         )
-    projection, _ = _validate_recovery_success_projection(
+    if reference_schema == PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA:
+        projection_validator = _validate_r2_recovery_success_projection
+    elif reference_schema == R3_FINAL_AUTHORIZATION_REFERENCE_SCHEMA:
+        projection_validator = _validate_r3_final_authorization_projection
+    else:
+        raise ConfigError(
+            "recovery_success_reference.schema_version must equal the exact "
+            "R2 or R3 authorization-reference schema"
+        )
+    projection, _ = projection_validator(
         reference["authorization_projection"],
         path="recovery_success_reference.authorization_projection",
         reference_projection=True,
@@ -2841,7 +3048,7 @@ def validate_post_recovery_authorization_reference(
         if _contains_reward_head_field(payload):
             raise ConfigError("authorization payload must not expose reward-head fields")
         payload_projection = {field: payload.get(field) for field in projection}
-        validated_payload_projection, _ = _validate_recovery_success_projection(
+        validated_payload_projection, _ = projection_validator(
             payload_projection,
             path="authorization_payload",
             reference_projection=False,
@@ -3296,7 +3503,11 @@ __all__ = [
     "PHASE2_RECOVERY_SUCCESS_PROJECTION_SCHEMA",
     "PHASE2_RECOVERY_SUCCESS_REFERENCE_SCHEMA",
     "PHASE2_SCHEMA_VERSION",
+    "R3_FINAL_AUTHORIZATION_PROJECTION_SCHEMA",
+    "R3_FINAL_AUTHORIZATION_REFERENCE_SCHEMA",
+    "R3_FINAL_AUTHORIZATION_SCHEMA",
     "Phase2ConfigBundle",
+    "build_post_recovery_authorization_reference",
     "load_phase2_config",
     "load_phase2_config_bundle",
     "phase2_config_hash",

@@ -342,7 +342,10 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
     gatep_sbatch = (ROOT / "scripts" / "hpc4" / "phase2_r3_gatep.sbatch").read_text(
         encoding="utf-8"
     )
-    gatep_submitter = (ROOT / "scripts" / "hpc4" / "submit_phase2_r3_gatep.sh").read_text(
+    gatep_launcher = (ROOT / "scripts" / "hpc4" / "submit_phase2_r3_gatep.sh").read_text(
+        encoding="utf-8"
+    )
+    gatep_submitter = (ROOT / "scripts" / "hpc4" / "phase2_r3_gatep_submission.sbatch").read_text(
         encoding="utf-8"
     )
     gatep_environment = (ROOT / "scripts" / "hpc4" / "r3_env.example").read_text(encoding="utf-8")
@@ -353,6 +356,12 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
     assert "PRORM_R3_GATE0_FILE_SHA256" in gatep_sbatch
     assert '--gate0-file-sha256 "${PRORM_R3_GATE0_FILE_SHA256}"' in gatep_sbatch
     assert "PRORM_R3_GATE0_FILE_SHA256" in gatep_submitter
+    assert "apptainer exec" not in gatep_launcher
+    assert "phase2_r3_gatep_submission.sbatch" in gatep_launcher
+    assert "exec srun" in gatep_launcher
+    assert "--partition=gpu-l20" in gatep_launcher
+    assert "--gpus-per-node=1" in gatep_launcher
+    assert 'export_spec="PATH=/usr/bin:/bin"' in gatep_launcher
     assert 'Path("/home/yyangjo/Smart-Reward-Model")' in gatep_runner
     assert 'Path("/project/sigroup/smart-reward-model")' in gatep_runner
     assert 'parser.add_argument("--project-root"' not in gatep_runner
@@ -381,6 +390,11 @@ def test_formal_entrypoints_have_no_root_or_output_override() -> None:
     assert "--nodes=1" in gatep_submitter
     assert "--ntasks=1" in gatep_submitter
     assert "--gpus-per-node=1" in gatep_submitter
+    assert 'export_spec="PATH=/usr/bin:/bin"' in gatep_submitter
+    assert 'export_spec="NONE"' not in gatep_submitter
+    assert '--export="${export_spec}"' in gatep_submitter
+    assert "contains a comma or newline" in gatep_submitter
+    assert "--no-requeue" in gatep_submitter
     assert "    --gpus-per-task=1 \\" not in gatep_submitter
     assert '[[ "${SLURM_NNODES:-}" == "1" ]]' in gatep_sbatch
     assert '[[ "${SLURM_NTASKS:-}" == "1" ]]' in gatep_sbatch

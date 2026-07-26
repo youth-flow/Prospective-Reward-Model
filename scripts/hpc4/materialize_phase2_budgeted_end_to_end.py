@@ -36,6 +36,7 @@ from smart_reward.phase2_config import (
     PHASE2_BUDGETED_END_TO_END_SEEDS,
     PHASE2_BUDGETED_END_TO_END_STAGE,
     PHASE2_POST_RECOVERY_SCHEMA_VERSION,
+    build_post_recovery_authorization_reference,
     load_phase2_config_bundle,
     phase2_design_identity,
     validate_phase2_config,
@@ -46,17 +47,23 @@ from smart_reward.phase2_pilot_aggregate import (
     verify_horizon_parent_aggregate,
 )
 from smart_reward.phase2_post_recovery_control import (
-    OPTIMIZER_SCHEDULE_SHA256,
     verify_post_recovery_aggregate_success_receipt,
-    verify_recovery_authorization_file,
+)
+from smart_reward.phase2_r3_post_recovery_authorization import (
+    verify_r3_final_authorization,
+)
+from smart_reward.phase2_r3_post_recovery_contract import (
+    R3_AUTHORIZED_NEXT_ACTION,
+    R3_FINAL_AUTHORIZATION_RELATIVE,
+    R3_FINAL_AUTHORIZATION_ROLE,
+    R3_FINAL_AUTHORIZATION_SCHEMA,
+    R3_OPTIMIZER_SCHEDULE_SHA256,
 )
 from smart_reward.phase2_training import compile_phase2_training_settings
 
 _PROJECT_ROOT = Path("/project/sigroup/smart-reward-model")
 _AGGREGATE_ROOT = _PROJECT_ROOT / "aggregates"
-_AUTHORIZATION_PATH = (
-    _PROJECT_ROOT / "runs" / "phase2-recovery-pilot" / "recovery-success-authorization.json"
-)
+_AUTHORIZATION_PATH = _PROJECT_ROOT / R3_FINAL_AUTHORIZATION_RELATIVE
 _BUDGETED_BASE_RELATIVE = Path(PHASE2_BUDGETED_END_TO_END_BASE_CONFIG)
 _BUDGETED_OVERLAY_RELATIVE = Path(PHASE2_BUDGETED_END_TO_END_CONFIG)
 _BUDGETED_RECEIPT_RELATIVE = Path(
@@ -499,13 +506,9 @@ def _verify_authorization_and_optimizer(
     config: Mapping[str, object],
     base: Mapping[str, object],
     *,
-    authorization_path: Path,
+    authorization: Mapping[str, object],
     authorization_sha256: str,
 ) -> dict[str, object]:
-    authorization = verify_recovery_authorization_file(
-        authorization_path,
-        expected_sha256=authorization_sha256,
-    )
     validate_post_recovery_authorization_reference(
         config["recovery_success_reference"],
         authorization_payload_sha256=authorization_sha256,
@@ -523,7 +526,18 @@ def _verify_authorization_and_optimizer(
         or protocol is None
         or protocol.mode != "adopted"
         or protocol.source_recovery_authorization_sha256 != authorization_sha256
-        or protocol.schedule_sha256 != OPTIMIZER_SCHEDULE_SHA256
+        or protocol.schedule_sha256 != R3_OPTIMIZER_SCHEDULE_SHA256
+        or authorization.get("schema_version") != R3_FINAL_AUTHORIZATION_SCHEMA
+        or authorization.get("role") != R3_FINAL_AUTHORIZATION_ROLE
+        or authorization.get("optimizer_schedule_sha256") != R3_OPTIMIZER_SCHEDULE_SHA256
+        or authorization.get("gate_r_passed") is not True
+        or authorization.get("gate_c_passed") is not True
+        or authorization.get("fresh_calibration_authorized") is not True
+        or authorization.get("authorized_next_action") != R3_AUTHORIZED_NEXT_ACTION
+        or authorization.get("recovery_or_control_outputs_reusable") is not False
+        or authorization.get("validation_or_heldout_access_authorized") is not False
+        or authorization.get("policy_or_final_utility_access_authorized") is not False
+        or authorization.get("formal_efficacy_claim_authorized") is not False
         or protocol.to_dict().get("scope") != "every_phase2_first_order_convergence_trainer"
     ):
         raise ValueError(
@@ -536,6 +550,54 @@ def _verify_authorization_and_optimizer(
         "formal_eligibility": settings.formal_eligibility,
         "ordered_seeds": list(settings.seeds),
     }
+
+
+def _verified_r3_authorization(
+    path: Path,
+    *,
+    expected_sha256: str,
+) -> dict[str, object]:
+    source = _canonical_regular_file(path, name="R3 combined authorization")
+    if source != _AUTHORIZATION_PATH:
+        raise ValueError("authorization must be the fixed R3 Gate-R/Gate-C capability")
+    authorization = verify_r3_final_authorization(
+        source,
+        expected_sha256=expected_sha256,
+        project_root=_PROJECT_ROOT,
+    )
+    # Keep this explicit GateE boundary even though the deep verifier also
+    # validates the combined artifact.  It makes an accidental R2 fallback or
+    # widened transport capability impossible at the materialization callsite.
+    if (
+        authorization.get("schema_version") != R3_FINAL_AUTHORIZATION_SCHEMA
+        or authorization.get("role") != R3_FINAL_AUTHORIZATION_ROLE
+        or authorization.get("optimizer_schedule_sha256") != R3_OPTIMIZER_SCHEDULE_SHA256
+        or authorization.get("gate_r_passed") is not True
+        or authorization.get("gate_c_passed") is not True
+        or authorization.get("fresh_calibration_authorized") is not True
+        or authorization.get("authorized_next_action") != R3_AUTHORIZED_NEXT_ACTION
+        or authorization.get("recovery_or_control_outputs_reusable") is not False
+    ):
+        raise ValueError("authorization is not the closed R3 GateE capability")
+    return authorization
+
+
+def _bind_r3_authorization(
+    candidate: dict[str, object],
+    authorization: Mapping[str, object],
+    *,
+    authorization_sha256: str,
+) -> None:
+    candidate["recovery_success_reference"] = build_post_recovery_authorization_reference(
+        authorization,
+        artifact_sha256=authorization_sha256,
+    )
+    reward = _mapping(candidate.get("reward_model"), name="reward_model")
+    protocol = _mapping(
+        reward.get("optimizer_protocol"),
+        name="reward_model.optimizer_protocol",
+    )
+    protocol["source_recovery_authorization_sha256"] = authorization_sha256
 
 
 def _require_real_directory(path: Path, *, name: str) -> Path:
@@ -694,6 +756,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         freeze_sha256=predecessor_sha256,
         frozen_beta=frozen_beta,
     )
+    authorization = _verified_r3_authorization(
+        arguments.authorization.absolute(),
+        expected_sha256=arguments.authorization_sha256,
+    )
+    _bind_r3_authorization(
+        candidate,
+        authorization,
+        authorization_sha256=arguments.authorization_sha256,
+    )
     normalized = validate_phase2_config(candidate, base_config=candidate_base)
     beta_binding = verify_beta_source_aggregate(normalized, predecessor)
     horizon_binding = verify_horizon_parent_aggregate(normalized, predecessor)
@@ -710,7 +781,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     authorization_binding = _verify_authorization_and_optimizer(
         normalized,
         candidate_base,
-        authorization_path=arguments.authorization.absolute(),
+        authorization=authorization,
         authorization_sha256=arguments.authorization_sha256,
     )
 

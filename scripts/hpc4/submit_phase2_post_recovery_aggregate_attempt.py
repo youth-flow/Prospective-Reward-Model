@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Submit one controlled post-recovery aggregate attempt at a time.
 
-Every CPU job is created held.  Its exact request is committed to an immutable
+Every gpu-l20 job is created held. Its exact request is committed to an immutable
 attempt ledger before release.  A retry is possible only after the previous
 registered attempt has exact terminal non-zero Slurm evidence.
 """
@@ -31,6 +31,10 @@ CONTROLLER_READBACK_DIRECTORY = "controller"
 SCRIPT_TRANSPORT = "sbatch-stdin"
 _MAX_SCRIPT_BYTES = 1024 * 1024
 _HEX = frozenset("0123456789abcdef")
+_PARTITION = "gpu-l20"
+_QOS = "l20_qos"
+_REQ_TRES = "billing=4,cpu=4,gres/gpu=1,mem=16G,node=1"
+_ALLOC_TRES = "billing=4,cpu=4,gres/gpu:l20=1,gres/gpu=1,mem=16G,node=1"
 _TERMINAL_FAILURE_STATES = frozenset(
     {
         "BOOT_FAIL",
@@ -345,7 +349,7 @@ def _intent_payload(
         re.fullmatch(r"[1-9][0-9]*", pilot_array_job_id) is None
         or not isinstance(script_size_bytes, int)
         or not 0 < script_size_bytes <= _MAX_SCRIPT_BYTES
-        or partition not in {"amd", "intel"}
+        or partition != _PARTITION
         or re.fullmatch(
             r"(?:[1-9][0-9]*-[0-9]{2}:[0-9]{2}:[0-9]{2}|"
             r"[0-9]{2}:[0-9]{2}:[0-9]{2})",
@@ -380,6 +384,7 @@ def _intent_payload(
         "repository_root": os.fspath(repository_root),
         "final_output": os.fspath(output),
         "partition": partition,
+        "qos": _QOS,
         "walltime": walltime,
         "workload_export_spec": workload_export_spec,
         "workload_export_spec_sha256": _sha256_bytes(workload_export_spec.encode("utf-8")),
@@ -400,6 +405,7 @@ def _intent_payload(
         "tasks": 1,
         "cpus_per_task": 4,
         "memory": "16G",
+        "gpus_per_node": 1,
         "requeue": False,
         "retry_only_after_exact_terminal_failure": True,
         "created_at_utc": _valid_utc(created_at_utc),
@@ -459,6 +465,7 @@ def _parse_scontrol(
         or not fields.get("UserId", "").startswith(f"{intent['submitter_user']}(")
         or fields.get("Account") != "sigroup"
         or fields.get("Partition") != intent["partition"]
+        or fields.get("QOS") != _QOS
         or fields.get("Requeue") != "0"
         or fields.get("Restarts") != "0"
         or fields.get("NumNodes") not in {"1", "1-1"}
@@ -474,11 +481,15 @@ def _parse_scontrol(
         or tres.get("cpu") != "4"
         or tres.get("mem") != "16G"
         or tres.get("node") != "1"
-        or any("gpu" in key.lower() for key in tres)
-        or "gpu" in fields.get("TresPerNode", "").lower()
+        or tres.get("gres/gpu") != "1"
+        or re.fullmatch(
+            r"gres(?::|/)gpu(?::[A-Za-z0-9_.-]+)?:1",
+            fields.get("TresPerNode", ""),
+        )
+        is None
         or not fields.get("JobState")
     ):
-        raise ValueError("CPU job differs from the immutable aggregate intent")
+        raise ValueError("gpu-l20 job differs from the immutable aggregate intent")
     held = fields["JobState"] == "PENDING" and fields.get("Reason") == "JobHeldUser"
     if held:
         scheduler = {
@@ -492,11 +503,14 @@ def _parse_scontrol(
                 "cluster": "hpc4",
                 "account": "sigroup",
                 "partition": intent["partition"],
+                "qos": _QOS,
                 "nodes": 1,
                 "tasks": 1,
                 "cpus": 4,
                 "cpus_per_task": 4,
                 "memory": "16G",
+                "gpus_per_node": 1,
+                "tres_per_node": fields["TresPerNode"],
                 "walltime": intent["walltime"],
                 "requeue": False,
                 "restarts": 0,
@@ -540,10 +554,12 @@ def _sbatch_command(
         "--clusters=hpc4",
         "--account=sigroup",
         f"--partition={intent['partition']}",
+        f"--qos={_QOS}",
         "--nodes=1",
         "--ntasks=1",
         "--cpus-per-task=4",
         "--mem=16G",
+        "--gpus-per-node=1",
         f"--time={intent['walltime']}",
         "--no-requeue",
         f"--comment={_comment(intent_sha256, attempt_index)}",
@@ -825,8 +841,8 @@ def _sacct_rows(
             or row["NNodes"] not in {"0", "1"}
             or row["NCPUS"] not in {"0", "4"}
             or row["Timelimit"] != intent["walltime"]
-            or row["ReqTRES"] != "billing=4,cpu=4,mem=16G,node=1"
-            or (row["AllocTRES"] not in {"", "billing=4,cpu=4,mem=16G,node=1"})
+            or row["ReqTRES"] != _REQ_TRES
+            or (row["AllocTRES"] not in {"", _ALLOC_TRES})
         ):
             raise ValueError("aggregate sacct history differs from intent")
         if job_id in rows:
@@ -932,8 +948,8 @@ def _parse_single_sacct_raw(
         or row["NNodes"] not in {"0", "1"}
         or row["NCPUS"] not in {"0", "4"}
         or row["Timelimit"] != expected_walltime
-        or row["ReqTRES"] != "billing=4,cpu=4,mem=16G,node=1"
-        or row["AllocTRES"] not in {"", "billing=4,cpu=4,mem=16G,node=1"}
+        or row["ReqTRES"] != _REQ_TRES
+        or row["AllocTRES"] not in {"", _ALLOC_TRES}
         or not _terminal_failure(row)
     ):
         raise ValueError("aggregate failure raw sacct row is not exact terminal failure")
@@ -972,7 +988,7 @@ def _successful(row: Mapping[str, str]) -> bool:
         and row["DerivedExitCode"] == "0:0"
         and row["NNodes"] == "1"
         and row["NCPUS"] == "4"
-        and row["AllocTRES"] == "billing=4,cpu=4,mem=16G,node=1"
+        and row["AllocTRES"] == _ALLOC_TRES
     )
 
 
@@ -1105,7 +1121,7 @@ def verify_aggregate_submission_registry(
     expected_output: Path,
     expected_workload_export_sha256: str,
 ) -> dict[str, object]:
-    """Deep-verify the CPU job's own held-and-ledgered submission."""
+    """Deep-verify the gpu-l20 job's own held-and-ledgered submission."""
 
     project_root = _canonical_directory(
         expected_project_root,
@@ -1200,7 +1216,7 @@ def verify_aggregate_submission_registry(
     log_root = project_root / "slurm-logs" / "phase2-post-recovery-aggregate" / output.name
     attempt_paths = _attempt_paths(registry)
     if len(attempt_paths) != expected_attempt_index:
-        raise ValueError("running CPU job is not the latest authorized aggregate attempt")
+        raise ValueError("running gpu-l20 job is not the latest authorized aggregate attempt")
     registered: list[tuple[int, str, str]] = []
     for index, registered_path in enumerate(attempt_paths, start=1):
         registered_attempt, registered_sha256 = _strict_json(
@@ -1268,7 +1284,7 @@ def verify_aggregate_submission_registry(
         registry=registry,
     )
     if job_id != expected_job_id:
-        raise ValueError("running CPU job is not its registered aggregate attempt")
+        raise ValueError("running gpu-l20 job is not its registered aggregate attempt")
     failure_entries: list[dict[str, object]] = []
     expected_failure_names: set[str] = set()
     for index, previous_job_id, previous_attempt_sha256 in registered[:-1]:
@@ -1353,7 +1369,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pilot-array-job-id", required=True)
     parser.add_argument("--aggregator-git-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--partition", choices=("amd", "intel"), required=True)
+    parser.add_argument("--partition", choices=(_PARTITION,), required=True)
     parser.add_argument("--walltime", required=True)
     parser.add_argument("--export-spec", required=True)
     parser.add_argument("--sbatch-script", type=Path, required=True)

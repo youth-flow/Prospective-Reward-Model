@@ -53,6 +53,12 @@ def _argv() -> list[str]:
         "8" * 64,
         "--profile-terminal-raw-sacct-sha256",
         "9" * 64,
+        "--primary-submission-plan",
+        "primary-plan.json",
+        "--primary-submission-plan-file-sha256",
+        "a" * 64,
+        "--primary-submission-plan-sha256",
+        "b" * 64,
         "--task-root",
         "task-root",
         "--runtime-closure",
@@ -126,6 +132,11 @@ def test_segment1_runner_uses_exact_sealed_call_order(
         file_sha256="e" * 64,
     )
     closure = SimpleNamespace(closure_sha256="f" * 64, file_sha256="0" * 64)
+    identity_receipt = SimpleNamespace(file_sha256="1" * 64)
+    segment_receipt = SimpleNamespace(
+        file_sha256="2" * 64,
+        payload={"segment_evidence_receipt_sha256": "3" * 64},
+    )
     calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
 
     def bind(name: str, result: object):
@@ -156,9 +167,14 @@ def test_segment1_runner_uses_exact_sealed_call_order(
             materialized,
         ),
         "admit_primary_segment": bind("admit", admission),
+        "publish_primary_identity_receipt": bind("identity_receipt", identity_receipt),
         "capture_slurm_segment_runtime": bind("runtime", runtime),
         "run_r3_primary_task_segment": bind("run_segment", outcome),
         "publish_primary_segment_runtime_closure": bind("closure", closure),
+        "publish_segment_evidence_receipt": bind(
+            "segment_evidence",
+            segment_receipt,
+        ),
     }
     for name, replacement in replacements.items():
         monkeypatch.setattr(runner, name, replacement)
@@ -196,12 +212,14 @@ def test_segment1_runner_uses_exact_sealed_call_order(
         "design",
         "materialize",
         "admit",
+        "identity_receipt",
         "runtime",
         "signal_init",
         "signal_enter",
         "run_segment",
         "signal_exit",
         "closure",
+        "segment_evidence",
     ]
     by_name = {name: (args, kwargs) for name, args, kwargs in calls}
     assert by_name["gate0"][1] == {"expected_file_sha256": "2" * 64}
@@ -288,6 +306,11 @@ def test_segment1_runner_uses_exact_sealed_call_order(
             "segment_outcome_file_sha256": outcome.file_sha256,
             "runtime_closure_sha256": closure.closure_sha256,
             "runtime_closure_file_sha256": closure.file_sha256,
+            "primary_identity_receipt_file_sha256": identity_receipt.file_sha256,
+            "segment_evidence_receipt_file_sha256": segment_receipt.file_sha256,
+            "segment_evidence_receipt_sha256": (
+                segment_receipt.payload["segment_evidence_receipt_sha256"]
+            ),
             "external_scheduler_terminal_required": True,
         }
     ]

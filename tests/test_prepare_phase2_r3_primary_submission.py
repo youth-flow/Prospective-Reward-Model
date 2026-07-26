@@ -29,6 +29,23 @@ def _digest(character: str) -> str:
 
 
 def _argv(tmp_path: Path) -> list[str]:
+    retained: dict[str, Path] = {}
+    for name in (
+        "image.sif",
+        "science.yaml",
+        "source.yaml",
+        "parent.json",
+        "gate0.json",
+        "gate1.json",
+        "source-test.json",
+    ):
+        path = (tmp_path / name).absolute()
+        path.write_bytes(f"{name}\n".encode())
+        retained[name] = path
+
+    def digest(name: str) -> str:
+        return hashlib.sha256(retained[name].read_bytes()).hexdigest()
+
     return [
         "create",
         "--operational-bundle",
@@ -49,6 +66,36 @@ def _argv(tmp_path: Path) -> list[str]:
         _digest("4"),
         "--profile-terminal-raw-sacct-sha256",
         _digest("5"),
+        "--git-commit",
+        "a" * 40,
+        "--container-image",
+        str(retained["image.sif"]),
+        "--container-image-file-sha256",
+        digest("image.sif"),
+        "--science-config",
+        str(retained["science.yaml"]),
+        "--science-config-file-sha256",
+        digest("science.yaml"),
+        "--source-config",
+        str(retained["source.yaml"]),
+        "--source-config-file-sha256",
+        digest("source.yaml"),
+        "--parent-registry",
+        str(retained["parent.json"]),
+        "--parent-registry-file-sha256",
+        digest("parent.json"),
+        "--gate0",
+        str(retained["gate0.json"]),
+        "--gate0-file-sha256",
+        digest("gate0.json"),
+        "--gate1",
+        str(retained["gate1.json"]),
+        "--gate1-file-sha256",
+        digest("gate1.json"),
+        "--source-test-receipt",
+        str(retained["source-test.json"]),
+        "--source-test-receipt-file-sha256",
+        digest("source-test.json"),
         "--output",
         str(tmp_path / "primary-plan.json"),
     ]
@@ -221,6 +268,25 @@ def test_inspect_requires_the_caller_pinned_file_and_emits_fixed_field_order(
     assert [line.split("=", 1)[0] for line in lines] == list(module._SBATCH_FIELD_ORDER)
     assert lines[2] == "slurm_account=sigroup"
     assert lines[11] == "array_concurrency=2"
+
+    assert (
+        module.main(
+            [
+                "inspect",
+                "--plan",
+                str(plan_path),
+                "--plan-file-sha256",
+                plan_file_sha256,
+                "--format",
+                "binding-lines",
+            ]
+        )
+        == 0
+    )
+    binding_lines = capsys.readouterr().out.splitlines()
+    assert len(binding_lines) == len(module._BINDING_FIELD_ORDER)
+    assert [line.split("=", 1)[0] for line in binding_lines] == list(module._BINDING_FIELD_ORDER)
+    assert binding_lines[0] == f"git_commit={'a' * 40}"
 
     with pytest.raises(ValueError, match="file SHA-256"):
         module.main(

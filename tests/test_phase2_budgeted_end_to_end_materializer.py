@@ -146,10 +146,14 @@ def _accepted_aggregate(
     }
 
 
-def _authorization_payload(source: dict[str, Any]) -> dict[str, object]:
-    projection = copy.deepcopy(source["recovery_success_reference"]["authorization_projection"])
-    projection["schema_version"] = projection.pop("source_schema_version")
-    return projection
+def _r3_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    helpers = _module(
+        ROOT / "tests" / "test_phase2_r3_post_recovery_bridge.py",
+        "_budgeted_materializer_r3_authorization_helpers",
+    )
+    return helpers._combined(monkeypatch)[2]
 
 
 def _git(repo: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -224,11 +228,15 @@ def _main_fixture(
         newline="\n",
     )
     aggregate_sha256 = materializer._sha256(aggregate_path)
-    authorization = _authorization_payload(source)
-    authorization_path = (tmp_path / "authorization.json").resolve()
+    authorization = _r3_authorization(monkeypatch)
+    project_root = (tmp_path / "production").resolve()
+    authorization_path = (project_root / materializer.R3_FINAL_AUTHORIZATION_RELATIVE).resolve()
+    authorization_path.parent.mkdir(parents=True)
     authorization_path.write_text("{}\n", encoding="utf-8", newline="\n")
-    authorization_sha256 = source["recovery_success_reference"]["artifact_sha256"]
+    authorization_sha256 = materializer._sha256(authorization_path)
 
+    monkeypatch.setattr(materializer, "_PROJECT_ROOT", project_root)
+    monkeypatch.setattr(materializer, "_AUTHORIZATION_PATH", authorization_path)
     monkeypatch.setattr(materializer, "_AGGREGATE_ROOT", aggregate_root)
     receipt_calls: list[Path] = []
 
@@ -243,8 +251,8 @@ def _main_fixture(
     )
     monkeypatch.setattr(
         materializer,
-        "verify_recovery_authorization_file",
-        lambda path, *, expected_sha256: authorization,
+        "verify_r3_final_authorization",
+        lambda path, *, expected_sha256, project_root: authorization,
     )
     predecessor_calls: list[tuple[str, Path]] = []
 
@@ -554,13 +562,15 @@ def test_authorization_projection_and_optimizer_schedule_fail_closed(
         frozen_beta=2.5,
     )
     normalized = validate_phase2_config(candidate, base_config=candidate_base)
-    authorization = _authorization_payload(freeze)
-    authorization["optimizer_schedule_sha256"] = "0" * 64
-    monkeypatch.setattr(
-        materializer,
-        "verify_recovery_authorization_file",
-        lambda path, *, expected_sha256: authorization,
+    authorization = _r3_authorization(monkeypatch)
+    materializer._bind_r3_authorization(
+        candidate,
+        authorization,
+        authorization_sha256="a" * 64,
     )
+    normalized = validate_phase2_config(candidate, base_config=candidate_base)
+    bad_authorization = copy.deepcopy(authorization)
+    bad_authorization["optimizer_schedule_sha256"] = "0" * 64
 
     with pytest.raises(
         ValueError,
@@ -569,6 +579,6 @@ def test_authorization_projection_and_optimizer_schedule_fail_closed(
         materializer._verify_authorization_and_optimizer(
             normalized,
             candidate_base,
-            authorization_path=tmp_path / "authorization.json",
+            authorization=bad_authorization,
             authorization_sha256="a" * 64,
         )

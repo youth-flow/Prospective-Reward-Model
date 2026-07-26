@@ -26,7 +26,7 @@ from smart_reward.phase2_r3_terminal import (
 
 _SCHEMA = "phase2-recovery-r3-primary-continuation-wave-plan/v1"
 _ROLE = "sealed_predecessor_terminal_derived_continuation_wave"
-_BASE_SCHEMA = "phase2-recovery-r3-primary-submission-plan/v1"
+_BASE_SCHEMA = "phase2-recovery-r3-primary-submission-plan/v2"
 _TASK_SEED_MAP = {0: 20260801, 1: 20260802, 2: 20260803}
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _JOB_ID = re.compile(r"[1-9][0-9]*\Z")
@@ -53,6 +53,7 @@ _PLAN_KEYS = frozenset(
         "requested_walltime_seconds",
         "slurm_walltime",
         "array_task_ids",
+        "active_array_task_ids",
         "array_concurrency",
         "max_scheduler_segments",
         "advance_signal_lead_seconds",
@@ -110,6 +111,7 @@ _SBATCH_FIELDS = (
     "durable_checkpoint_cadence_updates",
     "continuation_array_required",
     "all_tasks_complete",
+    "active_array_task_ids",
 )
 
 
@@ -129,6 +131,14 @@ def _semantic_sha256(value: Mapping[str, object]) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _absolute_path(value: object, *, name: str) -> str:
     if type(value) is not str or not Path(value).is_absolute():
         raise ValueError(f"{name} must be an absolute path")
@@ -137,7 +147,12 @@ def _absolute_path(value: object, *, name: str) -> str:
     return value
 
 
-def _base_plan(path: Path, *, expected_file_sha256: str) -> dict[str, object]:
+def reopen_base_primary_submission_plan(
+    path: Path,
+    *,
+    expected_file_sha256: str,
+    verify_bound_files: bool = True,
+) -> dict[str, object]:
     artifact = read_canonical_artifact(
         path,
         expected_file_sha256=_digest(
@@ -158,7 +173,35 @@ def _base_plan(path: Path, *, expected_file_sha256: str) -> dict[str, object]:
     unsigned.pop("submission_plan_sha256")
     if observed_sha != _semantic_sha256(unsigned):
         raise ValueError("base primary submission plan self-hash is invalid")
+    if (
+        type(plan.get("git_commit")) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", str(plan["git_commit"])) is None
+    ):
+        raise ValueError("base primary git_commit is invalid")
+    for path_name, digest_name in (
+        ("container_image_path", "container_image_file_sha256"),
+        ("science_config_path", "science_config_file_sha256"),
+        ("source_config_path", "source_config_file_sha256"),
+        ("parent_registry_path", "parent_registry_file_sha256"),
+        ("gate0_path", "gate0_file_sha256"),
+        ("gate1_path", "gate1_file_sha256"),
+        ("source_test_receipt_path", "source_test_receipt_file_sha256"),
+    ):
+        bound_path = Path(_absolute_path(plan.get(path_name), name=path_name))
+        expected = _digest(plan.get(digest_name), name=digest_name)
+        if not verify_bound_files:
+            continue
+        if (
+            bound_path.is_symlink()
+            or bound_path.resolve(strict=True) != bound_path
+            or not bound_path.is_file()
+            or _file_sha256(bound_path) != expected
+        ):
+            raise ValueError(f"base primary {path_name} binding is invalid")
     return plan
+
+
+_base_plan = reopen_base_primary_submission_plan
 
 
 def _validate_entry(value: object, *, task_id: int) -> dict[str, object]:
@@ -283,6 +326,9 @@ def _validated_plan(value: object) -> dict[str, object]:
         raise ValueError("continuation task routes must remain ordered 0-2")
     all_complete = all(route["action"] == "complete" for route in routes)
     required = any(route["action"] == "continue" for route in routes)
+    expected_active = [int(route["task_id"]) for route in routes if route["action"] == "continue"]
+    if plan["active_array_task_ids"] != expected_active:
+        raise ValueError("active_array_task_ids differs from continuation routes")
     if plan["all_tasks_complete"] is not all_complete:
         raise ValueError("all_tasks_complete differs from task routes")
     if plan["continuation_array_required"] is not required:
@@ -325,6 +371,96 @@ def reopen_continuation_plan(
         ),
     )
     return _validated_plan(artifact.payload)
+
+
+def reopen_continuation_plan_lineage(
+    path: str | Path,
+    *,
+    expected_file_sha256: str,
+) -> tuple[dict[str, object], ...]:
+    """Reopen the entire immutable plan chain and validate every transition."""
+
+    lineage_reversed: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    current_path = Path(path)
+    current_sha = _digest(
+        expected_file_sha256,
+        name="continuation plan file SHA-256",
+    )
+    while True:
+        canonical = current_path.resolve(strict=True)
+        key = (str(canonical), current_sha)
+        if key in seen:
+            raise ValueError("continuation plan lineage contains a cycle")
+        seen.add(key)
+        current = reopen_continuation_plan(
+            canonical,
+            expected_file_sha256=current_sha,
+        )
+        lineage_reversed.append(current)
+        previous_path = current["previous_continuation_plan_path"]
+        previous_sha = current["previous_continuation_plan_file_sha256"]
+        if previous_path is None:
+            break
+        current_path = Path(str(previous_path))
+        current_sha = str(previous_sha)
+    lineage = tuple(reversed(lineage_reversed))
+    frozen_fields = (
+        "base_primary_submission_plan_path",
+        "base_primary_submission_plan_file_sha256",
+        "base_primary_submission_plan_sha256",
+        "operational_bundle_path",
+        "operational_bundle_file_sha256",
+        "operational_bundle_semantic_sha256",
+        "resource_plan_sha256",
+        "slurm_account",
+        "partition",
+        "gpu_name",
+        "gpus_per_task",
+        "cpus_per_task",
+        "memory_bytes",
+        "memory_mib",
+        "requested_walltime_seconds",
+        "slurm_walltime",
+        "array_task_ids",
+        "array_concurrency",
+        "max_scheduler_segments",
+        "advance_signal_lead_seconds",
+        "audit_cadence_updates",
+        "durable_checkpoint_cadence_updates",
+    )
+    first = lineage[0]
+    for index, current in enumerate(lineage):
+        if any(current[name] != first[name] for name in frozen_fields):
+            raise ValueError("continuation plan lineage changes a frozen base/resource field")
+        routes = current["task_routes"]
+        if not isinstance(routes, list):
+            raise TypeError("validated continuation routes lost their list type")
+        if index == 0:
+            if any(len(route["history"]) != 1 for route in routes):
+                raise ValueError("initial continuation plan must bind exactly segment 1")
+            continue
+        previous = lineage[index - 1]
+        previous_routes = previous["task_routes"]
+        if not isinstance(previous_routes, list):
+            raise TypeError("validated predecessor routes lost their list type")
+        for task_id, (prior_route, route) in enumerate(zip(previous_routes, routes, strict=True)):
+            prior_history = prior_route["history"]
+            history = route["history"]
+            if prior_route["action"] == "complete":
+                if route != prior_route:
+                    raise ValueError(f"completed task {task_id} changed in continuation lineage")
+            elif (
+                not isinstance(prior_history, list)
+                or not isinstance(history, list)
+                or history[:-1] != prior_history
+                or len(history) != len(prior_history) + 1
+                or history[-1]["segment_index"] != prior_route["next_segment_index"]
+            ):
+                raise ValueError(
+                    f"task {task_id} continuation lineage omitted or replaced a segment"
+                )
+    return lineage
 
 
 def _task_arguments(arguments: argparse.Namespace, task_id: int) -> dict[str, object]:
@@ -436,6 +572,7 @@ def _build_plan(arguments: argparse.Namespace) -> dict[str, object]:
     base = _base_plan(
         arguments.primary_submission_plan,
         expected_file_sha256=base_file_sha,
+        verify_bound_files=False,
     )
     bundle = reopen_verified_gate_p_operational_bundle(
         base["operational_bundle_path"],
@@ -454,10 +591,10 @@ def _build_plan(arguments: argparse.Namespace) -> dict[str, object]:
     previous = (
         None
         if previous_path is None
-        else reopen_continuation_plan(
+        else reopen_continuation_plan_lineage(
             previous_path,
             expected_file_sha256=previous_sha,
-        )
+        )[-1]
     )
     if previous is not None and (
         previous["base_primary_submission_plan_file_sha256"] != base_file_sha
@@ -540,6 +677,9 @@ def _build_plan(arguments: argparse.Namespace) -> dict[str, object]:
         "requested_walltime_seconds": base["requested_walltime_seconds"],
         "slurm_walltime": base["slurm_walltime"],
         "array_task_ids": [0, 1, 2],
+        "active_array_task_ids": [
+            int(route["task_id"]) for route in routes if route["action"] == "continue"
+        ],
         "array_concurrency": base["array_concurrency"],
         "max_scheduler_segments": base["max_scheduler_segments"],
         "advance_signal_lead_seconds": base["advance_signal_lead_seconds"],
@@ -645,7 +785,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if arguments.format == "sbatch-lines":
         for name in _SBATCH_FIELDS:
-            print(f"{name}={str(plan[name]).lower() if type(plan[name]) is bool else plan[name]}")
+            value = plan[name]
+            if name == "active_array_task_ids":
+                value = ",".join(str(item) for item in value)
+            elif type(value) is bool:
+                value = str(value).lower()
+            print(f"{name}={value}")
         dependency_ids = ":".join(plan["dependency_array_job_ids"])
         print(f"dependency_afterok={dependency_ids}")
         print(f"dependency_afternotok={dependency_ids}")

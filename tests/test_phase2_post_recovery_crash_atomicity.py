@@ -72,13 +72,13 @@ def _cpu_history_row(
         "DerivedExitCode": exit_code,
         "Cluster": "hpc4",
         "Account": "sigroup",
-        "Partition": "amd",
+        "Partition": "gpu-l20",
         "NNodes": "1",
         "NCPUS": "4",
         "Submit": "2026-07-25T00:00:00",
         "Timelimit": "01:00:00",
-        "ReqTRES": "billing=4,cpu=4,mem=16G,node=1",
-        "AllocTRES": "billing=4,cpu=4,mem=16G,node=1",
+        "ReqTRES": "billing=4,cpu=4,gres/gpu=1,mem=16G,node=1",
+        "AllocTRES": "billing=4,cpu=4,gres/gpu:l20=1,gres/gpu=1,mem=16G,node=1",
     }
 
 
@@ -108,9 +108,9 @@ class Scheduler:
         self.live_ids: list[str] = []
         self.terminal_error = False
         self.terminal_raw = (
-            b"3000|3000|COMPLETED|0:0|0:0|hpc4|sigroup|amd|1|4|"
-            b"billing=4,cpu=4,mem=16G,node=1|"
-            b"billing=4,cpu=4,mem=16G,node=1\n"
+            b"3000|3000|COMPLETED|0:0|0:0|hpc4|sigroup|gpu-l20|1|4|"
+            b"billing=4,cpu=4,gres/gpu=1,mem=16G,node=1|"
+            b"billing=4,cpu=4,gres/gpu:l20=1,gres/gpu=1,mem=16G,node=1\n"
         )
         self.fail_all = False
         self.calls: list[tuple[str, ...]] = []
@@ -325,7 +325,7 @@ def built_attempt(
         project_root=project,
         repository_root=repository,
         output=aggregate,
-        partition="amd",
+        partition="gpu-l20",
         walltime="01:00:00",
         workload_export_spec=cpu_export_spec,
         script_relative=cpu_script_relative,
@@ -364,11 +364,14 @@ def built_attempt(
         comment = f"prorm-aggregate:{cpu_intent_sha}:attempt-{index}"
         raw = (
             f"JobId={job_id} JobName={cpu_job_name} "
-            "UserId=researcher(1000) Account=sigroup Partition=amd "
+            "UserId=researcher(1000) Account=sigroup Partition=gpu-l20 "
+            "QOS=l20_qos "
             "Requeue=0 Restarts=0 NumNodes=1 NumTasks=1 NumCPUs=4 "
             "CPUs/Task=4 MinMemoryNode=16G TimeLimit=01:00:00 "
             f"Command=(null) WorkDir={repository} Comment={comment} "
-            "TRES=cpu=4,mem=16G,node=1 JobState=PENDING Reason=JobHeldUser "
+            "TRES=cpu=4,mem=16G,node=1,gres/gpu=1 "
+            "TresPerNode=gres/gpu:l20:1 "
+            "JobState=PENDING Reason=JobHeldUser "
             "BatchFlag=1\n"
         )
         parsed_state, scheduler = cpu._parse_scontrol(
@@ -516,7 +519,7 @@ def built_attempt(
         "slurm_job_is_array": "false",
         "cluster": "hpc4",
         "account": "sigroup",
-        "partition": "amd",
+        "partition": "gpu-l20",
         "restart_count": "0",
         "pilot_array_job_id": "2000",
         "pilot_phase": "calibration",

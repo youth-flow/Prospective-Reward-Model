@@ -449,8 +449,11 @@ def _publish_fake_primary_closure(
             outcome_payload,
         ),
     )
+    attempt = (tmp_path / Path(filename).stem).resolve()
+    (attempt / "runtime-closures").mkdir(parents=True)
+    (attempt / "terminal-evidence").mkdir()
     closure = terminal.publish_primary_segment_runtime_closure(
-        (tmp_path / filename).resolve(),
+        (attempt / "runtime-closures" / "task-0.json").resolve(),
         admission=admission,  # type: ignore[arg-type]
         runtime=runtime,  # type: ignore[arg-type]
         outcome=outcome,  # type: ignore[arg-type]
@@ -592,13 +595,19 @@ def test_primary_terminal_capabilities_are_state_separated_and_post_job_pure(
         bundle,  # type: ignore[arg-type]
         runtime_closure=continuable_closure,
         inspection=inspection,
-        evidence_directory=(tmp_path / "continuable-terminal").resolve(),
+        evidence_directory=(
+            continuable_closure.artifact_path.parent.parent
+            / "terminal-evidence"
+            / "task-0-segment-1"
+        ),
     )
     completed = terminal.produce_completed_primary_terminal(
         bundle,  # type: ignore[arg-type]
         runtime_closure=completed_closure,
         inspection=inspection,
-        evidence_directory=(tmp_path / "completed-terminal").resolve(),
+        evidence_directory=(
+            completed_closure.artifact_path.parent.parent / "terminal-evidence" / "task-0-segment-1"
+        ),
     )
     assert continuable.artifact_ref().schema_version == CONTINUABLE_PRIMARY_TERMINAL_SCHEMA
     assert continuable.artifact_ref().role == CONTINUABLE_PRIMARY_TERMINAL_ROLE
@@ -677,26 +686,73 @@ def test_primary_terminal_capabilities_are_state_separated_and_post_job_pure(
     ):
         for name in names:
             monkeypatch.setattr(module, name, poisoned)
+    finalized_completed_attempt = (tmp_path / "finalized-completed-attempt").resolve()
+    (finalized_completed_attempt / "runtime-closures").mkdir(parents=True)
+    (finalized_completed_attempt / "terminal-evidence").mkdir()
+    finalized_completed_closure = finalized_completed_attempt / "runtime-closures" / "task-0.json"
+    finalized_completed_closure.write_bytes(completed_closure.artifact_path.read_bytes())
     finalized = terminal.finalize_completed_primary_terminal_from_files(
         operational_bundle_path=(tmp_path / "bundle.json").resolve(),
         expected_operational_bundle_file_sha256=bundle.file_sha256,
-        runtime_closure_path=completed_closure.artifact_path,
+        runtime_closure_path=finalized_completed_closure,
         expected_runtime_closure_file_sha256=completed_closure.file_sha256,
         raw_sacct_path=raw_path,
         expected_raw_sacct_sha256=inspection.raw_sacct_sha256,
-        evidence_directory=(tmp_path / "finalized-completed").resolve(),
+        evidence_directory=(finalized_completed_attempt / "terminal-evidence" / "task-0-segment-1"),
     )
     assert finalized.artifact_ref().role == terminal.COMPLETED_PRIMARY_TERMINAL_ROLE
+    finalized_continuable_attempt = (tmp_path / "finalized-continuable-attempt").resolve()
+    (finalized_continuable_attempt / "runtime-closures").mkdir(parents=True)
+    (finalized_continuable_attempt / "terminal-evidence").mkdir()
+    finalized_continuable_closure = (
+        finalized_continuable_attempt / "runtime-closures" / "task-0.json"
+    )
+    finalized_continuable_closure.write_bytes(continuable_closure.artifact_path.read_bytes())
     continued = terminal.finalize_continuable_primary_terminal_from_files(
         operational_bundle_path=(tmp_path / "bundle.json").resolve(),
         expected_operational_bundle_file_sha256=bundle.file_sha256,
-        runtime_closure_path=continuable_closure.artifact_path,
+        runtime_closure_path=finalized_continuable_closure,
         expected_runtime_closure_file_sha256=continuable_closure.file_sha256,
         raw_sacct_path=raw_path,
         expected_raw_sacct_sha256=inspection.raw_sacct_sha256,
-        evidence_directory=(tmp_path / "finalized-continuable").resolve(),
+        evidence_directory=(
+            finalized_continuable_attempt / "terminal-evidence" / "task-0-segment-1"
+        ),
     )
     assert continued.artifact_ref().role == CONTINUABLE_PRIMARY_TERMINAL_ROLE
+
+
+def test_primary_closure_and_terminal_evidence_paths_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, closure = _publish_fake_primary_closure(
+        tmp_path,
+        monkeypatch,
+        status="compute_complete_pending_external_scheduler_terminal",
+        filename="canonical-attempt",
+    )
+    with pytest.raises(ValueError, match="terminal evidence must be"):
+        terminal.produce_completed_primary_terminal(
+            bundle,  # type: ignore[arg-type]
+            runtime_closure=closure,
+            inspection=_inspection(),
+            evidence_directory=(
+                closure.artifact_path.parent.parent / "terminal-evidence" / "wrong-segment-name"
+            ),
+        )
+
+    admission, runtime, outcome, _ = _primary_fake_payloads(
+        status="compute_complete_pending_external_scheduler_terminal"
+    )
+    with pytest.raises(ValueError, match="runtime-closures"):
+        terminal.publish_primary_segment_runtime_closure(
+            (tmp_path / "wrong-closure.json").resolve(),
+            admission=admission,  # type: ignore[arg-type]
+            runtime=runtime,  # type: ignore[arg-type]
+            outcome=outcome,  # type: ignore[arg-type]
+            operational_bundle=bundle,  # type: ignore[arg-type]
+        )
 
 
 def test_post_job_profile_finalizer_is_pure_data_and_uses_predeclared_intent(

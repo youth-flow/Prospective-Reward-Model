@@ -2165,7 +2165,11 @@ def publish_primary_segment_runtime_closure(
         outcome_payload=outcome_payload,
         operational_bundle=bundle,
     )
-    transport = publish_canonical_artifact(artifact_path, payload)
+    destination = _primary_runtime_closure_artifact_path(
+        artifact_path,
+        task_id=int(admitted.to_dict()["task_id"]),
+    )
+    transport = publish_canonical_artifact(destination, payload)
     return _primary_closure_from_transport(
         bundle,
         artifact_path=transport.artifact_path,
@@ -2332,6 +2336,63 @@ def _create_bundle_directory(path: Path) -> Path:
         raise FileExistsError("refusing to overwrite a terminal evidence directory") from error
     _fsync_directory(parent)
     return _canonical_directory(path, name="terminal evidence directory")
+
+
+def _primary_runtime_closure_artifact_path(
+    value: str | os.PathLike[str],
+    *,
+    task_id: int,
+) -> Path:
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or path.parent.name != "runtime-closures"
+        or path.name != f"task-{task_id}.json"
+    ):
+        raise ValueError(
+            "primary runtime closure must be <attempt>/runtime-closures/task-<task_id>.json"
+        )
+    attempt = _canonical_directory(path.parent.parent, name="primary scheduler attempt root")
+    parent = _canonical_directory(path.parent, name="primary runtime-closure directory")
+    expected = attempt / "runtime-closures" / f"task-{task_id}.json"
+    if parent != attempt / "runtime-closures" or path != expected:
+        raise ValueError("primary runtime closure path is not canonical")
+    return path
+
+
+def primary_terminal_evidence_directory(
+    runtime_closure: PrimarySegmentRuntimeClosure,
+    evidence_directory: str | os.PathLike[str],
+) -> Path:
+    """Return the sole terminal-evidence path for one retained R3 segment."""
+
+    if type(runtime_closure) is not PrimarySegmentRuntimeClosure:
+        raise TypeError("runtime_closure must be exactly PrimarySegmentRuntimeClosure")
+    runtime_closure.validate_integrity()
+    admission = runtime_closure.admission_payload
+    task_id = admission["task_id"]
+    segment_index = admission["segment_index"]
+    if type(task_id) is not int or task_id < 0:
+        raise ValueError("primary runtime closure task ID is invalid")
+    if type(segment_index) is not int or segment_index < 1:
+        raise ValueError("primary runtime closure segment index is invalid")
+    closure_path = _primary_runtime_closure_artifact_path(
+        runtime_closure.artifact_path,
+        task_id=task_id,
+    )
+    attempt = closure_path.parent.parent
+    terminal_parent = _canonical_directory(
+        attempt / "terminal-evidence",
+        name="primary terminal-evidence parent",
+    )
+    expected = terminal_parent / f"task-{task_id}-segment-{segment_index}"
+    supplied = Path(evidence_directory)
+    if not supplied.is_absolute() or supplied != expected:
+        raise ValueError(
+            "primary terminal evidence must be "
+            "<attempt>/terminal-evidence/task-<task_id>-segment-<segment_index>"
+        )
+    return supplied
 
 
 def _publish_bundle(
@@ -2811,7 +2872,7 @@ def produce_continuable_primary_terminal(
         role=CONTINUABLE_PRIMARY_TERMINAL_ROLE,
         continuation_required=True,
     )
-    directory = Path(evidence_directory)
+    directory = primary_terminal_evidence_directory(closure, evidence_directory)
     manifest_file_sha256 = _publish_bundle(
         directory,
         producer_kind=_CONTINUABLE_PRIMARY_PRODUCER_KIND,
@@ -2861,7 +2922,7 @@ def produce_completed_primary_terminal(
         role=COMPLETED_PRIMARY_TERMINAL_ROLE,
         continuation_required=False,
     )
-    directory = Path(evidence_directory)
+    directory = primary_terminal_evidence_directory(closure, evidence_directory)
     manifest_file_sha256 = _publish_bundle(
         directory,
         producer_kind=_COMPLETED_PRIMARY_PRODUCER_KIND,
@@ -2946,7 +3007,7 @@ def revalidate_continuable_primary_terminal(
         runtime_closure=runtime_closure,
         expected_status="continuation_required_after_safe_checkpoint",
     )
-    directory = Path(evidence_directory)
+    directory = primary_terminal_evidence_directory(closure, evidence_directory)
     inspection, terminal = _load_bundle(
         directory,
         expected_manifest_file_sha256=expected_manifest_file_sha256,
@@ -2999,7 +3060,7 @@ def revalidate_completed_primary_terminal(
         runtime_closure=runtime_closure,
         expected_status="compute_complete_pending_external_scheduler_terminal",
     )
-    directory = Path(evidence_directory)
+    directory = primary_terminal_evidence_directory(closure, evidence_directory)
     inspection, terminal = _load_bundle(
         directory,
         expected_manifest_file_sha256=expected_manifest_file_sha256,
@@ -3232,6 +3293,7 @@ __all__ = [
     "produce_completed_primary_terminal_capability",
     "produce_successful_profile_terminal",
     "produce_successful_profile_terminal_capability",
+    "primary_terminal_evidence_directory",
     "publish_profile_allocation_intent",
     "publish_primary_segment_runtime_closure",
     "reopen_completed_primary_terminal",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Terminalize one durably published post-recovery CPU aggregate."""
+"""Terminalize one durably published post-recovery gpu-l20 aggregate."""
 
 from __future__ import annotations
 

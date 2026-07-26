@@ -430,6 +430,7 @@ def _run_cpu_materialization(
     fixture: _ParentFixture,
     *,
     oracle_values: torch.Tensor | None = None,
+    control_only: bool = False,
     clock_values: tuple[int, int, int, int] = (
         0,
         1_000_000_000,
@@ -437,7 +438,7 @@ def _run_cpu_materialization(
         6_000_000_000,
     ),
 ) -> tuple[
-    inputs.R3TrainOnlyMaterializationResult,
+    inputs.R3TrainOnlyMaterializationResult | inputs.R3ControlTrainOnlyMaterializationResult,
     list[str],
     list[int],
     dict[str, object],
@@ -484,8 +485,43 @@ def _run_cpu_materialization(
         clock_ns=lambda: next(clock),
         safe_open_factory=safe_open_factory,
         line_stream_factory=line_stream_factory,
+        control_only=control_only,
     )
     return result, decoded_keys, line_calls, oracle_observation
+
+
+def test_control_materialization_returns_before_any_primary_label_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _build_parent_fixture(tmp_path)
+
+    def forbidden_primary_context(*args: object, **kwargs: object) -> object:
+        raise AssertionError("control-only materialization reached primary label construction")
+
+    monkeypatch.setattr(
+        inputs,
+        "prepare_neutral_phase2_context",
+        forbidden_primary_context,
+    )
+    result, decoded_keys, line_calls, _ = _run_cpu_materialization(
+        fixture,
+        control_only=True,
+    )
+    assert type(result) is inputs.R3ControlTrainOnlyMaterializationResult
+    assert decoded_keys == list(inputs._STORAGE_TRAIN_KEYS)
+    assert len(line_calls) == 16
+    result.validate_integrity()
+    serialized = result.to_dict()
+    capability = serialized["control_input_capability"]
+    assert isinstance(capability, dict)
+    assert capability["primary_label_stream_constructed"] is False
+    assert capability["primary_label_stream_accessed"] is False
+    assert capability["heldout_tensor_values_decoded"] is False
+    assert capability["policy_session_opened"] is False
+    assert capability["raw_tensors_serialized"] is False
+    assert capability["raw_oracle_rewards_serialized"] is False
+    assert "materialization_capability" not in serialized
 
 
 def test_real_closure_selectively_decodes_train_prefix_and_returns_timings(

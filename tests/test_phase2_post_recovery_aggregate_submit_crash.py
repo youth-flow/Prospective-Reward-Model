@@ -106,8 +106,8 @@ class FakeSlurm:
             "4",
             "2026-07-25T00:00:00",
             job["walltime"],
-            "billing=4,cpu=4,mem=16G,node=1",
-            "billing=4,cpu=4,mem=16G,node=1",
+            "billing=4,cpu=4,gres/gpu=1,mem=16G,node=1",
+            "billing=4,cpu=4,gres/gpu:l20=1,gres/gpu=1,mem=16G,node=1",
         )
         return "|".join(fields) + "\n"
 
@@ -118,11 +118,13 @@ class FakeSlurm:
         return (
             f"JobId={job['job_id']} JobName={job['job_name']} "
             f"UserId={self.user}(1000) Account=sigroup "
-            f"Partition={job['partition']} Requeue=0 Restarts=0 "
+            f"Partition={job['partition']} QOS=l20_qos Requeue=0 Restarts=0 "
             "NumNodes=1 NumTasks=1 NumCPUs=4 CPUs/Task=4 "
             f"MinMemoryNode=16G TimeLimit={job['walltime']} "
             f"Command=(null) WorkDir={job['work_dir']} "
-            f"Comment={job['comment']} TRES=cpu=4,mem=16G,node=1 "
+            f"Comment={job['comment']} "
+            "TRES=cpu=4,mem=16G,node=1,gres/gpu=1 "
+            "TresPerNode=gres/gpu:l20:1 "
             f"JobState={state} Reason={reason} BatchFlag=1\n"
         )
 
@@ -138,7 +140,7 @@ class FakeSlurm:
         self.jobs[job_id] = {
             "job_id": job_id,
             "job_name": job_name,
-            "partition": "amd",
+            "partition": "gpu-l20",
             "walltime": "01:00:00",
             "script_bytes": self.committed_script,
             "work_dir": os.fspath(self.script.parents[2]),
@@ -152,7 +154,7 @@ class FakeSlurm:
         self.jobs[job_id] = {
             "job_id": job_id,
             "job_name": job_name,
-            "partition": "amd",
+            "partition": "gpu-l20",
             "walltime": "01:00:00",
             "script_bytes": self.committed_script,
             "work_dir": os.fspath(self.script.parents[2]),
@@ -334,7 +336,7 @@ def scenario(
         "--output",
         os.fspath(output),
         "--partition",
-        "amd",
+        "gpu-l20",
         "--walltime",
         "01:00:00",
         "--export-spec",

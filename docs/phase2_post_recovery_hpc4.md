@@ -189,7 +189,7 @@ bash scripts/hpc4/submit_phase2_post_recovery_aggregate.sh \
   "${terminal}" \
   "${array_job_id}" \
   /project/sigroup/smart-reward-model/aggregates/phase2-post-recovery-calibration-aggregate.json \
-  amd \
+  gpu-l20 \
   02:00:00 \
   "${producer_commit}" \
   "/project/sigroup/smart-reward-model/runs/phase2-post-recovery-calibration/${design_sha256}/seed-20260801/job-${array_job_id}_0" \
@@ -248,8 +248,9 @@ failure rows have passed validation and a recursive fsync barrier. This live
 validation resolves the bound `commit:path` through Git again before accepting
 the copies.
 
-After the CPU job is absent from `squeue`, inspect its exact root row. Only
-`COMPLETED|0:0|0:0` with the locked CPU resources is publishable:
+After the gpu-l20 aggregate job is absent from `squeue`, inspect its exact root
+row. Only `COMPLETED|0:0|0:0` with the locked aggregate resources is
+publishable:
 
 ```bash
 aggregate=/project/sigroup/smart-reward-model/aggregates/phase2-post-recovery-calibration-aggregate.json
@@ -286,7 +287,7 @@ terminalizer therefore does not publish the evidence tree with a fallback
 directory rename. It first builds and fsyncs a complete sibling staging tree,
 atomically claims the final evidence name with `mkdir`, and installs
 `aggregation-attempt/EVIDENCE_CLAIM.json` as the first hard-linked file.
-That claim binds the outer `.ATTEMPT` receipt SHA256, CPU job ID, `READY`
+That claim binds the outer `.ATTEMPT` receipt SHA256, gpu-l20 aggregate job ID, `READY`
 SHA256, aggregate SHA256, and the exact payload-tree manifest SHA256. Every
 remaining directory is created without replacement and every file is
 hard-linked create-if-absent from the complete sibling tree. An existing file
@@ -449,15 +450,15 @@ bash scripts/hpc4/submit_phase2_post_recovery_aggregate.sh \
   /project/sigroup/smart-reward-model/runs/phase2-post-recovery-<phase>/terminal-<array-job-id>.json \
   <array-job-id> \
   /project/sigroup/smart-reward-model/aggregates/<semantic-output-name>.json \
-  amd 02:00:00 <producer-commit> <run-0> <run-1> <run-2> \
+  gpu-l20 02:00:00 <producer-commit> <run-0> <run-1> <run-2> \
   --overlay configs/<new-post-recovery-overlay>.yaml \
   [--beta-source-aggregate /project/sigroup/smart-reward-model/aggregates/<beta-parent>.json] \
   [--horizon-parent-aggregate /project/sigroup/smart-reward-model/aggregates/<horizon-parent>.json]
 ```
 
-Save the returned CPU job ID, wait for its exact successful terminal root row,
+Save the returned gpu-l20 aggregate job ID, wait for its exact successful terminal root row,
 and run `capture_phase2_post_recovery_aggregate_terminal.py capture` exactly
-as in Section 4. The CPU job's `READY` is not a scientific result and does not
+as in Section 4. The aggregate job's `READY` is not a scientific result and does not
 authorize the next stage. Only the final aggregate plus its deeply verified
 `SUCCESS`, `PUBLISHED`, terminal scheduler evidence, evidence-tree manifest,
 and CPU submission-authority chain may be consumed.
@@ -552,7 +553,7 @@ Each three-seed pilot stage is complete only when:
   rate arithmetic, boundary transitions, per-update AdamW state, restored
   checkpoint state, sustained convergence, identifiability, and vector
   redaction;
-- one registered CPU aggregate attempt has a durable `READY`, exact
+- one registered gpu-l20 aggregate attempt has a durable `READY`, exact
   `COMPLETED/0:0/0:0` terminal row, and unique scheduler-authority history;
 - the terminalizer has atomically published the semantic v3 aggregate,
   exact evidence-tree manifest, `PUBLISHED`, raw/parsed terminal evidence, and

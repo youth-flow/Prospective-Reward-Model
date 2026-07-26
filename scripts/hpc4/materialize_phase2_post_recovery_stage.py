@@ -49,7 +49,7 @@ from smart_reward.phase2_post_recovery_control import (
 _PROJECT_ROOT = Path("/project/sigroup/smart-reward-model")
 _AGGREGATE_ROOT = _PROJECT_ROOT / "aggregates"
 _AUTHORIZATION_PATH = (
-    _PROJECT_ROOT / "runs" / "phase2-recovery-pilot" / "recovery-success-authorization.json"
+    _PROJECT_ROOT / "runs" / "phase2-recovery-r3-controls" / "gate-c-success-authorization.json"
 )
 _CONFIRMATORY_BASE_RELATIVE = Path("configs/common_beta_post_recovery_confirmatory_base.yaml")
 _CONFIRMATORY_OVERLAY_RELATIVE = Path("configs/common_beta_post_recovery_confirmatory.yaml")

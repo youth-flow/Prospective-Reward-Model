@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("authorization", type=Path)
     parser.add_argument("overlay", type=Path)
     parser.add_argument("--expected-sha256", required=True)
+    parser.add_argument("--project-root", type=Path)
     parser.add_argument(
         "--expected-stage",
         choices=("pilot", "budgeted_end_to_end", "confirmatory"),
@@ -28,11 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    verification_options: dict[str, object] = {
+        "expected_sha256": arguments.expected_sha256,
+        "expected_stage": arguments.expected_stage,
+    }
+    if arguments.project_root is not None:
+        verification_options["project_root"] = arguments.project_root
     binding = verify_recovery_authorization_config_binding(
         arguments.authorization,
         arguments.overlay,
-        expected_sha256=arguments.expected_sha256,
-        expected_stage=arguments.expected_stage,
+        **verification_options,
     )
     print(
         json.dumps(

@@ -164,8 +164,16 @@ class _PersistentTempPathFactory:
 def make_shared_gate_p_evidence() -> SharedGatePEvidence:
     """Build one real sealed Gate-P closure reused by integration-style tests."""
 
+    import importlib.util
+
     from smart_reward.phase2_r3_config import load_r3_science_config
-    from tests import test_phase2_r3_profile as profile_support
+
+    profile_path = ROOT / "tests" / "test_phase2_r3_profile.py"
+    spec = importlib.util.spec_from_file_location("_r3_profile_test_support", profile_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load local R3 profile test support")
+    profile_support = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profile_support)
 
     science = load_r3_science_config(ROOT / "configs" / "phase2_recovery_r3_science.yaml")
     gate0 = make_sealed_r3_gate0_capability()
@@ -253,8 +261,10 @@ def make_continuable_primary_terminal(
         continuation_checkpoint=checkpoint,
         continuation_reason="test sealed scheduler boundary",
     )
+    (directory / "runtime-closures").mkdir()
+    (directory / "terminal-evidence").mkdir()
     closure = terminal.publish_primary_segment_runtime_closure(
-        (directory / "primary-runtime-closure.json").resolve(),
+        (directory / "runtime-closures" / f"task-{predecessor.task_id}.json").resolve(),
         admission=predecessor,
         runtime=runtime,
         outcome=outcome,
@@ -297,7 +307,11 @@ def make_continuable_primary_terminal(
         operational_bundle,
         runtime_closure=closure,
         inspection=inspection,
-        evidence_directory=(directory / "terminal-evidence").resolve(),
+        evidence_directory=(
+            directory
+            / "terminal-evidence"
+            / f"task-{predecessor.task_id}-segment-{predecessor.segment_index}"
+        ).resolve(),
     )
 
 
