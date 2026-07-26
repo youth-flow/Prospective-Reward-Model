@@ -1371,6 +1371,8 @@ def _write_operational_payload(
 ) -> str:
     raw = canonical_json_bytes(payload)
     path.write_bytes(raw)
+    if os.name == "posix":
+        path.chmod(0o440)
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -1550,6 +1552,8 @@ def test_operational_bundle_rejects_duplicate_or_noncanonical_transport(
 ) -> None:
     path = (tmp_path / f"invalid-{hashlib.sha256(raw).hexdigest()}.json").resolve()
     path.write_bytes(raw)
+    if os.name == "posix":
+        path.chmod(0o440)
     with pytest.raises((TypeError, ValueError)):
         profile_artifacts.reopen_verified_gate_p_operational_bundle(
             path,

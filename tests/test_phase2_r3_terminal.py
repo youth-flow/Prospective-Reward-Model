@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -691,6 +692,8 @@ def test_primary_terminal_capabilities_are_state_separated_and_post_job_pure(
     (finalized_completed_attempt / "terminal-evidence").mkdir()
     finalized_completed_closure = finalized_completed_attempt / "runtime-closures" / "task-0.json"
     finalized_completed_closure.write_bytes(completed_closure.artifact_path.read_bytes())
+    if os.name == "posix":
+        finalized_completed_closure.chmod(0o440)
     finalized = terminal.finalize_completed_primary_terminal_from_files(
         operational_bundle_path=(tmp_path / "bundle.json").resolve(),
         expected_operational_bundle_file_sha256=bundle.file_sha256,
@@ -708,6 +711,8 @@ def test_primary_terminal_capabilities_are_state_separated_and_post_job_pure(
         finalized_continuable_attempt / "runtime-closures" / "task-0.json"
     )
     finalized_continuable_closure.write_bytes(continuable_closure.artifact_path.read_bytes())
+    if os.name == "posix":
+        finalized_continuable_closure.chmod(0o440)
     continued = terminal.finalize_continuable_primary_terminal_from_files(
         operational_bundle_path=(tmp_path / "bundle.json").resolve(),
         expected_operational_bundle_file_sha256=bundle.file_sha256,
