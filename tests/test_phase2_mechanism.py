@@ -6,14 +6,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from test_phase2_sensitivity import (
-    _canonical_sha256,
-    _confirmatory,
-    _environment,
-    _primary_aggregate,
-    _primary_sha,
-    _write,
-)
 
 from smart_reward.contracts import BT_MLE, PRORM_PLUS
 from smart_reward.phase2_config import PHASE2_CONFIRMATORY_SEEDS
@@ -22,6 +14,14 @@ from smart_reward.phase2_mechanism import (
     PHASE2_MECHANISM_SEED_SCHEMA,
     _ridge_free_regret,
     build_phase2_mechanism_aggregate,
+)
+from tests.test_phase2_sensitivity import (
+    _canonical_sha256,
+    _confirmatory,
+    _environment,
+    _primary_aggregate,
+    _primary_sha,
+    _write,
 )
 
 

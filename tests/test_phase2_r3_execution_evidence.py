@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from conftest import make_shared_gate_p_evidence
 
 from smart_reward import phase2_r3_orchestrator as orchestrator
 from smart_reward.phase2_r3_artifacts import canonical_json_bytes, publish_canonical_artifact
@@ -26,6 +25,7 @@ from smart_reward.phase2_r3_identity import (
 )
 from smart_reward.phase2_r3_primary import capture_slurm_segment_runtime
 from smart_reward.phase2_r3_terminal import publish_primary_segment_runtime_closure
+from tests.conftest import make_shared_gate_p_evidence
 
 
 def test_identity_and_segment_receipts_reopen_exact_design_and_task_bytes(

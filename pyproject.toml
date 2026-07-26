@@ -34,6 +34,7 @@ llm = [
 ]
 dev = [
   # Keep CI and the commit-bound HPC4 Gate-1 source test on one toolchain.
+  "numpy>=1.26,<3",
   "pytest==7.4.4",
   "pytest-cov>=5,<8",
   "ruff==0.15.22",
