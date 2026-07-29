@@ -39,9 +39,14 @@ Define `g(r) = E_x Cov_{y|x}(s,r)` and `g(r_phi) = G phi`. Pro-RM minimizes
 0.5 * (G phi - g*)^T (F + lambda I)^-1 (G phi - g*).
 ```
 
-The normal equation is solved by outer conjugate gradient. Each inverse-Fisher product
-uses inner matrix-free conjugate gradient. There is no stochastic reward-head optimizer
-and no auxiliary optimization variable.
+The normal equation is solved by outer preconditioned conjugate gradient using
+`diag(G^T G)` as a Jacobi proxy. Each inverse-Fisher product uses inner matrix-free
+conjugate gradient. Because an inexact inner solve cannot support a tighter outer target,
+the effective inner tolerance is `min(configured_inner_tolerance, 0.1 * outer_tolerance)`;
+both the effective value and the final outer relative residual are serialized. These are
+numerical precondition/accuracy rules for the same quadratic, not extra regularization or
+a changed estimand. There is no stochastic reward-head optimizer and no auxiliary
+optimization variable.
 
 The default Fisher estimator is the raw second moment. Prompt-centered sample covariance
 is a YAML-selectable sensitivity setting.

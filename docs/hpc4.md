@@ -75,30 +75,35 @@ bash scripts/hpc4/submit_hf_stage.sh \
 Each must finish `COMPLETED` with `ExitCode=0:0`. Inventories live in
 `$PRORM_PROJECT_ROOT/hf-cache/inventories/<config-sha256>.json`.
 
-## Dependency-ordered smoke
+## QOS-aware staged smoke
 
-`submit_pipeline.sh` reads stage walltimes and rollout concurrency from YAML. It submits:
+HPC4's `l20_qos` currently allows at most two running and four submitted GPU jobs per user.
+Slurm counts every array task against the submit limit, even when `%N` caps concurrency.
+Therefore `submit_pipeline.sh` submits exactly one validated stage at a time:
 
 ```text
 materialize array
   -> reward array
   -> adapter array
-  -> seed x policy rollout array with a concurrency cap
+  -> QOS-packed policy rollout workers
   -> per-seed rollout aggregate array
   -> config-wide aggregate
 ```
 
-Submit the complete 24-prompt pipeline:
+Use the same command for each stage, in the listed order. Wait for terminal `COMPLETED` and
+`ExitCode=0:0`, and inspect the stage receipt before submitting the next stage:
 
 ```bash
 bash scripts/hpc4/submit_pipeline.sh \
   configs/smoke.yaml \
   "$PRORM_IMAGE" \
   "$PRORM_PROJECT_ROOT/hf-cache" \
-  "$PRORM_SCRATCH_ROOT/runs/smoke"
+  "$PRORM_SCRATCH_ROOT/runs/smoke" \
+  materialize
 ```
 
-The command prints all six job IDs. Monitor terminal evidence:
+Then repeat with `reward`, `adapters`, `rollout`, `rollout-aggregate`, and `aggregate`.
+The command prints the selected stage and its job ID. Monitor terminal evidence:
 
 ```bash
 squeue -u "$USER"
@@ -106,7 +111,7 @@ sacct -j <job-id> --format=JobID,State,Elapsed,ExitCode,MaxRSS,AllocTRES
 tail -f "$PRORM_SCRATCH_ROOT/runs/smoke/logs/<stage>-<job-id>_<task>.out"
 ```
 
-Re-running the same submission is safe: complete stages validate and return immediately;
+Re-running a stage is safe: complete stages validate and return immediately;
 incomplete materialization and rollout work resumes from the last complete prompt checkpoint.
 Foreign or corrupted outputs are rejected.
 
@@ -127,11 +132,15 @@ bash scripts/hpc4/submit_pipeline.sh \
   configs/main.yaml \
   "$PRORM_IMAGE" \
   "$PRORM_PROJECT_ROOT/hf-cache" \
-  "$PRORM_SCRATCH_ROOT/runs/main"
+  "$PRORM_SCRATCH_ROOT/runs/main" \
+  materialize
 ```
 
-Materialize/reward/adapters use three-task arrays. Rollout uses thirty tasks with the YAML
-concurrency cap. Aggregation runs only after all upstream tasks succeed.
+Again advance one verified stage at a time. Materialize/reward/adapters use three-task arrays
+with at most two running tasks. Formal rollout preserves the YAML six-policy concurrency using
+two Slurm jobs with three L20 GPUs each; every GPU worker processes a disjoint stride of the 30
+seed-policy tasks and resumes at policy/prompt checkpoints. Aggregation is submitted only after
+all upstream workers succeed.
 
 ## Archive and transfer
 

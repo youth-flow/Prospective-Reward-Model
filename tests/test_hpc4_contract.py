@@ -41,14 +41,26 @@ def test_hpc4_paths_follow_project_and_scratch_policy() -> None:
     assert "--partition=gpu-l20" in controlled
 
 
-def test_hpc4_pipeline_is_dependency_ordered_and_concurrency_limited() -> None:
+def test_hpc4_pipeline_is_qos_aware_and_stage_ordered() -> None:
     text = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
-    assert "afterok:${materialize_job}" in text
-    assert "afterok:${reward_job}" in text
-    assert "afterok:${adapter_job}" in text
-    assert "%${rollout_concurrency}" in text
-    assert "afterok:${rollout_job}" in text
-    assert "afterok:${rollout_aggregate_job}" in text
+    assert "gpu_job_limit=2" in text
+    assert "MaxSubmit" not in text
+    assert "afterok:" not in text
+    assert "PRORM_ROLLOUT_WORKERS" in text
+    assert '--gpus-per-node="${gpus_per_job}"' in text
+    for stage in (
+        "materialize",
+        "reward",
+        "adapters",
+        "rollout",
+        "rollout-aggregate",
+        "aggregate",
+    ):
+        assert stage in text
+    worker = (ROOT / "scripts" / "hpc4" / "stage_gpu.sbatch").read_text(encoding="utf-8")
+    assert 'if [[ "${PRORM_STAGE}" = "rollout-worker" ]]' in worker
+    assert "rollout_task += PRORM_ROLLOUT_WORKERS" in worker
+    assert "run_rollout_slot" in worker
     assert not (ROOT / "scripts" / "hpc4" / "controlled.sbatch").exists()
 
 

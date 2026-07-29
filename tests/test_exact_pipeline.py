@@ -5,6 +5,7 @@ import math
 import pytest
 import torch
 
+import smart_reward.exact as exact_module
 from smart_reward.evaluation import (
     GeometrySettings,
     evaluate_local_policy,
@@ -108,6 +109,45 @@ def test_mle_and_pro_fit_exact_delta_targets() -> None:
     assert pro.method == "Pro-RM"
     assert mle.weight.shape == pro.weight.shape == (2,)
     assert pro.converged
+
+
+def test_pro_nested_solve_tightens_inner_accuracy_and_preconditions_outer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[int, float, bool]] = []
+    original_pcg = exact_module.pcg
+
+    def recording_pcg(matvec, rhs, inverse_diagonal=None, x0=None, **kwargs):
+        observed.append((rhs.numel(), float(kwargs["tolerance"]), inverse_diagonal is not None))
+        return original_pcg(
+            matvec,
+            rhs,
+            inverse_diagonal=inverse_diagonal,
+            x0=x0,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(exact_module, "pcg", recording_pcg)
+    result = fit_pro_reward(
+        make_split(14, 24),
+        ProTrainingConfig(
+            relative_damping=1.0e-2,
+            fisher_estimator="raw_second_moment",
+            inner_max_iterations=100,
+            inner_tolerance=1.0e-5,
+            outer_max_iterations=100,
+            outer_tolerance=1.0e-6,
+            residual_recompute_interval=10,
+        ),
+    )
+
+    inner_calls = [call for call in observed if call[0] == 4]
+    outer_calls = [call for call in observed if call[0] == 2]
+    assert inner_calls and all(call[1] == pytest.approx(1.0e-7) for call in inner_calls)
+    assert outer_calls == [(2, pytest.approx(1.0e-6), True)]
+    assert result.effective_inner_tolerance == pytest.approx(1.0e-7)
+    assert result.relative_residual is not None
+    assert result.relative_residual <= 1.0e-6
 
 
 def test_reward_metrics_are_prompt_aggregated_and_finite() -> None:

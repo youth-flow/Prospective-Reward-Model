@@ -234,6 +234,8 @@ class RewardFitResult:
     iterations: int
     head_sha256: str
     inner_pcg_calls: int = 0
+    relative_residual: float | None = None
+    effective_inner_tolerance: float | None = None
 
     def __post_init__(self) -> None:
         if self.method not in {"MLE-RM", "Pro-RM"}:
@@ -251,6 +253,10 @@ class RewardFitResult:
         _positive_integer("iterations", self.iterations)
         if self.inner_pcg_calls < 0:
             raise ValueError("inner_pcg_calls must be non-negative")
+        for name in ("relative_residual", "effective_inner_tolerance"):
+            value = getattr(self, name)
+            if value is not None and (not math.isfinite(float(value)) or float(value) < 0.0):
+                raise ValueError(f"{name} must be finite and non-negative when provided")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -261,6 +267,8 @@ class RewardFitResult:
             "iterations": self.iterations,
             "head_sha256": self.head_sha256,
             "inner_pcg_calls": self.inner_pcg_calls,
+            "relative_residual": self.relative_residual,
+            "effective_inner_tolerance": self.effective_inner_tolerance,
             "head_weight": self.weight.detach().cpu().tolist(),
         }
 
@@ -395,6 +403,13 @@ def fit_pro_reward(
     damping = effective.relative_damping * mean_fisher_diagonal
     fisher = DampedEmpiricalFisher(fisher_rows, damping=damping)
     inner_calls = 0
+    # A nested solve cannot reliably target an outer residual below the error
+    # of its Fisher inverse. Treat the configured inner tolerance as an upper
+    # bound and tighten it relative to the requested outer accuracy.
+    effective_inner_tolerance = min(
+        effective.inner_tolerance,
+        effective.outer_tolerance * 0.1,
+    )
 
     def inverse_fisher(vector: torch.Tensor) -> torch.Tensor:
         nonlocal inner_calls
@@ -404,7 +419,7 @@ def fit_pro_reward(
             vector,
             inverse_diagonal=None,
             max_iterations=effective.inner_max_iterations,
-            tolerance=effective.inner_tolerance,
+            tolerance=effective_inner_tolerance,
             residual_recompute_interval=effective.residual_recompute_interval,
         )
         return _require_converged("inner Fisher PCG", result)
@@ -415,10 +430,16 @@ def fit_pro_reward(
     def normal_matvec(vector: torch.Tensor) -> torch.Tensor:
         return feature_moment.mT @ inverse_fisher(feature_moment @ vector)
 
+    normal_diagonal_proxy = feature_moment.square().sum(dim=0)
+    diagonal_scale = float(normal_diagonal_proxy.mean().item())
+    if not math.isfinite(diagonal_scale) or diagonal_scale <= 0.0:
+        raise ValueError("Pro-RM feature moment has non-positive diagonal scale")
+    diagonal_floor = torch.finfo(normal_diagonal_proxy.dtype).eps * diagonal_scale
+    inverse_normal_diagonal = normal_diagonal_proxy.clamp_min(diagonal_floor).reciprocal()
     result = pcg(
         normal_matvec,
         rhs,
-        inverse_diagonal=None,
+        inverse_diagonal=inverse_normal_diagonal,
         max_iterations=effective.outer_max_iterations,
         tolerance=effective.outer_tolerance,
         residual_recompute_interval=effective.residual_recompute_interval,
@@ -438,6 +459,8 @@ def fit_pro_reward(
         iterations=max(1, result.iterations),
         head_sha256=_head_sha256(weight),
         inner_pcg_calls=inner_calls,
+        relative_residual=result.relative_residual,
+        effective_inner_tolerance=effective_inner_tolerance,
     )
 
 

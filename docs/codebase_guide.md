@@ -34,8 +34,8 @@
 - `pipeline.py`: validates and resumes the dependency-ordered execution stages
 - `statistics.py`: descriptive three-seed aggregation
 - `cli.py`: the only command-line interface
-- `scripts/hpc4/stage_gpu.sbatch`: GPU array worker for materialize/reward/adapters/rollout
+- `scripts/hpc4/stage_gpu.sbatch`: GPU array worker plus QOS-packed multi-GPU rollout workers
 - `scripts/hpc4/stage_cpu.sbatch`: per-seed rollout assembly worker
-- `scripts/hpc4/submit_pipeline.sh`: submits the complete dependency graph
+- `scripts/hpc4/submit_pipeline.sh`: submits one verified, QOS-compliant pipeline stage
 
 There is no alternate training or evaluation route in the package.

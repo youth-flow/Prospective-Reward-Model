@@ -75,8 +75,8 @@ runs/20261001/
     adapters.json
 ```
 
-Production runs use `scripts/hpc4/submit_pipeline.sh`. It submits dependency-ordered
-Slurm arrays for materialization, reward fitting, adapter export, per-policy rollout,
+Production runs use `scripts/hpc4/submit_pipeline.sh`. It submits one QOS-compliant Slurm
+stage at a time for materialization, reward fitting, adapter export, packed per-policy rollout,
 per-seed rollout assembly, and final aggregation. Every completed stage is hash-bound
 to the config, seed, Git commit, SIF, Hugging Face inventory, and upstream artifacts.
 
