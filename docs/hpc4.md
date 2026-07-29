@@ -41,8 +41,9 @@ bash scripts/hpc4/fetch_candidate_image.sh <image-build-commit>
 export PRORM_IMAGE="$PRORM_PROJECT_ROOT/images/prorm-hpc4.sif"
 ```
 
-The fetch validates the public OCI manifest, SIF digest, embedded Git revision, dependency
-lock, and local report before installing the image.
+The fetch validates the public OCI manifest and SIF digest before installing the image.
+The compute-node smoke then validates the embedded Git revision, dependency lock, CUDA
+runtime, and package contract before the image is admitted to staging or experiments.
 
 ## GPU image smoke
 

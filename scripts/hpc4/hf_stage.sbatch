@@ -9,9 +9,13 @@ set -euo pipefail
 : "${PRORM_REPO_ROOT:?}"
 : "${PRORM_CONFIG:?}"
 : "${PRORM_IMAGE:?}"
+: "${PRORM_IMAGE_SHA256:?}"
+: "${PRORM_GIT_COMMIT:?}"
 : "${PRORM_HF_CACHE:?}"
 
 mkdir -p "${PRORM_HF_CACHE}"
+source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
+verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
 apptainer exec --cleanenv \
   --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}" \
   --pwd "${PRORM_REPO_ROOT}" \

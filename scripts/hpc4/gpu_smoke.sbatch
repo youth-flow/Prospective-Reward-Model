@@ -22,6 +22,8 @@ printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" \
   | sha256sum --check --status
 [[ "$(git -C "${PRORM_REPO_ROOT}" rev-parse HEAD)" = "${PRORM_GIT_COMMIT}" ]]
 [[ -z "$(git -C "${PRORM_REPO_ROOT}" status --porcelain)" ]]
+source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
+verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
 
 report="${PRORM_REPORT_ROOT}/gpu-smoke-${SLURM_JOB_ID}.txt"
 [[ ! -e "${report}" ]] || {

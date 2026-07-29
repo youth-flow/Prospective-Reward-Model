@@ -16,6 +16,9 @@ umask 027
 : "${PRORM_HF_INVENTORY_SHA256:?}"
 : "${SLURM_ARRAY_TASK_ID:?}"
 
+source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
+verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+
 container=(
   apptainer exec --cleanenv
   --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_RUN_ROOT}:${PRORM_RUN_ROOT}"

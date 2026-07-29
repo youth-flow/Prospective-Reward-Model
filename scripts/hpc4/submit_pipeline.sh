@@ -23,14 +23,6 @@ mkdir -p "${run_root}/logs"
 
 git_commit="$(git -C "${repo_root}" rev-parse HEAD)"
 image_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
-image_commit="$(
-  apptainer inspect --labels "${image}" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["org.opencontainers.image.revision"])'
-)"
-[[ "${image_commit}" = "${git_commit}" ]] || {
-  echo "image commit ${image_commit} does not match worktree commit ${git_commit}" >&2
-  exit 2
-}
 
 mapfile -t config_info < <(PYTHONPATH="${repo_root}/src" python3 - "${config}" <<'PY'
 import sys

@@ -14,6 +14,9 @@ set -euo pipefail
 : "${PRORM_IMAGE_SHA256:?}"
 : "${PRORM_HF_INVENTORY_SHA256:?}"
 
+source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
+verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+
 container=(apptainer exec --cleanenv
   --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_RUN_ROOT}:${PRORM_RUN_ROOT}"
   --pwd "${PRORM_REPO_ROOT}" --env "PYTHONPATH=${PRORM_REPO_ROOT}/src"

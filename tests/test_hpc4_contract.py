@@ -49,6 +49,29 @@ def test_hpc4_pipeline_is_dependency_ordered_and_concurrency_limited() -> None:
     assert not (ROOT / "scripts" / "hpc4" / "controlled.sbatch").exists()
 
 
+def test_submission_scripts_do_not_execute_apptainer_on_login_node() -> None:
+    for name in ("submit_gpu_smoke.sh", "submit_hf_stage.sh", "submit_pipeline.sh"):
+        text = (ROOT / "scripts" / "hpc4" / name).read_text(encoding="utf-8")
+        assert "apptainer" not in text
+
+
+def test_compute_jobs_verify_the_image_revision() -> None:
+    helper = ROOT / "scripts" / "hpc4" / "verify_image_revision.sh"
+    assert helper.is_file()
+    helper_text = helper.read_text(encoding="utf-8")
+    assert "apptainer inspect --json" in helper_text
+    assert "org.opencontainers.image.revision" in helper_text
+    for name in (
+        "gpu_smoke.sbatch",
+        "hf_stage.sbatch",
+        "stage_gpu.sbatch",
+        "stage_cpu.sbatch",
+        "aggregate.sbatch",
+    ):
+        text = (ROOT / "scripts" / "hpc4" / name).read_text(encoding="utf-8")
+        assert "verify_image_revision" in text
+
+
 def test_producer_identity_uses_only_current_environment_names(monkeypatch) -> None:
     for name in (
         "PRORM_GIT_COMMIT",

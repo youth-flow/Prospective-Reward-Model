@@ -25,14 +25,6 @@ case "${report_root}" in /project/sigroup/*) ;; *) echo "report root must be und
 mkdir -p "${report_root}"
 image_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
 git_commit="$(git -C "${repo_root}" rev-parse HEAD)"
-image_commit="$(
-  apptainer inspect --labels "${image}" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["org.opencontainers.image.revision"])'
-)"
-[[ "${image_commit}" = "${git_commit}" ]] || {
-  echo "image commit ${image_commit} does not match worktree commit ${git_commit}" >&2
-  exit 2
-}
 
 sbatch --parsable --partition="${partition}" --time="${walltime}" \
   --output="${report_root}/prorm-gpu-smoke-%j.out" \
