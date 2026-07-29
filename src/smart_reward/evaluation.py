@@ -68,7 +68,7 @@ def solve_natural_direction(
     result = pcg(
         damped.matvec,
         moment,
-        inverse_diagonal=damped.inverse_diagonal(),
+        inverse_diagonal=damped.pcg_inverse_diagonal(),
         max_iterations=settings.cg_max_iterations,
         tolerance=settings.cg_tolerance,
         residual_recompute_interval=settings.residual_recompute_interval,

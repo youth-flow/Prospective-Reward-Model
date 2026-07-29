@@ -48,6 +48,11 @@ numerical precondition/accuracy rules for the same quadratic, not extra regulari
 a changed estimand. There is no stochastic reward-head optimizer and no auxiliary
 optimization variable.
 
+Fisher PCG preserves the low-rank-plus-damping structure without coordinate preconditioning
+when the empirical score matrix has fewer rows than tangent dimensions. Once the empirical
+Fisher can be full rank, it uses its exact diagonal as a Jacobi preconditioner. This adaptive
+choice changes convergence speed, not the represented Fisher or its solution.
+
 The default Fisher estimator is the raw second moment. Prompt-centered sample covariance
 is a YAML-selectable sensitivity setting.
 

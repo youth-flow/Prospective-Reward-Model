@@ -131,6 +131,21 @@ class DampedEmpiricalFisher:
             )
         return diagonal.reciprocal()
 
+    def pcg_inverse_diagonal(self) -> torch.Tensor | None:
+        """Choose Jacobi only when it does not destroy low-rank ridge structure.
+
+        When the score matrix has fewer rows than columns, the operator is a
+        low-rank Gram matrix plus ``damping * I``. Unpreconditioned CG then has
+        at most ``num_rows + 1`` distinct eigenvalues in exact arithmetic,
+        while coordinate-wise Jacobi scaling can turn it into a full-spectrum
+        problem. Once the empirical Fisher can be full rank, Jacobi is the
+        useful default.
+        """
+
+        if self.score_matrix.shape[0] < self.dimension:
+            return None
+        return self.inverse_diagonal()
+
 
 __all__ = [
     "DampedEmpiricalFisher",

@@ -417,7 +417,7 @@ def fit_pro_reward(
         result = pcg(
             fisher.matvec,
             vector,
-            inverse_diagonal=None,
+            inverse_diagonal=fisher.pcg_inverse_diagonal(),
             max_iterations=effective.inner_max_iterations,
             tolerance=effective_inner_tolerance,
             residual_recompute_interval=effective.residual_recompute_interval,

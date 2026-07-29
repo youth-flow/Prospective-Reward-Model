@@ -26,6 +26,7 @@ from smart_reward.exact import (
     pairwise_differences,
     policy_reward_moment,
 )
+from smart_reward.linear import DampedEmpiricalFisher
 
 
 def make_split(seed: int, prompts: int = 18) -> ExactSplitData:
@@ -71,6 +72,18 @@ def test_fisher_estimators_have_documented_normalization() -> None:
         / split.num_prompts
     )
     assert torch.allclose(centered_matrix, manual)
+
+
+def test_fisher_pcg_preconditioner_respects_low_rank_ridge_structure() -> None:
+    underdetermined = DampedEmpiricalFisher(torch.randn(3, 5, dtype=torch.float64), damping=1.0e-3)
+    full_rank_capable = DampedEmpiricalFisher(
+        torch.randn(5, 3, dtype=torch.float64), damping=1.0e-3
+    )
+    assert underdetermined.pcg_inverse_diagonal() is None
+    assert torch.equal(
+        full_rank_capable.pcg_inverse_diagonal(),
+        full_rank_capable.inverse_diagonal(),
+    )
 
 
 def test_policy_reward_moment_is_prompt_shift_invariant() -> None:
