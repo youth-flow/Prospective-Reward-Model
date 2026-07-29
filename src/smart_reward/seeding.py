@@ -1,4 +1,4 @@
-"""Named random streams for paired, reproducible ProRM+/BT experiments."""
+"""Named random streams for reproducible ProRM experiments."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def derive_seed(base_seed: int, namespace: str) -> int:
         raise ValueError("base_seed must be a non-negative integer")
     if not isinstance(namespace, str) or not namespace.strip():
         raise ValueError("namespace must be a non-empty string")
-    payload = f"smart-reward-model/v1\0{base_seed}\0{namespace}".encode()
+    payload = f"prospective-reward-model/v1\0{base_seed}\0{namespace}".encode()
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") & ((1 << 63) - 1)
 
 
@@ -24,12 +24,8 @@ def derive_seed(base_seed: int, namespace: str) -> int:
 class SeedBundle:
     """Independent streams shared by both objectives in one paired run."""
 
-    prompt_split: int
     candidate_generation: int
     policy_lora_a: int
-    annotations: int
-    reward_head: int
-    minibatch_order: int
     rollout: int
 
     @classmethod

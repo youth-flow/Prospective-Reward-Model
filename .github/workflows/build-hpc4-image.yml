@@ -22,8 +22,8 @@ concurrency:
 env:
   APPTAINER_VERSION: "1.5.2"
   APPTAINER_DEB_SHA256: "b5ea4ddbb7db2bfd396b4e64adaedb75d990fc7efd851189472899a1bd521d89"
-  GHCR_PACKAGE: "ghcr.io/youth-flow/smart-reward-model-hpc4"
-  GHCR_PACKAGE_PATH: "youth-flow/smart-reward-model-hpc4"
+  GHCR_PACKAGE: "ghcr.io/youth-flow/prospective-reward-model-hpc4"
+  GHCR_PACKAGE_PATH: "youth-flow/prospective-reward-model-hpc4"
 
 jobs:
   build-and-publish:

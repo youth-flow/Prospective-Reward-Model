@@ -4,7 +4,7 @@ From: docker.io/pytorch/pytorch@sha256:2b59b1b91885677814f78be1f8df48a25d5dc952e
 %labels
     org.opencontainers.image.title "ProRM HPC4 runtime"
     org.opencontainers.image.description "Digest-locked runtime for Prospective Reward Modeling experiments"
-    org.opencontainers.image.source "https://github.com/youth-flow/Smart-Reward-Model"
+    org.opencontainers.image.source "https://github.com/youth-flow/Prospective-Reward-Model"
     org.opencontainers.image.revision "{{ GIT_COMMIT }}"
     org.opencontainers.image.base.name "docker.io/pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime"
     org.opencontainers.image.base.digest "sha256:2b59b1b91885677814f78be1f8df48a25d5dc952eb6580eaecfefca510f9afd3"
@@ -56,8 +56,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import load, save
 from transformers import (
     Qwen2ForCausalLM,
-    Qwen3Config,
-    Qwen3ForSequenceClassification,
+    AutoModelForSequenceClassification,
 )
 
 expected = {
@@ -84,8 +83,7 @@ if not all(
     item is not None
     for item in (
         Qwen2ForCausalLM,
-        Qwen3Config,
-        Qwen3ForSequenceClassification,
+        AutoModelForSequenceClassification,
         DownloadConfig,
         LoraConfig,
         get_peft_model,

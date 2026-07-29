@@ -1,710 +1,102 @@
-# Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret
-
-[![CI](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml/badge.svg)](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml)
-[![HPC4 image](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/build-hpc4-image.yml/badge.svg)](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/build-hpc4-image.yml)
-
-Preference likelihood asks whether a reward model explains past labels. **Prospective Reward Modeling
-(ProRM)** instead asks what the downstream policy optimizer will do with that reward model. The method
-therefore trains for the reward error that changes the next policy update, rather than for every pointwise
-reward error.
-
-The paper title is fixed as:
-
-> **Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret**
-
-This repository implements **ProRM+**, the observable repeated-label Fisher–GMM realization of the ideal
-ProRM objective. Its formal comparison is repeated-label Bradley–Terry maximum likelihood (BT-MLE).
-
-## Name and claim contract
-
-The two names refer to different mathematical levels:
-
-| Name | Meaning | Observable/trainable? |
-|---|---|---|
-| **ProRM** | Ideal population loss: local downstream policy regret measured under the target reward | No; it contains the unobserved target reward |
-| **ProRM+** | Repeated-label identification plus Fisher–GMM dual training, implemented with ridge and PCG | Yes, under the stated data contract |
-
-The “+” means that the unobserved ProRM target has been turned into a trainable moment problem. ProRM is
-therefore an ideal target, not a separately implemented baseline or an ablation stage. The repository and
-Python package retain `Smart-Reward-Model` and `smart_reward` as compatibility infrastructure; public
-method terminology is ProRM/ProRM+.
-
-## Estimand contract
-
-The repository separates three questions that must not be collapsed into one metric:
-
-| Role | Estimand | What it preserves |
-|---|---|---|
-| **Primary** | Fixed-`beta` ProRM regret, with the same `beta` for every reward model | Direction angle **and** natural-gradient norm calibration |
-| **Secondary** | Fixed-`K` constrained regret and Fisher cosine | Direction angle after each method is normalized to the same local KL radius |
-| **Transfer endpoint** | Finite policy rollout under a declared update rule | Whether local geometry survives an actual policy update |
-
-For `u_r=F_0^\dagger A_0r`, the primary estimand is
-
-$$
-\mathcal R_\beta(r_\phi)
-=\frac{1}{2\beta}\|u_{r_\phi}-u_*\|_{F_0}^2.
-$$
-
-At a fixed local KL radius `K`, the constrained update normalizes
-`u_r` by its own Fisher norm, and its target-reward regret is proportional to
-`1-cos_F(u_r,u_*)`. Fixed-`K` matching therefore discards norm-calibration error and is a useful
-secondary diagnostic, not a replacement for the fixed-`beta` ProRM target.
-
-## Current status
-
-| Item | Status |
-|---|---|
-| Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
-| Automated test suite | `334 passed, 2 skipped` locally; synthetic runs validate the pipeline, not an effect claim |
-| Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
-| HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
-| Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
-| HPC4 GPU environment smoke | **Passed**, job `1640778`; image-build commit `b057bc9e134f1844248d655ed0f6c340af03099f`; validated SIF SHA256 `d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb` |
-| Offline Hugging Face snapshots | Cached and offline-validated; main inventory SHA256 `095d5dc5e5a952be53ce07279aa7b5f1eda57a7a8b5745a1e4afa545a1f11f7c` |
-| Historical pre-fix controlled smoke | **Passed**, job `1641475` on NVIDIA L20 (`00:03:14`), but only under the superseded FP32-solver identity |
-| Superseded main attempt | Seed `20260722`, job `1641489`, failed the mandatory initial ProRM+ PCG gate: true relative residual `2.717e-5 > 1e-5` after 2048 iterations |
-| Current numerical design | Main config `ae5d628e…a0df6`; FP64 policy geometry and 8192-iteration main ceiling |
-| Five-seed accepted main experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
-| Formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
-| “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
-| Post-Phase-1 repair | Fixed-`beta`/fixed-`K` and optimization audits, common-`beta` primitives, policy-to-reference KL, oracle-direction and `R=4` label primitives implemented; new HPC4 campaign not yet run |
-
-The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
-manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
-five-seed campaign. The replacement campaign completed without numerical failures; see the
-[formal Phase 1 result](docs/phase1_results.md).
-
-## Formal Phase 1 result
-
-All differences below are `ProRM+ − BT-MLE`. The intervals are paired-bootstrap engineering decision
-intervals over the five locked seeds, not population confidence intervals or p-values.
-
-| Preregistered metric | Estimand role | Favorable sign | Paired mean | 95% engineering interval | Gate |
-|---|---|---:|---:|---:|---|
-| Held-out local regret | Fixed-`beta` primary | `< 0` | `-0.0091789` | `[-0.0765277, 0.0615383]` | Fail |
-| Squared Fisher direction error | Fixed-`beta` geometry | `< 0` | `-0.0183622` | `[-0.1529629, 0.1230318]` | Fail |
-| Fisher cosine | Fixed-`K` secondary | `> 0` | `+0.0416380` | `[-0.0529131, 0.1316971]` | Pass under the locked mean-sign rule |
-| Matched-KL rollout improvement | Fixed-`K` transfer | `> 0` | `-0.0037335` | `[-0.0074192, -0.0006188]` | Fail |
-
-The campaign is an engineering success and a valid negative scientific result. ProRM+ has slightly
-favorable mean local-regret and Fisher-error estimates, but they are heterogeneous across seeds and their
-intervals cross zero. Its matched-KL rollout difference is unfavorable and the entire engineering interval
-lies below zero. The repository therefore does **not** claim that ProRM+ outperforms BT-MLE under this
-locked Phase-1 setting. Exact identities, per-seed values, sensitivity evidence and interpretation are in
-[docs/phase1_results.md](docs/phase1_results.md).
-
-This estimand clarification does not reopen the experiment: the authoritative Phase-1 status remains
-`not_passed`.
-
-One additional finite-sample audit is decisive. Under the locked
-`gamma=0.9` estimator and `p in [0.25,0.75]`,
-`sd(h | p)` ranges from approximately `0.841` to `0.935`; the Phase-1
-train-only node-centered oracle RMS is only about `0.24`. Unbiasedness is
-therefore intact, but one randomized estimate per edge has low signal-to-noise.
-The next design includes an exact-margin positive control and averages four
-independent `gamma=0.9` estimates per pair. The average remains exactly
-unbiased and halves conditional standard deviation; labels are never clipped
-or silently truncated.
-
-The original `128`-token horizon was also active for roughly `74%–80%` of
-accepted candidates. Those are valid samples from the declared capped action
-space, but they limit external validity. The new design uses a frozen
-`256`-token horizon and reports EOS, length-limit rate and token-length
-distributions separately for every policy arm.
-
-## 1. From future policy utility to a reward-model loss
-
-For a candidate reward `r`, let the downstream optimizer return
-
-$$
-\theta_r\in\arg\max_\theta
-\left\{
-\mathbb E_{x\sim\rho,y\sim\pi_\theta}[r(x,y)]
--\beta\mathbb E_{x\sim\rho}
-D_{\mathrm{KL}}(\pi_\theta(\cdot|x)\Vert\pi_0(\cdot|x))
-\right\}.
-$$
-
-The theoretical regularizer is explicitly **policy-to-reference**,
-`KL(pi_theta || pi_0)`. The locked Phase-1 line search instead measures
-**reference-to-updated** `KL(pi_0 || pi_updated)` on fixed reference histories. The two orientations
-share the same Fisher expansion at `pi_0`, but they are not equal at a finite step; the Phase-1 quantity
-is therefore an operational fixed-`K` budget, not the exact finite-step theoretical regularizer.
-
-The globally correct reward-model criterion is the target-reward utility lost because the optimizer was
-given `r_phi` rather than `r*`. That definition is prospective but bilevel and unobservable. ProRM is its
-local, closed-form counterpart around the reference policy.
-
-Fix the prompt distribution, `pi_0=pi_{theta_0}`, and the exact tangent coordinates that the next policy
-update may change. Define
-
-$$
-s_0(x,y)=\nabla_\theta\log\pi_\theta(y\mid x)|_{\theta_0},\qquad
-A_0r=\mathbb E[s_0r(x,y)],\qquad
-F_0=\mathbb E[s_0s_0^\top].
-$$
-
-The ideal population ProRM loss is
-
-$$
-\boxed{
-\mathcal L_{\mathrm{ProRM}}(\phi)
-=\frac1{2\beta}
-\left\|A_0(r_\phi-r^*)\right\|_{F_0^\dagger}^{2}
-}.
-$$
-
-In the local quadratic policy problem this is exactly the regret of the update induced by `r_phi` under
-the target reward. Prompt-only shifts and reward errors in the score null space are not penalized because
-they cannot change that update.
-
-## 2. From pairwise labels to ProRM+
-
-Sample a natural pair from
-
-$$
-Q_0(dx,dy,dy')=\rho(dx)\pi_0(dy|x)\pi_0(dy'|x),
-$$
-
-and define
-
-$$
-z_0=s_0(x,y)-s_0(x,y'),\qquad
-\Delta r_\phi=r_\phi(x,y)-r_\phi(x,y').
-$$
-
-The score identity gives
-
-$$
-A_0r=\frac12\mathbb E_{Q_0}[z_0\Delta r].
-$$
-
-A single Bernoulli preference cannot provide a per-edge unbiased estimate of a BTL logit. ProRM+ obtains
-conditionally iid repeated labels for the same edge and constructs a randomized U-statistic `h` satisfying
-
-$$
-\mathbb E[h\mid e]=\operatorname{logit}(p^*(e))=\Delta r^*(e).
-$$
-
-Consequently,
-
-$$
-\boxed{
-m_\phi=\frac12\mathbb E[z_0(\Delta r_\phi-h)]
-=A_0(r_\phi-r^*)
-}.
-$$
-
-The two data streams have separate roles:
-
-```text
-Fisher stream:          (x,y) ~ rho*pi_0       -> s_0 -> F_0
-Repeated-label stream:  e ~ Q_0, labels -> h   -> z_0 -> m_phi
-                                                   |
-                                                   v
-                                         Fisher-GMM ProRM+
-```
-
-At population level and without damping,
-
-$$
-\boxed{
-\min_\phi\max_v\frac1\beta
-\left[v^\top m_\phi-\frac12v^\top F_0v\right]
-=\min_\phi\mathcal L_{\mathrm{ProRM}}(\phi)
-}.
-$$
-
-This identity requires natural `Q_0` pairs and the repeated-label assumptions. The three-edge
-[closed-form example](docs/closed_form_example.md) establishes a population ordering reversal between
-BT-MLE and the ideal ProRM target; it does **not** by itself establish the ProRM+ identification theorem.
-That theorem uses the natural `Q_0` expectation above.
-
-## 3. Empirical ridge ProRM+
-
-With all on-policy node scores in `S` and canonical labeled-edge differences in `Z`, the implementation
-uses
-
-$$
-\widehat F_0=\frac1{n_F}S^\top S,
-\qquad
-\widehat m_\phi=\frac1{2n_E}Z^\top(\Delta r_\phi-h),
-$$
-
-and trains the explicitly damped empirical objective
-
-$$
-\boxed{
-\min_\phi\max_v\frac1\beta
-\left[
-v^\top\widehat m_\phi
--\frac12v^\top(\widehat F_0+\lambda I)v
-\right]
-},
-$$
-
-equivalently,
-
-$$
-\widehat L_\lambda(\phi)
-=\frac1{2\beta}\widehat m_\phi^\top
-(\widehat F_0+\lambda I)^{-1}\widehat m_\phi,
-\qquad
-\lambda=c\,\operatorname{mean}(\operatorname{diag}\widehat F_0)>0.
-$$
-
-| Level | Exact claim |
-|---|---|
-| Population, `lambda=0`, `F_0^dagger` | ProRM+ inner optimum equals local ProRM regret |
-| Finite sample, `lambda>0` | Ridge-regularized empirical surrogate |
-| `c in {1e-4,1e-3,1e-2}` | Preregistered damping sensitivity, not post-hoc tuning |
-
-PCG solves `(F_hat + lambda*I)v=m_hat` without forming a dense Fisher. Because this operator is a
-low-rank empirical Fisher plus isotropic damping, the controlled path deliberately uses unpreconditioned
-CG: coordinate-wise Jacobi scaling destroys the repeated damping eigenvalue. Stored scores remain FP32,
-but moment construction, damping, Fisher matvecs, Krylov state, held-out geometry and rollout directions
-use the config-locked FP64 policy-geometry workspace. The reward head, autograd and AdamW remain FP32;
-FP64 envelope weights cross to FP32 exactly once at that boundary.
-
-Convergence is accepted only from an explicitly recomputed true residual `rhs-Ax` at relative tolerance
-`1e-5`. Periodic checks do not replace the recursive residual while retaining an incompatible Krylov
-direction; a false recursive crossing explicitly restarts from the true residual. The formal main ceiling
-is `8192` iterations, while smoke retains `2048`; both remain fail-closed ceilings, not forced iteration
-counts. The reported quadratic and detached envelope surrogate differ by a factor of two in value but
-yield the correct gradient; see [theory.md](docs/theory.md).
-
-## 4. Controlled Phase 1 experiment
-
-The fixed question is:
-
-> Under the same restricted reward class and training budget, does ProRM+ recover the operational-oracle
-> policy-update direction more accurately than repeated-label BT-MLE, and does that advantage survive
-> equal measured-KL policy optimization?
-
-The target `r*` in Phase 1 is a train-calibrated transformation of frozen Skywork scores. It is an
-**operational oracle**, not human utility. BT-MLE and ProRM+ share candidates, repeated labels, features,
-zero initialization, optimizer, step count, GPU and stopping rule; only the training objective changes.
-
-MultiPref supplies **prompts only** in this controlled experiment; its historical human preference labels
-are not training targets. Qwen generates the four candidate responses. For canonical candidate pair
-`0-1`, frozen Skywork defines $p^*=\sigma(\Delta r^*)$; a named seed then generates conditionally iid
-Bernoulli repeats and the randomized estimator `h`. Thus the Phase-1 “annotator” is a reproducible
-Skywork-defined BTL simulator, not a new human-labeling round.
-
-Formal offline jobs resolve the pinned MultiPref snapshot locally and load its sorted
-`data/train-*.parquet` shards through the Parquet builder. They do not call
-`load_dataset("allenai/multipref", ...)`: Datasets 3.6 may still query Hub metadata on that path even
-with offline flags set.
+# Prospective Reward Model
+
+This repository implements one experiment only: compare exact-soft-label MLE-RM and
+Pro-RM under reward-class misspecification, then evaluate the one-step policies they
+induce in a fixed LoRA-B tangent.
+
+## Main configuration
+
+[`configs/main.yaml`](configs/main.yaml) is the formal experiment definition.
+
+- Seeds: `20261001`, `20261002`, `20261003`
+- Prompts: 4096 MultiPref prompts, split 3072/512/512
+- Reference policy: Qwen2.5-1.5B-Instruct
+- Candidates: 6 reference-policy responses per prompt, all 15 unordered pairs
+- Oracle: Skywork-Reward-V2-Llama-3.2-3B
+- Reward class: frozen Qwen response feature plus a bias-free 1536-dimensional head
+- Policy tangent: final-layer `q_proj`/`v_proj`, rank-4 LoRA, fixed A and trainable B
+- Learned rewards: MLE-RM and Pro-RM
+- Policy families: reference, MLE-NGD, Pro-NGD, and oracle-NGD
+- Common KL coefficients: `beta = [1, 2, 4]`
+
+The oracle provides exact reward differences for this controlled experiment. The YAML,
+CLI, package, tests, and HPC4 scripts expose only the workflow shown below.
+
+## Workflow
 
 ```text
 MultiPref prompts
-    -> pi_0: four exact-token candidates per prompt
-       -> fixed-A LoRA-B scores --------> Fisher geometry
-       -> frozen hidden features -------> zero-init linear reward class
-       -> frozen operational oracle ----> train-only calibration
-                                           -> repeated BTL labels
-                                                  |          |
-                                               BT-MLE      ProRM+
-                                                  \          /
-                                           held-out re-solve geometry
-                                                    |
-                                  deployed train direction + rollouts
+  -> pi0 candidates on train/validation/test
+  -> Skywork scores + reward features + LoRA-B score vectors
+  -> exact node artifact and all pair edges
+  -> MLE-RM and Pro-RM
+  -> reward-fit and held-out local/tabular evaluation
+  -> three beta-free NGD directions
+  -> nine beta-scaled LoRA adapters
+  -> fresh test rollouts
+  -> three-seed descriptive aggregate
 ```
 
-| Component | Locked design |
-|---|---|
-| Prompts | MultiPref pinned revision; local `data/train-*.parquet`; `1536/256/256` prompt-level split |
-| Reference policy | Pinned Qwen2.5-0.5B-Instruct, FP32 |
-| Candidates | Four independent base-distribution samples per prompt; no filtering or deduplication |
-| Policy tangent | Last four `q_proj/v_proj` modules, rank-4 fixed-A LoRA-B |
-| Oracle | Pinned Skywork-Reward-V2-Qwen3-0.6B, FP32 |
-| Repeated labels | Canonical candidate `0-1`; geometric continuation `gamma=0.9`, hence `E[N]=10` |
-| Reward class | Frozen final-response-token feature plus bias-free linear head |
-| Model execution and storage | Qwen, Skywork, frozen features and stored score tensors in FP32 |
-| Fisher/GMM geometry | Moment, damping, Fisher matvec, PCG, held-out metrics and rollout direction in FP64 |
-| Reward optimization | FP32 head/gradient/AdamW; one explicit FP64-to-FP32 envelope-weight cast |
-| PCG gate | True relative residual `1e-5`; main cap `8192`, smoke cap `2048` |
-| Training | 720 fixed steps; identical optimization budget |
-| Evaluation | Held-out re-solved Fisher geometry plus deployed train-direction, measured sequence-KL `0.01 ± 5%` rollout |
-| Statistics | Five paired seeds; fixed main damping plus two sensitivity settings |
-
-The capacity bottleneck does not logically guarantee misspecification. The immutable artifact therefore
-records a train-only, prompt-centered linear projection residual under
-`train_reward_class_projection`. It is descriptive mechanism evidence and cannot select a checkpoint,
-damping or conclusion.
-
-Held-out geometry and rollout do not use the same solved vector. With a frozen learned head, held-out
-metrics recompute both predicted and target directions from that split's moment, Fisher and damping.
-The policy rollout instead deploys the direction solved only from train moment/Fisher; test geometry
-never re-solves or modifies it. A difference between held-out ordering and rollout ordering is therefore
-a transfer failure, not an inconsistency in one direction.
-
-## 5. Evidence required for a positive result
-
-Pairwise prediction is descriptive. Held-out BTL NLL and oracle-probability MAE measure preference fit;
-they are not success gates. `aggregate.json` may report `passed` only if all preregistered policy evidence
-passes:
-
-| Evidence | Fixed five-seed criterion |
-|---|---|
-| Main-damping held-out ridge local-regret proxy | `ProRM+-BT-MLE` mean `<0`, bootstrap upper `<0` |
-| Squared Fisher direction error | `ProRM+-BT-MLE` mean `<0`, bootstrap upper `<0` |
-| Fisher cosine | `ProRM+-BT-MLE` mean `>0`; both direction norms nonzero |
-| Matched-KL rollout improvement | Both methods meet KL tolerance; `ProRM+-BT-MLE` mean `>0`, bootstrap lower `>0` |
-| Damping sensitivity | Both secondary local-regret means `<0`; all required PCG solves converge |
-| Identity and numerical integrity | PCG/KL convergence plus identical Git/image/GPU/manifest identities |
-
-The percentile-bootstrap interval over five preregistered paired seeds is an engineering decision interval,
-not a population confidence interval or p-value.
-
-| Observed pattern | Permitted conclusion |
-|---|---|
-| Geometry, rollout and sensitivity all pass | Supports the preregistered prospective reward-modeling mechanism claim |
-| Geometry passes but rollout fails | Local surrogate improved; downstream transfer not established |
-| Geometry fails | Core mechanism not supported |
-| Sensitivity fails or reverses | Failure remains in evidence; status is `not_passed` |
-| Only NLL/accuracy/probability MAE improves | Not evidence that ProRM+ succeeded |
-
-The completed campaign has preregistered status `not_passed`; no positive mechanism claim is made.
-
-### Next experiment: common-beta deployment
-
-The next experiment has a new design identity. For each seed, define the
-train-only damped oracle natural direction
-
-$$
-u_*^{\mathrm{tr}}
-=(F_{\mathrm{tr}}+\lambda I)^{-1}g_*^{\mathrm{tr}},
-$$
-
-and freeze
-
-$$
-\boxed{
-\beta_{\mathrm{common}}
-=
-\sqrt{
-\frac{(u_*^{\mathrm{tr}})^\top F_{\mathrm{tr}}u_*^{\mathrm{tr}}}
-{2K_{\mathrm{cal}}}
-}},
-\qquad K_{\mathrm{cal}}=0.003.
-$$
-
-This produces one seed-specific scalar shared by every policy arm; it is not a
-learner-specific beta. The primary chain is:
-
-1. use only train operational-oracle rewards and train Fisher to calibrate one
-   `beta_common` by the formula above;
-2. freeze that value before reading validation/test oracle metrics;
-3. deploy `u_BT/beta_common` and `u_ProRM+/beta_common` directly, with no learner-specific line search
-   or norm normalization, and deploy `u_oracle/beta_common` as a positive control;
-4. estimate `KL(pi_updated || pi_0)` on trajectories sampled from each updated policy and evaluate
-   `J*=E[r*]-beta_common*KL(pi_updated || pi_0)`; retain fixed-history
-   `KL(pi_0 || pi_updated)` only as a secondary diagnostic;
-5. apply a prespecified measured policy-to-reference KL safety cap of `0.02`; a violation fails closed
-   and never retunes beta;
-6. treat fixed-`beta` regret and common-`beta` target utility as primary, while fixed-`K` constrained regret,
-   Fisher cosine and matched-KL rollout remain secondary diagnostics.
-
-`K_cal=0.001` and `0.01` are scale-sensitivity arms, not alternative primary endpoints. Candidate KL is
-kept per sequence, candidates are averaged within prompt, and uncertainty is computed over prompt
-clusters and seeds. The existing five seeds are used only for a clearly labeled post-Phase-1 estimand
-audit. A confirmatory claim requires a frozen fresh ten-seed run after the oracle/exact-margin positive
-controls pass. Its noisy-label primary arm averages four independent `gamma=0.9` unbiased `h`
-replicates per pair; an all-six-pairs arm reuses the four already generated candidates as a prompt-level
-U-statistic. BT-MLE receives every underlying Bernoulli label in the corresponding arm. This design does
-not modify or supersede the locked Phase-1 `not_passed` result.
-
-## 6. Local verification
+Validate the configuration:
 
 ```bash
-python -m pip install -e ".[dev]"
-prorm config-check configs/smoke.yaml
 prorm config-check configs/main.yaml
-prorm closed-form-check --output outputs/closed-form.json
-prorm synthetic-check --seed 0 --output outputs/synthetic.json
-# With downloaded Phase-1 artifacts:
-# prorm estimand-audit CONFIG ARTIFACT COMPARISON ROLLOUT OUTPUT --seed SEED
-# prorm optimization-audit CONFIG ARTIFACT COMPARISON OUTPUT --seed SEED
-pytest -q
-ruff check .
-ruff format --check .
 ```
 
-`closed-form-check` is marked `population_example_only=true`; it verifies the analytic ordering reversal
-without presenting the three-edge distribution as ProRM+ training data. `synthetic-check` is always marked
-`benchmark_only=true`; it validates identities and integration and does not assert that ProRM+ must beat
-BT-MLE. Real Hugging Face execution additionally needs:
+Run one seed end to end after the pinned Hugging Face assets have been staged:
 
 ```bash
-python -m pip install -e ".[llm,dev]"
+prorm run-seed configs/main.yaml runs/20261001 \
+  --seed 20261001 --device cuda
 ```
 
-`prorm` is the public CLI name. The historical `smart-reward` executable and `smart_reward` import package
-remain compatibility surfaces while artifacts and scripts migrate.
-
-## 7. HKUST HPC4 entry
-
-Repository inputs are relative to the checkout. Only the cross-node project and scratch anchors must be
-absolute:
-
-| Content | Persistent or temporary location |
-|---|---|
-| Git checkout | `$HOME/Smart-Reward-Model` |
-| Qwen, Skywork and raw MultiPref snapshots | `$PRORM_PROJECT_ROOT/hf-cache/hub` |
-| Processed Hugging Face/Arrow dataset cache | `$PRORM_PROJECT_ROOT/hf-cache/datasets` |
-| Image, build/staging/GPU evidence | `$PRORM_PROJECT_ROOT/{images,system-reports}` |
-| Generated candidates, labels, scores, features and Fisher data | `$PRORM_PROJECT_ROOT/artifacts/...` |
-| Learned linear RM heads, rollouts and aggregate | `$PRORM_PROJECT_ROOT/runs/...` |
-| Per-job working copy | `$PRORM_SCRATCH_ROOT/jobs/$SLURM_JOB_ID` |
-
-The experiment does not create another full Qwen checkpoint. Base weights stay in the pinned HF cache;
-the learned bias-free linear reward heads are serialized in `comparison.json`. The local LoRA-B policy
-update is reconstructed for evaluation and is not exported as a production adapter checkpoint.
-Each persistent run contains a relative `artifact` symlink to its content-addressed Phase-1 artifact, so
-serialized POSIX path references remain valid after scratch cleanup. Heavy assets and results are ignored
-by Git.
-
-The first SSH connection is the only interactive identity step: enter the ITSO password and complete
-Duo/2FA in the SSH client. Never send a password, 2FA response, private key or recovery code to Codex, put
-one in this repository, or place one in a Slurm log. After that private login:
-
-```bash
-ssh YOUR_ITSO@hpc4.ust.hk
-git clone https://github.com/youth-flow/Smart-Reward-Model.git
-cd Smart-Reward-Model
-test "$(git remote get-url origin)" = \
-  "https://github.com/youth-flow/Smart-Reward-Model.git"
-git rev-parse --verify HEAD
-
-# Private, ignored path configuration; never edit the tracked example.
-test -e .env.hpc4 || cp scripts/hpc4/env.example .env.hpc4
-source .env.hpc4
-mkdir -p \
-  "${PRORM_PROJECT_ROOT}"/{images,hf-cache,system-reports,slurm-logs,artifacts,runs} \
-  "${PRORM_SCRATCH_ROOT}/jobs"
-bash scripts/hpc4/preflight.sh
-
-# No image is needed for this first GPU/driver observation.
-bash scripts/hpc4/submit_host_gpu_probe.sh gpu-l20
-```
-
-The completed gate is job `1640437`. It observed one NVIDIA L20 (46,068 MiB), driver `570.211.01` and
-maximum supported CUDA 12.8. The resulting candidate is therefore the digest-locked
-PyTorch 2.7.1/CUDA 12.6 definition in
-[`containers/prorm-hpc4.def`](containers/prorm-hpc4.def), with the exact Python package lock in
-[`containers/requirements-hpc4.lock`](containers/requirements-hpc4.lock).
-
-HPC4 cannot build the definition locally because its Apptainer installation has no SUID builder or
-subuid/subgid mapping, and user namespaces are disabled on the login node. The login node is therefore
-limited to Git, file checks and Slurm submission; it must not run `apptainer exec` for HF staging or
-aggregation. The dedicated GitHub workflow builds the raw SIF, records build evidence and publishes it
-through public GHCR ORAS. Pull the validated artifact by its immutable **image-build commit**, not by the
-current source
-`HEAD`; the source checkout may legitimately contain later staging/control-plane changes. The fetcher
-resolves and verifies the OCI manifest digest and requires the local SIF SHA256 to equal the manifest's
-SIF-layer digest:
-
-```bash
-image_build_commit=b057bc9e134f1844248d655ed0f6c340af03099f
-bash scripts/hpc4/fetch_candidate_image.sh "${image_build_commit}"
-
-export PRORM_IMAGE=images/prorm.sif
-export PRORM_HF_CACHE=hf-cache
-export PRORM_IMAGE_SHA256=d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb
-printf '%s  %s\n' \
-  "${PRORM_IMAGE_SHA256}" "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}" \
-  | sha256sum --check
-```
-
-This exact SIF passed the HPC4 GPU environment smoke in job `1640778`; its persistent report is
-`$PRORM_PROJECT_ROOT/system-reports/gpu-smoke-1640778.txt`. A file with any other SHA256 remains an
-unvalidated candidate.
-
-HF model and dataset staging is a separate, mandatory gate. Because login-node user namespaces are
-disabled, do not run `stage_hf_assets.py` or `apptainer exec` directly there. The two configs share one
-HF cache, so their first downloads must be serialized on an allowed CPU compute partition (`amd` or
-`intel`). Submit the smoke stage first:
-
-```bash
-export PRORM_HF_STAGE_WALLTIME=04:00:00
-cache_root="${PRORM_PROJECT_ROOT}/${PRORM_HF_CACHE}"
-smoke_stage_job="$(
-  bash scripts/hpc4/submit_hf_stage.sh \
-    configs/smoke.yaml amd "${PRORM_HF_STAGE_WALLTIME}"
-)"
-smoke_stage_job="${smoke_stage_job%%;*}"
-test -n "${smoke_stage_job}"
-squeue -j "${smoke_stage_job}"
-```
-
-After the smoke stage leaves the queue, require `COMPLETED`, `ExitCode=0:0` and an exact
-`status=passed` report before submitting the main stage:
-
-```bash
-sacct -j "${smoke_stage_job}" \
-  --format=JobID,State,Elapsed,ExitCode,Partition
-smoke_stage_report="${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${smoke_stage_job}.log"
-tail -n 20 "${smoke_stage_report}"
-grep -Fx 'status=passed' "${smoke_stage_report}"
-
-main_stage_job="$(
-  bash scripts/hpc4/submit_hf_stage.sh \
-    configs/main.yaml amd "${PRORM_HF_STAGE_WALLTIME}"
-)"
-main_stage_job="${main_stage_job%%;*}"
-test -n "${main_stage_job}"
-squeue -j "${main_stage_job}"
-```
-
-After the main stage leaves the queue, apply the same acceptance check:
-
-```bash
-sacct -j "${main_stage_job}" \
-  --format=JobID,State,Elapsed,ExitCode,Partition
-main_stage_report="${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${main_stage_job}.log"
-tail -n 20 "${main_stage_report}"
-grep -Fx 'status=passed' "${main_stage_report}"
-sha256sum "${cache_root}"/inventories/*.json
-```
-
-`04:00:00` is the staging default. Change it only if an administrator-enforced partition limit requires
-an approved lower value.
-
-Staging downloads only the public pinned snapshots. Its offline proof resolves snapshot revisions,
-configs and tokenizers, then reads MultiPref directly from the pinned snapshot's sorted
-`data/train-*.parquet` shards. This avoids the Datasets 3.6 Hub-metadata path; it does not claim to have
-instantiated model weights.
-Actual Qwen/Skywork weight loading is tested by the controlled model smoke. Each config-specific inventory
-digest is reverified offline and bound into the run manifest, artifact producer identity and final
-aggregate.
-
-Only after the validated-image GPU smoke has passed, both CPU staging jobs are `COMPLETED` with
-`ExitCode=0:0`, both config-specific inventories exist, the Git checkout is clean and `HEAD` equals the
-reviewed remote commit may `submit_controlled.sh` be used:
-
-```bash
-git fetch origin main
-test -z "$(git status --porcelain --untracked-files=normal)"
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-
-export PRORM_SMOKE_WALLTIME=REPLACE_WITH_APPROVED_PILOT_WALLTIME
-bash scripts/hpc4/submit_controlled.sh \
-  configs/smoke.yaml gpu-l20 "${PRORM_SMOKE_WALLTIME}"
-
-# The accepted formal campaign used a 12-hour allocation and averaged 02:59:02/seed.
-export PRORM_ARRAY_CONCURRENCY=2
-export PRORM_MAIN_WALLTIME=12:00:00
-# HPC4 l20_qos currently allows at most four submitted jobs per user.
-bash scripts/hpc4/submit_controlled.sh \
-  configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}" 0-3
-# Submit index 4 only after at least one task above reaches a terminal state.
-bash scripts/hpc4/submit_controlled.sh \
-  configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}" 4
-```
-
-The optional fourth argument is a zero-based configured seed index or one contiguous inclusive range.
-Omitting it submits all configured seeds. Splitting an array changes only Slurm scheduling: every task
-still resolves its seed from the same committed config and records its own numeric `SLURM_JOB_ID`.
-`PRORM_ARRAY_CONCURRENCY=2` fills the current `l20_qos MaxJobsPU=2` allowance. The QoS remains the global
-limit even after index 4 is submitted, so the campaign never runs more than two GPU tasks concurrently.
-
-After all five main seeds have been individually accepted, map every configured seed to exactly one
-successful controlled job and submit aggregation to a CPU partition. Replace each value below only with
-the corresponding `COMPLETED`, `ExitCode=0:0` job ID whose run directory contains a valid `SUCCESS`
-marker:
-
-```bash
-job_20260722=REPLACE_WITH_ACCEPTED_JOB_ID
-job_20260723=REPLACE_WITH_ACCEPTED_JOB_ID
-job_20260724=REPLACE_WITH_ACCEPTED_JOB_ID
-job_20260725=REPLACE_WITH_ACCEPTED_JOB_ID
-job_20260726=REPLACE_WITH_ACCEPTED_JOB_ID
-
-aggregate_job="$(
-  bash scripts/hpc4/submit_aggregate.sh \
-    configs/main.yaml amd 01:00:00 \
-    "20260722=${job_20260722}" \
-    "20260723=${job_20260723}" \
-    "20260724=${job_20260724}" \
-    "20260725=${job_20260725}" \
-    "20260726=${job_20260726}"
-)"
-aggregate_job="${aggregate_job%%;*}"
-test -n "${aggregate_job}"
-squeue -j "${aggregate_job}"
-```
-
-Aggregation is never run by direct login-node `apptainer exec`. The CPU job publishes the no-overwrite,
-atomic result at
-`$PRORM_PROJECT_ROOT/runs/controlled-main/<main-config-hash>/aggregate/`. Its `SUCCESS` marker means the
-aggregation pipeline and evidence validation completed; it does **not** mean the scientific criterion
-passed. The conclusion is exclusively `pre_registered_evidence.status` in `aggregate.json`, mirrored as
-`pre_registered_evidence_status=passed` or `not_passed` in `SUCCESS`.
-
-By default, the clean submission `HEAD` is both the aggregation control-plane commit and the
-source/producer commit. A later wrapper-only hotfix may instead place
-`--source-commit <full-producer-commit>` immediately after the walltime. The source must be an ancestor of
-the control-plane `HEAD`, and the worktree config bytes must still equal the source blob. Aggregation
-Python, config identities, seed manifests, and artifacts are then all validated against and executed from
-that detached source commit; `aggregation-manifest.json` records the distinct control-plane and
-aggregation-source commits.
-
-Formal jobs never use `--allow-download`. They bind the submission Git commit and config-specific cache
-inventory before allocation work begins. The run manifest records that **source Git SHA** separately from
-the validated **SIF SHA256**; it does not require the source commit to equal image-build commit
-`b057bc9e134f1844248d655ed0f6c340af03099f`. Wall time, GPU-hours and storage budgets come from the
-accepted smoke record. See [hpc4.md](docs/hpc4.md) for exact aggregation acceptance and scratch-retention
-commands.
-
-## 8. Documentation and code map
-
-| Goal | Entry point |
-|---|---|
-| Global-to-local derivation, assumptions and contribution boundary | [docs/theory.md](docs/theory.md) |
-| Three-edge closed-form population ordering reversal | [docs/closed_form_example.md](docs/closed_form_example.md) |
-| Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
-| Formal five-seed results and scientific conclusion | [docs/phase1_results.md](docs/phase1_results.md) |
-| HPC4 environment closure and Slurm execution | [docs/hpc4.md](docs/hpc4.md) |
-| Formal design identity | [configs/main.yaml](configs/main.yaml), [configs/identities.json](configs/identities.json) |
+The output contains:
 
 ```text
-Smart-Reward-Model/             # retained repository name
-├── configs/                    # closed-schema smoke/main designs
-├── containers/                 # digest-locked HPC4 definition and exact runtime lock
-├── docs/                       # theory, examples, protocol, HPC4 runbook
-├── scripts/hpc4/               # preflight, driver probe, staging, GPU smoke, arrays
-├── src/smart_reward/           # retained compatibility package
-│   ├── annotations.py          # randomized repeated-label estimator
-│   ├── objective.py            # moment, reported value, envelope gradient
-│   ├── training.py             # paired BT-MLE / ProRM+ trainers
-│   ├── phase1.py               # immutable real-model materialization
-│   ├── rollout.py              # natural directions and measured-KL updates
-│   ├── statistics.py           # paired-seed aggregation
-│   └── cli.py                  # fail-closed control plane
-└── tests/
+runs/20261001/
+  artifact/
+    prompts.jsonl
+    candidates.jsonl  # prompt, response, raw oracle score, standardized r*
+    edges.jsonl
+    metadata.json
+    tensors.safetensors
+  reward_result.json
+  adapters/
+    metadata.json
+    mle_rm__beta_1/ ... oracle__beta_4/
+  policy_utility/
+    rollouts.jsonl
+    metrics.json
 ```
 
-## 9. Claim boundary and execution order
+Aggregate the three seeds:
 
-1. Freeze and validate the image, environment lock and offline cache.
-2. Pass GPU environment smoke and the controlled model smoke.
-3. Run the five paired Phase 1 seeds without changing design identity.
-4. Aggregate only complete identity-matched runs.
-5. Scale reward-model capacity only after the controlled mechanism result is known.
-6. Treat CoVal as human-label robustness, not as a test of the exact Phase 1 theorem.
+```bash
+prorm aggregate configs/main.yaml runs/aggregate.json \
+  --reward-results runs/20261001/reward_result.json \
+                   runs/20261002/reward_result.json \
+                   runs/20261003/reward_result.json \
+  --rollout-results runs/20261001/policy_utility/metrics.json \
+                    runs/20261002/policy_utility/metrics.json \
+                    runs/20261003/policy_utility/metrics.json
+```
 
-With fixed finite labels, CoVal identifies only a truncated logit series. It must be reported as
-**candidate-restricted truncated ProRM+ robustness** and cannot inherit the exact unbiasedness or human-
-utility interpretation of the controlled experiment.
+## Evaluation boundary
 
-Primary engineering dependencies and data/model assets:
+Reward fitting is computed on the frozen reference-policy candidate pool. Local regret
+and tabular utility apply the train-fitted directions to the frozen test candidate pool;
+they are exact conditional on that finite pool, not population-exact.
+Actual reward, forward KL, and regularized utility are Monte Carlo estimates from fresh
+test rollouts. Validation is diagnostic only; test data never selects a model or beta.
 
-- [PyTorch](https://docs.pytorch.org/docs/stable/index.html)
-- [Transformers chat templates](https://huggingface.co/docs/transformers/chat_templating)
-- [PEFT LoRA](https://huggingface.co/docs/peft/main/en/package_reference/lora)
-- [MultiPref](https://huggingface.co/datasets/allenai/multipref)
-- [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
-- [Skywork Reward V2 Qwen3 0.6B](https://huggingface.co/Skywork/Skywork-Reward-V2-Qwen3-0.6B)
-- [CoVal](https://huggingface.co/datasets/openai/coval)
+See [`docs/experiment_protocol.md`](docs/experiment_protocol.md),
+[`docs/theory.md`](docs/theory.md), and
+[`docs/codebase_guide.md`](docs/codebase_guide.md).
+
+## Development
+
+```bash
+python -m pytest
+python -m ruff check src tests
+python -m ruff format --check src tests
+```

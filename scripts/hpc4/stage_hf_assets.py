@@ -24,7 +24,6 @@ from smart_reward.prompts import (
     load_multipref_parquet_snapshot,
     prepare_multipref_prompts,
 )
-from smart_reward.seeding import SeedBundle
 
 
 def _sha256_file(path: Path) -> str:
@@ -249,7 +248,7 @@ def _verify_offline_resolution(
         from transformers import AutoConfig, AutoTokenizer
     except ImportError as error:
         raise RuntimeError(
-            "smart-reward-model[llm] is required for offline verification"
+            "prospective-reward-model[llm] is required for offline verification"
         ) from error
 
     model_checks: list[dict[str, object]] = []
@@ -315,41 +314,34 @@ def _verify_offline_resolution(
     run = config["run"]
     if not isinstance(run, Mapping):
         raise TypeError("run must be a mapping")
-    raw_seeds = [run["seed"]] if "seed" in run else run["seeds"]
-    if not isinstance(raw_seeds, list):
-        raw_seeds = [raw_seeds]
-    prompt_checks: list[dict[str, object]] = []
-    for raw_seed in raw_seeds:
-        seed = int(raw_seed)
-        prompt_split_seed = SeedBundle.from_base_seed(seed).prompt_split
-        prompts = prepare_multipref_prompts(
-            dataset,
-            split_sizes=run["split_sizes"],  # type: ignore[arg-type]
-            seed=prompt_split_seed,
+    prompt_split_seed = int(run["prompt_split_seed"])
+    prompts = prepare_multipref_prompts(
+        dataset,
+        split_sizes=run["split_sizes"],  # type: ignore[arg-type]
+        seed=prompt_split_seed,
+    )
+    prompt_digest = hashlib.sha256()
+    split_counts: dict[str, int] = {}
+    for prompt in prompts:
+        split_counts[prompt.split] = split_counts.get(prompt.split, 0) + 1
+        prompt_digest.update(
+            json.dumps(
+                prompt.to_dict(),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
         )
-        prompt_digest = hashlib.sha256()
-        split_counts: dict[str, int] = {}
-        for prompt in prompts:
-            split_counts[prompt.split] = split_counts.get(prompt.split, 0) + 1
-            prompt_digest.update(
-                json.dumps(
-                    prompt.to_dict(),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8")
-            )
-            prompt_digest.update(b"\n")
-        prompt_checks.append(
-            {
-                "seed": seed,
-                "prompt_split_seed": prompt_split_seed,
-                "prepared_prompts": len(prompts),
-                "split_counts": split_counts,
-                "prepared_prompts_sha256": prompt_digest.hexdigest(),
-            }
-        )
+        prompt_digest.update(b"\n")
+    prompt_checks = [
+        {
+            "prompt_split_seed": prompt_split_seed,
+            "prepared_prompts": len(prompts),
+            "split_counts": split_counts,
+            "prepared_prompts_sha256": prompt_digest.hexdigest(),
+        }
+    ]
     return {
         "models": model_checks,
         "dataset": {

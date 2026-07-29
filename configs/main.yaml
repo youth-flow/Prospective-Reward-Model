@@ -1,20 +1,25 @@
+protocol: prorm_exact_delta_v1
+
 run:
-  name: controlled-main
-  seeds: [20260722, 20260723, 20260724, 20260725, 20260726]
-  num_prompts: 2048
-  split_sizes: {train: 1536, validation: 256, test: 256}
+  name: prorm-main
+  seeds: [20261001, 20261002, 20261003]
+  prompt_split_seed: 20261000
+  num_prompts: 4096
+  split_sizes: {train: 3072, validation: 512, test: 512}
 
 data:
   prompt_dataset: allenai/multipref
   prompt_revision: 12910233a0238a997ebe425656e9dfed7b0ff031
-  num_candidates: 4
+  num_candidates: 6
+  edge_construction: all_unordered_pairs
+  prompt_overlength: exclude_before_sampling
 
 policy:
-  model: Qwen/Qwen2.5-0.5B-Instruct
-  revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
   dtype: float32
-  max_prompt_tokens: 384
-  max_response_tokens: 128
+  max_prompt_tokens: 512
+  max_response_tokens: 256
   sampling:
     do_sample: true
     temperature: 1.0
@@ -25,52 +30,64 @@ policy:
   lora_rank: 4
   lora_alpha: 4
   lora_dropout: 0.0
-  lora_layers: [20, 21, 22, 23]
+  lora_layers: [27]
   lora_modules: [q_proj, v_proj]
   trainable_tangent_parameters: lora_B_only
 
 oracle:
-  model: Skywork/Skywork-Reward-V2-Qwen3-0.6B
-  revision: 8c14a4e9e6321deaf572544339b16b8d6bbe8886
+  model: Skywork/Skywork-Reward-V2-Llama-3.2-3B
+  revision: beafe5f2e6a275ce8c556f68f2d82de7fefbc3d8
   dtype: float32
-  transform: robust_center_scale_then_tanh
-  robust_scale: scaled_mad
+  transform: train_median_scaled_mad_affine
   robust_scale_floor: 1.0e-6
-  probability_floor: 0.25
-
-annotations:
-  scheme: geometric_randomized_truncation
-  gamma: 0.9
-
-objective:
-  beta: 1.0
-  damping_relative_to_mean_fisher_diagonal: 0.001
-  damping_sensitivity_multipliers: [0.1, 1.0, 10.0]
-  pcg_dtype: float64
-  pcg_tolerance: 1.0e-5
-  pcg_max_iterations: 8192
+  batch_size: 16
 
 reward_model:
-  model: Qwen/Qwen2.5-0.5B-Instruct
-  revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
   dtype: float32
   parameterization: frozen_backbone_linear_head
   feature_pooling: last_response_token
   linear_head_bias: false
-  outer_steps: 720
-  refresh_dual_every_steps: 1
-  optimizer: adamw
-  learning_rate: 1.0e-3
-  weight_decay: 0.0
-  microbatch_size: 64
-  max_grad_norm: 1.0
+  mle:
+    objective: exact_soft_btl_nll
+    optimizer: lbfgs
+    max_iterations: 200
+    history_size: 20
+    gradient_tolerance: 1.0e-7
+    change_tolerance: 1.0e-12
+    microbatch_size: 256
+  pro:
+    objective: fisher_weighted_reward_moment_error
+    solver: nested_matrix_free_cg
+    max_iterations: 1536
+    tolerance: 1.0e-6
+    residual_recompute_interval: 20
+
+geometry:
+  fisher_estimator: raw_second_moment
+  damping_relative_to_mean_diagonal: 1.0e-3
+  solve_dtype: float64
+  cg_tolerance: 1.0e-5
+  cg_max_iterations: 7168
+  residual_recompute_interval: 20
+
+policy_update:
+  method: one_step_damped_ngd_lora_b
+  reward_sources: [mle_rm, pro_rm, oracle]
+  beta_grid: [1.0, 2.0, 4.0]
+  kl_orientation: updated_to_reference
+  save_adapters: true
 
 evaluation:
-  heldout_moment: per_prompt_unbiased_covariance
-  kl_budget: 0.01
-  kl_relative_tolerance: 0.05
-  kl_probe_candidates: 16
-  rollout_candidates_per_prompt: 4
-  report_pairwise_accuracy: true
-  paired_bootstrap_resamples: 10000
-  paired_bootstrap_seed: 20260722
+  validation_usage: diagnostics_only
+  reward_fit_metrics:
+    [pair_kl, soft_btl_nll, probability_mse, pairwise_accuracy, centered_reward_nmse]
+  local_policy_metrics:
+    [local_regret, fisher_cosine, local_target_utility, tabular_optimal_utility, tabular_regret]
+  rollout:
+    prompts: 512
+    responses_per_prompt: 4
+    metrics:
+      [oracle_reward, reward_improvement, forward_kl, regularized_utility,
+       utility_improvement, oracle_ngd_regret]

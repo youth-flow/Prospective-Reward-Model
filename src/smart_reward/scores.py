@@ -9,7 +9,7 @@ contract is the fail-closed selection of trainable ``lora_B`` parameters.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
@@ -442,120 +442,11 @@ def per_sample_scores(
     return scores
 
 
-def edge_score_differences(
-    node_scores: torch.Tensor,
-    left_node_indices: torch.Tensor,
-    right_node_indices: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Return ``node_scores[left] - node_scores[right]`` for every edge.
-
-    For convenience, callers may either pass separate one-dimensional left and
-    right index tensors or one ``[num_edges, 2]`` tensor as the second argument.
-    """
-
-    if not isinstance(node_scores, torch.Tensor):
-        raise TypeError("node_scores must be a torch.Tensor")
-    if node_scores.ndim != 2 or node_scores.shape[0] < 1 or node_scores.shape[1] < 1:
-        raise ValueError("node_scores must have non-empty shape (num_nodes, dimension)")
-    if not node_scores.is_floating_point():
-        raise TypeError("node_scores must have a floating-point dtype")
-    if not bool(torch.isfinite(node_scores).all()):
-        raise ValueError("node_scores must be finite")
-    if not isinstance(left_node_indices, torch.Tensor):
-        raise TypeError("node indices must be torch.Tensor objects")
-
-    if right_node_indices is None:
-        if left_node_indices.ndim != 2 or left_node_indices.shape[1] != 2:
-            raise ValueError("a combined edge index must have shape (num_edges, 2)")
-        left_indices = left_node_indices[:, 0]
-        right_indices = left_node_indices[:, 1]
-    else:
-        if not isinstance(right_node_indices, torch.Tensor):
-            raise TypeError("node indices must be torch.Tensor objects")
-        left_indices = left_node_indices
-        right_indices = right_node_indices
-
-    if left_indices.ndim != 1 or right_indices.ndim != 1 or left_indices.numel() < 1:
-        raise ValueError("left and right node indices must be non-empty one-dimensional tensors")
-    if left_indices.shape != right_indices.shape:
-        raise ValueError("left and right node indices must have identical shapes")
-    for indices in (left_indices, right_indices):
-        if indices.is_floating_point() or indices.is_complex() or indices.dtype == torch.bool:
-            raise TypeError("node indices must have an integer dtype")
-        if indices.device != node_scores.device:
-            raise ValueError("node indices and node_scores must be on the same device")
-        if bool((indices < 0).any()) or bool((indices >= node_scores.shape[0]).any()):
-            raise ValueError("node index is out of range")
-
-    return node_scores[left_indices.long()] - node_scores[right_indices.long()]
-
-
-@dataclass(frozen=True)
-class ScoreDiagnostics(Mapping[str, float]):
-    """Scale-free empirical score centering diagnostics."""
-
-    mean_norm: float
-    rms: float
-    mean_norm_over_rms: float
-
-    def __getitem__(self, key: str) -> float:
-        aliases = {
-            "mean_norm": self.mean_norm,
-            "rms": self.rms,
-            "mean_norm_over_rms": self.mean_norm_over_rms,
-            "mean_norm/rms": self.mean_norm_over_rms,
-        }
-        try:
-            return aliases[key]
-        except KeyError as error:
-            raise KeyError(key) from error
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(("mean_norm", "rms", "mean_norm_over_rms"))
-
-    def __len__(self) -> int:
-        return 3
-
-    def as_dict(self) -> dict[str, float]:
-        """Return a directly JSON-serializable representation."""
-
-        return dict(self)
-
-
-def empirical_score_diagnostics(score_matrix: torch.Tensor) -> ScoreDiagnostics:
-    """Measure score centering relative to its empirical root-mean-square norm."""
-
-    if not isinstance(score_matrix, torch.Tensor):
-        raise TypeError("score_matrix must be a torch.Tensor")
-    if score_matrix.ndim != 2 or score_matrix.shape[0] < 1 or score_matrix.shape[1] < 1:
-        raise ValueError("score_matrix must have non-empty shape (num_samples, dimension)")
-    if not score_matrix.is_floating_point():
-        raise TypeError("score_matrix must have a floating-point dtype")
-    if not bool(torch.isfinite(score_matrix).all()):
-        raise ValueError("score_matrix must be finite")
-
-    stable_scores = score_matrix.detach().to(dtype=torch.float64)
-    mean_norm = torch.linalg.vector_norm(stable_scores.mean(dim=0)).item()
-    rms = stable_scores.square().sum(dim=1).mean().sqrt().item()
-    ratio = mean_norm / rms if rms > 0.0 else 0.0
-    return ScoreDiagnostics(mean_norm=mean_norm, rms=rms, mean_norm_over_rms=ratio)
-
-
-# Concise aliases for callers that prefer a generic diagnostic name.
-score_diagnostics = empirical_score_diagnostics
-score_mean_rms = empirical_score_diagnostics
-
-
 __all__ = [
     "NamedParameter",
     "ParameterLayout",
     "ParameterLayoutEntry",
-    "ScoreDiagnostics",
-    "edge_score_differences",
-    "empirical_score_diagnostics",
     "per_sample_scores",
-    "score_diagnostics",
-    "score_mean_rms",
     "select_named_tangent_parameters",
     "sequence_log_probs",
 ]

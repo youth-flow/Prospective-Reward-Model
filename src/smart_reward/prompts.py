@@ -6,7 +6,7 @@ import json
 import os
 import random
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -95,6 +95,7 @@ def prepare_multipref_prompts(
     *,
     split_sizes: Mapping[str, int],
     seed: int,
+    text_filter: Callable[[str], bool] | None = None,
 ) -> list[PromptRecord]:
     """Deduplicate MultiPref rows and split prompts deterministically.
 
@@ -131,6 +132,13 @@ def prepare_multipref_prompts(
         previous = prompt_text.setdefault(prompt_id, text)
         if previous != text:
             raise ValueError(f"prompt_id {prompt_id!r} maps to conflicting prompt text")
+
+    if text_filter is not None and not callable(text_filter):
+        raise TypeError("text_filter must be callable or None")
+    if text_filter is not None:
+        prompt_text = {
+            prompt_id: text for prompt_id, text in prompt_text.items() if text_filter(text)
+        }
 
     required = sum(normalized_sizes.values())
     if len(prompt_text) < required:
@@ -204,7 +212,7 @@ def load_multipref_prompts(
         from datasets import load_dataset
     except ImportError as error:
         raise RuntimeError(
-            "datasets is required for prompt download; install smart-reward-model[llm]"
+            "datasets is required for prompt download; install prospective-reward-model[llm]"
         ) from error
     dataset = load_dataset(dataset_name, revision=revision, split="train")
     return prepare_multipref_prompts(dataset, split_sizes=split_sizes, seed=seed)

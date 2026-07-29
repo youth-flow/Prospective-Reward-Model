@@ -3,23 +3,23 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "smart-reward-model"
-version = "0.2.0"
-description = "Prospective Reward Modeling by downstream policy regret"
+name = "prospective-reward-model"
+version = "0.3.0"
+description = "Exact-delta ProRM training and common-beta NGD evaluation"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Prospective Reward Modeling contributors" }]
 dependencies = [
   "pyyaml>=6,<7",
+  "safetensors>=0.4,<1",
   "torch>=2.4,<3",
 ]
 
 [project.scripts]
 prorm = "smart_reward.cli:main"
-smart-reward = "smart_reward.cli:main"
 
 [project.urls]
-Repository = "https://github.com/youth-flow/Smart-Reward-Model"
+Repository = "https://github.com/youth-flow/Prospective-Reward-Model"
 
 [project.optional-dependencies]
 llm = [
@@ -28,8 +28,7 @@ llm = [
   "numpy>=1.26,<3",
   "peft>=0.14,<1",
   "pyarrow>=17",
-  "safetensors>=0.4,<1",
-  # The pinned Skywork oracle is Qwen3 and records Transformers 4.52.3.
+  # The pinned Skywork reward model requires a recent Transformers release.
   "transformers>=4.52.3,<5",
 ]
 dev = [

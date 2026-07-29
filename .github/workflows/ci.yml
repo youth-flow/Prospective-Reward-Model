@@ -25,10 +25,7 @@ jobs:
       - name: Shell syntax
         run: bash -n scripts/hpc4/*.sh scripts/hpc4/*.sbatch
       - name: Installed CLI contracts
-        run: |
-          prorm config-check configs/smoke.yaml > /dev/null
-          prorm closed-form-check > /dev/null
-          smart-reward --help > /dev/null
+        run: prorm config-check configs/smoke.yaml > /dev/null
       - name: Test
         run: pytest -q
       - name: Byte-compile

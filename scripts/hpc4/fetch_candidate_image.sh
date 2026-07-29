@@ -66,8 +66,8 @@ esac
 target="${target_parent}/${image_basename}"
 [[ ! -L "${target}" ]] || die "refusing a symlink image target: ${target}"
 
-package="ghcr.io/youth-flow/smart-reward-model-hpc4"
-package_path="youth-flow/smart-reward-model-hpc4"
+package="ghcr.io/youth-flow/prospective-reward-model-hpc4"
+package_path="youth-flow/prospective-reward-model-hpc4"
 tag="git-${build_commit}"
 work_parent="$(realpath -e -- "${scratch_root}/apptainer-tmp")"
 work_dir="$(mktemp -d "${work_parent}/fetch-image.XXXXXX")"

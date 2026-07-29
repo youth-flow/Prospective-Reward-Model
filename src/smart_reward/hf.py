@@ -1,4 +1,4 @@
-"""Fail-closed Hugging Face integration for the locked ProRM+ experiment.
+"""Hugging Face integration for the exact-delta ProRM experiment.
 
 The numerical core does not depend on Transformers or PEFT.  This module keeps
 that property: model and tokenizer objects are consumed through their public
@@ -503,7 +503,7 @@ def score_exact_candidates(
 ) -> torch.Tensor:
     """Compute response log probabilities from the exact generated token IDs.
 
-    No ``no_grad`` context is used because ProRM+ differentiates these log
+    No ``no_grad`` context is used because materialization differentiates these log
     probabilities with respect to LoRA-B.  Candidates produced by
     :func:`generate_exact_candidates` are tied to the same in-memory model
     instance, preventing accidental score extraction under another policy.
@@ -665,7 +665,7 @@ def _require_peft() -> Any:
     except (ImportError, ModuleNotFoundError) as error:
         raise ImportError(
             "configure_fixed_a_lora requires the optional dependency 'peft'; "
-            "install smart-reward-model[llm]"
+            "install prospective-reward-model[llm]"
         ) from error
     if not callable(getattr(module, "get_peft_model", None)):
         raise ImportError("installed peft does not expose callable get_peft_model")
