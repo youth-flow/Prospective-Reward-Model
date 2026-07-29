@@ -251,6 +251,7 @@ class ExactTokenCandidates:
     reached_max_length: torch.Tensor
     prompt_width: int
     source_model_id: int | None = None
+    source_trainable_names: tuple[str, ...] | None = None
     source_trainable_sha256: str | None = None
 
     def __post_init__(self) -> None:
@@ -288,6 +289,15 @@ class ExactTokenCandidates:
             not isinstance(self.source_model_id, int) or isinstance(self.source_model_id, bool)
         ):
             raise TypeError("source_model_id must be an integer or None")
+        if self.source_trainable_names is not None and (
+            not isinstance(self.source_trainable_names, tuple)
+            or any(not isinstance(name, str) or not name for name in self.source_trainable_names)
+            or tuple(sorted(self.source_trainable_names)) != self.source_trainable_names
+            or len(set(self.source_trainable_names)) != len(self.source_trainable_names)
+        ):
+            raise ValueError(
+                "source_trainable_names must be a sorted tuple of unique non-empty names"
+            )
         if self.source_trainable_sha256 is not None and (
             not isinstance(self.source_trainable_sha256, str)
             or len(self.source_trainable_sha256) != 64
@@ -296,6 +306,10 @@ class ExactTokenCandidates:
             )
         ):
             raise ValueError("source_trainable_sha256 must be a lowercase SHA256 digest or None")
+        if (self.source_trainable_names is None) != (self.source_trainable_sha256 is None):
+            raise ValueError(
+                "source trainable names and SHA256 must either both be set or both be None"
+            )
 
 
 # A descriptive alias for callers that think in batches rather than candidates.
@@ -476,11 +490,19 @@ def generate_exact_candidates(
         max_length=canonical.get("max_length"),
     )
     trainable_state = tuple(
-        (name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad
+        sorted(
+            (
+                (name, parameter)
+                for name, parameter in model.named_parameters()
+                if parameter.requires_grad
+            ),
+            key=lambda item: item[0],
+        )
     )
     return replace(
         candidates,
         source_model_id=id(model),
+        source_trainable_names=tuple(name for name, _ in trainable_state),
         source_trainable_sha256=_fingerprint_named_tensors(trainable_state),
     )
 
@@ -517,12 +539,19 @@ def score_exact_candidates(
         raise ValueError(
             "candidates must be scored by the exact policy instance that generated them"
         )
-    if candidates.source_trainable_sha256 is not None:
-        trainable_state = tuple(
-            (name, parameter)
-            for name, parameter in model.named_parameters()
-            if parameter.requires_grad
-        )
+    if (
+        candidates.source_trainable_names is not None
+        and candidates.source_trainable_sha256 is not None
+    ):
+        parameters = dict(model.named_parameters())
+        try:
+            trainable_state = tuple(
+                (name, parameters[name]) for name in candidates.source_trainable_names
+            )
+        except KeyError as error:
+            raise ValueError(
+                "policy tangent parameter disappeared between generation and scoring"
+            ) from error
         current_digest = _fingerprint_named_tensors(trainable_state)
         if current_digest != candidates.source_trainable_sha256:
             raise ValueError("policy tangent parameters changed between generation and scoring")

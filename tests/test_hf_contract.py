@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -8,9 +9,44 @@ import torch
 from smart_reward.hf import (
     build_oracle_chat,
     extract_scalar_oracle_logits,
+    generate_exact_candidates,
     pool_final_response_hidden_state,
+    score_exact_candidates,
     validate_exact_generation_kwargs,
 )
+
+
+class _RequiresGradTogglingPolicy(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(0.25))
+        self.generation_config = SimpleNamespace(eos_token_id=4, pad_token_id=0)
+
+    def generate(self, input_ids: torch.Tensor, **_: object) -> torch.Tensor:
+        response = torch.full(
+            (input_ids.shape[0], 1),
+            2,
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        return torch.cat((input_ids, response), dim=1)
+
+    def forward(self, input_ids: torch.Tensor, **_: object) -> SimpleNamespace:
+        logits = self.weight * torch.ones(
+            *input_ids.shape,
+            5,
+            dtype=self.weight.dtype,
+            device=input_ids.device,
+        )
+        return SimpleNamespace(logits=logits)
+
+    @contextmanager
+    def disable_adapter(self):
+        self.weight.requires_grad_(False)
+        try:
+            yield
+        finally:
+            self.weight.requires_grad_(True)
 
 
 def test_exact_generation_contract_rejects_distribution_changes() -> None:
@@ -21,6 +57,24 @@ def test_exact_generation_contract_rejects_distribution_changes() -> None:
         validate_exact_generation_kwargs({"temperature": 0.8, "max_new_tokens": 8})
     with pytest.raises(ValueError, match="fail closed"):
         validate_exact_generation_kwargs({"custom_sampler": True})
+
+
+def test_policy_fingerprint_tracks_same_tensors_across_trainability_changes() -> None:
+    model = _RequiresGradTogglingPolicy().eval()
+    candidates = generate_exact_candidates(
+        model,
+        torch.tensor([[1, 3]]),
+        generation_kwargs={"max_new_tokens": 1},
+    )
+
+    with model.disable_adapter():
+        scores = score_exact_candidates(model, candidates)
+    assert scores.shape == (1,)
+
+    with torch.no_grad():
+        model.weight.add_(1.0)
+    with pytest.raises(ValueError, match="changed between generation and scoring"):
+        score_exact_candidates(model, candidates)
 
 
 def test_reward_feature_pooling_selects_final_response_token() -> None:
