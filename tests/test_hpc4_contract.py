@@ -58,6 +58,15 @@ def test_submission_scripts_do_not_execute_apptainer_on_login_node() -> None:
         assert "apptainer" not in text
 
 
+def test_submission_scripts_route_slurm_logs_outside_the_repository() -> None:
+    smoke = (ROOT / "scripts" / "hpc4" / "submit_gpu_smoke.sh").read_text(encoding="utf-8")
+    staging = (ROOT / "scripts" / "hpc4" / "submit_hf_stage.sh").read_text(encoding="utf-8")
+    pipeline = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
+    assert '--output="${report_root}/' in smoke
+    assert '--output="${hf_cache}/logs/' in staging
+    assert pipeline.count('--output="${run_root}/logs/') == 6
+
+
 def test_compute_jobs_verify_the_image_revision() -> None:
     helper = ROOT / "scripts" / "hpc4" / "verify_image_revision.sh"
     assert helper.is_file()
