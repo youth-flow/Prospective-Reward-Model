@@ -11,17 +11,7 @@ verify_image_revision() {
 
   observed_commit="$(
     apptainer inspect --json "${image}" \
-      | python3 -c '
-import json
-import sys
-
-payload = json.load(sys.stdin)
-labels = payload.get("data", {}).get("attributes", {}).get("labels", {})
-revision = labels.get("org.opencontainers.image.revision")
-if not isinstance(revision, str):
-    raise SystemExit("image revision label is missing")
-print(revision)
-'
+      | python3 "${PRORM_REPO_ROOT}/scripts/hpc4/parse_image_revision.py"
   )"
   [[ "${observed_commit}" = "${expected_commit}" ]] || {
     echo "image commit ${observed_commit} does not match worktree commit ${expected_commit}" >&2

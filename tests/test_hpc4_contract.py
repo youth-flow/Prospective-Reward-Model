@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,7 +63,11 @@ def test_compute_jobs_verify_the_image_revision() -> None:
     assert helper.is_file()
     helper_text = helper.read_text(encoding="utf-8")
     assert "apptainer inspect --json" in helper_text
-    assert "org.opencontainers.image.revision" in helper_text
+    assert "parse_image_revision.py" in helper_text
+    parser_text = (ROOT / "scripts" / "hpc4" / "parse_image_revision.py").read_text(
+        encoding="utf-8"
+    )
+    assert "org.opencontainers.image.revision" in parser_text
     for name in (
         "gpu_smoke.sbatch",
         "hf_stage.sbatch",
@@ -70,6 +77,32 @@ def test_compute_jobs_verify_the_image_revision() -> None:
     ):
         text = (ROOT / "scripts" / "hpc4" / name).read_text(encoding="utf-8")
         assert "verify_image_revision" in text
+
+
+@pytest.mark.parametrize("revision", ["a" * 40, json.dumps("a" * 40)])
+def test_image_revision_parser_accepts_apptainer_label_encodings(revision: str) -> None:
+    payload = {"data": {"attributes": {"labels": {"org.opencontainers.image.revision": revision}}}}
+    result = subprocess.run(
+        [sys.executable, ROOT / "scripts" / "hpc4" / "parse_image_revision.py"],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "a" * 40
+
+
+def test_image_revision_parser_rejects_non_commit_labels() -> None:
+    payload = {"data": {"attributes": {"labels": {"org.opencontainers.image.revision": "main"}}}}
+    result = subprocess.run(
+        [sys.executable, ROOT / "scripts" / "hpc4" / "parse_image_revision.py"],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "40-character Git commit" in result.stderr
 
 
 def test_producer_identity_uses_only_current_environment_names(monkeypatch) -> None:
