@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Prospective Reward Modeling contributors" }]
 dependencies = [
+  "numpy>=1.26,<3",
   "pyyaml>=6,<7",
   "safetensors>=0.4,<1",
   "torch>=2.4,<3",
@@ -25,7 +26,6 @@ Repository = "https://github.com/youth-flow/Prospective-Reward-Model"
 llm = [
   "accelerate>=1,<2",
   "datasets>=3,<6",
-  "numpy>=1.26,<3",
   "peft>=0.14,<1",
   "pyarrow>=17",
   # The pinned Skywork reward model requires a recent Transformers release.
