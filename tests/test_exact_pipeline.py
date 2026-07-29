@@ -124,6 +124,52 @@ def test_mle_and_pro_fit_exact_delta_targets() -> None:
     assert pro.converged
 
 
+def test_mle_uses_identifiable_coordinates_for_underdetermined_head() -> None:
+    generator = torch.Generator().manual_seed(17)
+    prompts, candidates, reward_dimension = 4, 6, 64
+    features = torch.randn(
+        prompts,
+        candidates,
+        reward_dimension,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    oracle_weight = 0.1 * torch.randn(
+        reward_dimension,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    split = ExactSplitData(
+        prompt_ids=tuple(f"underdetermined-{index}" for index in range(prompts)),
+        policy_scores=torch.randn(
+            prompts,
+            candidates,
+            3,
+            generator=generator,
+            dtype=torch.float64,
+        ),
+        reward_features=features,
+        true_rewards=features @ oracle_weight,
+    )
+
+    result = fit_mle_reward(
+        split,
+        MLETrainingConfig(
+            max_iterations=20,
+            history_size=10,
+            gradient_tolerance=1.0e-6,
+            change_tolerance=1.0e-10,
+            microbatch_size=32,
+        ),
+    )
+
+    design, _ = exact_module._edge_design(split)
+    projected = torch.linalg.lstsq(design, design @ result.weight).solution
+    assert result.converged
+    assert result.gradient_norm <= 1.0e-6
+    assert torch.allclose(result.weight, projected, atol=1.0e-8, rtol=1.0e-8)
+
+
 def test_pro_nested_solve_tightens_inner_accuracy_and_preconditions_outer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

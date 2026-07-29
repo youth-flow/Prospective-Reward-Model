@@ -293,6 +293,55 @@ def policy_reward_moment(scores: torch.Tensor, rewards: torch.Tensor) -> torch.T
     )
 
 
+def _mle_parameterization(
+    design: torch.Tensor,
+    *,
+    maximum_identifiable_rank: int,
+    source_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Return stable MLE coordinates and an optional map back to head space.
+
+    Complete pairwise edges from one prompt span at most ``M - 1`` directions.
+    When that structural rank bound is below the head dimension, optimizing the
+    1536-dimensional head directly is needlessly singular.  A compact SVD gives
+    scaled orthogonal coordinates for exactly the same feasible logits.  The
+    scale makes the configured coordinate-gradient tolerance upper-bound the
+    original head-gradient norm.  Mapping through the pseudoinverse returns the
+    minimum-norm head.
+    """
+
+    if maximum_identifiable_rank >= design.shape[1]:
+        return design, None
+    left, singular_values, right_transpose = torch.linalg.svd(
+        design,
+        full_matrices=False,
+    )
+    if singular_values.numel() == 0:
+        raise RuntimeError("MLE edge design has no singular values")
+    tolerance = max(design.shape) * source_epsilon * singular_values[0]
+    rank = int(torch.count_nonzero(singular_values > tolerance).item())
+    if rank < 1:
+        raise RuntimeError("MLE edge design has zero numerical rank")
+    retained_singular_values = singular_values[:rank]
+    coordinate_scale = torch.linalg.vector_norm(retained_singular_values)
+    coordinate_design = (left[:, :rank] * coordinate_scale).contiguous()
+    head_map = (
+        right_transpose[:rank].mT * (coordinate_scale / retained_singular_values).unsqueeze(0)
+    ).contiguous()
+    return coordinate_design, head_map
+
+
+def _mle_objective_and_gradient(
+    design: torch.Tensor,
+    targets: torch.Tensor,
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    logits = design @ weight
+    objective = F.binary_cross_entropy_with_logits(logits, targets)
+    gradient = design.mT @ (torch.sigmoid(logits) - targets) / design.shape[0]
+    return objective, gradient
+
+
 def fit_mle_reward(
     train: ExactSplitData,
     config: MLETrainingConfig | None = None,
@@ -303,22 +352,35 @@ def fit_mle_reward(
     if not isinstance(effective, MLETrainingConfig):
         raise TypeError("config must be MLETrainingConfig")
     design, target_margins = _edge_design(train)
+    source_epsilon = torch.finfo(design.dtype).eps
     design = design.to(dtype=torch.float64)
     target_margins = target_margins.to(dtype=torch.float64)
     targets = torch.sigmoid(target_margins).detach()
-    weight = torch.zeros(
-        train.reward_dimension,
+    coordinate_design, head_map = _mle_parameterization(
+        design,
+        maximum_identifiable_rank=train.num_prompts * (train.num_candidates - 1),
+        source_epsilon=source_epsilon,
+    )
+    parameter = torch.zeros(
+        coordinate_design.shape[1],
         dtype=torch.float64,
         device=train.reward_features.device,
         requires_grad=True,
     )
     optimizer = torch.optim.LBFGS(
-        [weight],
+        [parameter],
         lr=1.0,
         max_iter=effective.max_iterations,
         history_size=effective.history_size,
         tolerance_grad=effective.gradient_tolerance,
-        tolerance_change=effective.change_tolerance,
+        # In identifiable logit coordinates, tiny loss changes can coexist with
+        # a head-space gradient above the scientific convergence gate.  Keep
+        # LBFGS gradient-controlled for this structurally underdetermined case.
+        tolerance_change=(
+            effective.change_tolerance
+            if head_map is None
+            else min(effective.change_tolerance, torch.finfo(design.dtype).eps)
+        ),
         line_search_fn="strong_wolfe",
     )
     closure_calls = 0
@@ -327,12 +389,12 @@ def fit_mle_reward(
         nonlocal closure_calls
         closure_calls += 1
         optimizer.zero_grad(set_to_none=True)
-        objective = torch.zeros((), dtype=weight.dtype, device=weight.device)
-        total = design.shape[0]
+        objective = torch.zeros((), dtype=parameter.dtype, device=parameter.device)
+        total = coordinate_design.shape[0]
         for start in range(0, total, effective.microbatch_size):
             stop = min(start + effective.microbatch_size, total)
             chunk_loss = F.binary_cross_entropy_with_logits(
-                design[start:stop] @ weight,
+                coordinate_design[start:stop] @ parameter,
                 targets[start:stop],
             )
             scale = (stop - start) / total
@@ -341,11 +403,10 @@ def fit_mle_reward(
         return objective
 
     optimizer.step(closure)
-    objective = closure()
-    if weight.grad is None:
-        raise RuntimeError("LBFGS did not produce an MLE gradient")
-    gradient_norm = float(torch.linalg.vector_norm(weight.grad.detach()).item())
-    detached = weight.detach().clone()
+    detached_parameter = parameter.detach()
+    detached = detached_parameter.clone() if head_map is None else head_map @ detached_parameter
+    objective, full_gradient = _mle_objective_and_gradient(design, targets, detached)
+    gradient_norm = float(torch.linalg.vector_norm(full_gradient).item())
     return RewardFitResult(
         method="MLE-RM",
         weight=detached,
