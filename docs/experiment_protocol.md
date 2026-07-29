@@ -97,8 +97,21 @@ Fresh-rollout metrics use four new responses from every actual policy on each te
 The fresh-rollout sampling unit is the prompt. All response-level values remain in
 `rollouts.jsonl` for inspection.
 
+Each of the ten policy instances writes an independent, resumable rollout. Prompt batches
+use deterministic batch-index-derived random streams shared across policy instances.
+Changing execution order or resuming a completed batch therefore cannot change the output
+for a fixed config and seed. Batch size is operational and explicitly config-bound.
+
 ## Aggregation
 
 Every seed runs the complete pipeline independently. The aggregate reports every seed,
 the three-seed mean, and sample standard deviation. This is descriptive evidence; three
 seeds do not support strong asymptotic significance claims.
+
+## Execution integrity
+
+Materialization checkpoints candidate generation at fixed prompt intervals. Reward fitting,
+adapter export, each policy rollout, per-seed rollout assembly, and the final aggregate are
+separate stages. A stage is reusable only when its receipt and files validate against the
+same config hash, seed, Git commit, SIF SHA-256, Hugging Face inventory SHA-256, and upstream
+artifact hashes. Partial or foreign outputs fail closed.

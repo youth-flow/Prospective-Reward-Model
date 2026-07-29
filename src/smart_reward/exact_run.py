@@ -32,6 +32,7 @@ from .exact import (
     fit_mle_reward,
     fit_pro_reward,
 )
+from .runtime import producer_identity
 
 EXACT_COMPARISON_SCHEMA = "exact-delta-reward-comparison/v1"
 
@@ -128,6 +129,7 @@ def run_exact_reward_comparison(
     mle_config = reward_config["mle"]
     pro_config = reward_config["pro"]
     geometry_config = normalized["geometry"]
+    print("reward_fit method=MLE-RM status=running", flush=True)
     mle = fit_mle_reward(
         experiment.train,
         MLETrainingConfig(
@@ -138,6 +140,11 @@ def run_exact_reward_comparison(
             microbatch_size=int(mle_config["microbatch_size"]),
         ),
     )
+    print(
+        f"reward_fit method=MLE-RM status=complete iterations={mle.iterations}",
+        flush=True,
+    )
+    print("reward_fit method=Pro-RM status=running", flush=True)
     pro = fit_pro_reward(
         experiment.train,
         ProTrainingConfig(
@@ -149,6 +156,10 @@ def run_exact_reward_comparison(
             outer_tolerance=float(pro_config["tolerance"]),
             residual_recompute_interval=int(pro_config["residual_recompute_interval"]),
         ),
+    )
+    print(
+        f"reward_fit method=Pro-RM status=complete iterations={pro.iterations}",
+        flush=True,
     )
     fits = {"MLE-RM": mle, "Pro-RM": pro}
     # Held-out targets are first read after both train-only fits have finished.
@@ -171,10 +182,11 @@ def run_exact_reward_comparison(
         "pro_rm": experiment.train.reward_features.to(dtype=torch.float64) @ pro.weight,
         "oracle": experiment.train.true_rewards.to(dtype=torch.float64),
     }
-    train_directions = {
-        method: solve_natural_direction(experiment.train, rewards, settings)
-        for method, rewards in train_rewards.items()
-    }
+    train_directions = {}
+    for method, rewards in train_rewards.items():
+        print(f"natural_direction method={method} status=running", flush=True)
+        train_directions[method] = solve_natural_direction(experiment.train, rewards, settings)
+        print(f"natural_direction method={method} status=complete", flush=True)
     local_policy_evaluation = {
         str(beta): {
             "pi0": evaluate_reference_policy(
@@ -221,6 +233,7 @@ def run_exact_reward_comparison(
             "reward_head": experiment.train.reward_dimension,
             "policy_tangent": experiment.train.policy_dimension,
         },
+        "producer": producer_identity(),
     }
     _atomic_json(Path(output), result)
     return result

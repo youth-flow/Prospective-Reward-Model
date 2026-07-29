@@ -14,6 +14,7 @@ from typing import Any
 
 PROTOCOL = "prorm_exact_delta_v1"
 _REVISION = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+_WALLTIME = re.compile(r"([0-9]+):([0-5][0-9]):([0-5][0-9])")
 
 
 class ConfigError(ValueError):
@@ -58,6 +59,14 @@ def _bool(value: object, path: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{path} must be boolean")
     return value
+
+
+def _walltime(value: object, path: str) -> str:
+    text = _string(value, path)
+    match = _WALLTIME.fullmatch(text)
+    if match is None or all(int(part) == 0 for part in match.groups()):
+        raise ConfigError(f"{path} must be a positive HH:MM:SS walltime")
+    return text
 
 
 def _sequence(value: object, path: str) -> Sequence[object]:
@@ -114,6 +123,7 @@ def validate_config(config: Mapping[str, object]) -> dict[str, Any]:
             "geometry",
             "policy_update",
             "evaluation",
+            "execution",
         },
     )
     if _string(root["protocol"], "protocol") != PROTOCOL:
@@ -370,6 +380,72 @@ def validate_config(config: Mapping[str, object]) -> dict[str, Any]:
     ]
     if _unique_strings(rollout["metrics"], "evaluation.rollout.metrics") != expected_rollout:
         raise ConfigError(f"evaluation.rollout.metrics must equal {expected_rollout!r}")
+
+    execution = _map(
+        root["execution"],
+        "execution",
+        {
+            "materialization_prompt_batch_size",
+            "materialization_checkpoint_prompts",
+            "rollout_prompt_batch_size",
+            "rollout_checkpoint_prompts",
+            "rollout_max_parallel_policies",
+            "materialization_walltime",
+            "reward_walltime",
+            "adapter_walltime",
+            "rollout_walltime",
+            "rollout_aggregate_walltime",
+            "three_seed_aggregate_walltime",
+        },
+    )
+    materialization_batch = _integer(
+        execution["materialization_prompt_batch_size"],
+        "execution.materialization_prompt_batch_size",
+        1,
+    )
+    materialization_checkpoint = _integer(
+        execution["materialization_checkpoint_prompts"],
+        "execution.materialization_checkpoint_prompts",
+        materialization_batch,
+    )
+    rollout_batch = _integer(
+        execution["rollout_prompt_batch_size"],
+        "execution.rollout_prompt_batch_size",
+        1,
+    )
+    rollout_checkpoint = _integer(
+        execution["rollout_checkpoint_prompts"],
+        "execution.rollout_checkpoint_prompts",
+        rollout_batch,
+    )
+    if materialization_checkpoint % materialization_batch:
+        raise ConfigError(
+            "execution.materialization_checkpoint_prompts must be divisible by batch size"
+        )
+    if rollout_checkpoint % rollout_batch:
+        raise ConfigError("execution.rollout_checkpoint_prompts must be divisible by batch size")
+    if materialization_checkpoint > total:
+        raise ConfigError("execution.materialization_checkpoint_prompts exceeds num_prompts")
+    if rollout_checkpoint > int(rollout["prompts"]):
+        raise ConfigError("execution.rollout_checkpoint_prompts exceeds rollout prompts")
+    if (
+        _integer(
+            execution["rollout_max_parallel_policies"],
+            "execution.rollout_max_parallel_policies",
+            1,
+        )
+        > 10
+    ):
+        raise ConfigError("execution.rollout_max_parallel_policies cannot exceed 10")
+    for name in (
+        "materialization_walltime",
+        "reward_walltime",
+        "adapter_walltime",
+        "rollout_walltime",
+        "rollout_aggregate_walltime",
+        "three_seed_aggregate_walltime",
+    ):
+        _walltime(execution[name], f"execution.{name}")
     return copy.deepcopy(dict(root))
 
 

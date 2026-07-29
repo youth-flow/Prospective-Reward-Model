@@ -1,13 +1,12 @@
 # HPC4 Execution
 
-The account in the HPC4 onboarding notice is `yyangjo`, the Slurm account is `sigroup`,
-and `gpu-l20` is an available partition. Login with `ssh yyangjo@hpc4.ust.hk`; off campus,
-connect to the HKUST VPN first. Login nodes have no GPU and must not run model loading,
-candidate generation, Apptainer validation, or training.
+The account is `yyangjo`, the Slurm account is `sigroup`, and the frozen GPU partition is
+`gpu-l20`. Login nodes are for Git, transfer, inspection, and `sbatch` only. Model loading,
+Apptainer execution, CUDA checks, training, and evaluation run inside Slurm allocations.
 
-Persistent source, images, Hugging Face assets, reports, and archived results live under
-`/project/sigroup`. Active run outputs live under `/scratch/$USER`; scratch files inactive
-for 60 days may be removed by HPC4.
+Persistent source, images, Hugging Face assets, reports, and archives live under
+`/project/sigroup/yyangjo`. Active outputs live under `/scratch/yyangjo`; inactive scratch
+files may be removed after 60 days.
 
 ## One-time setup
 
@@ -16,26 +15,25 @@ ssh yyangjo@hpc4.ust.hk
 export PRORM_PROJECT_ROOT="/project/sigroup/$USER/prorm"
 export PRORM_SCRATCH_ROOT="/scratch/$USER/prorm"
 mkdir -p "$PRORM_PROJECT_ROOT"/{images,hf-cache,system-reports,archive}
-mkdir -p "$PRORM_SCRATCH_ROOT"/runs
+mkdir -p "$PRORM_SCRATCH_ROOT/runs"
+mkdir -p "/project/sigroup/$USER"
 cd "/project/sigroup/$USER"
 git clone https://github.com/youth-flow/Prospective-Reward-Model.git
 cd Prospective-Reward-Model
 ```
 
-Check storage and scheduler state before large jobs:
+Before submissions:
 
 ```bash
 squota -A sigroup
 squota
-savail
+sinfo -p gpu-l20
 squeue -u "$USER"
 ```
 
-## Image
+## Immutable image
 
-The image workflow runs only from the committed `main` branch. After it succeeds, use its
-40-character Git commit to fetch the immutable SIF. The pull itself is a login-node data
-transfer; all image execution remains inside Slurm jobs.
+Use the 40-character commit only after both GitHub CI and `build-hpc4-image` pass.
 
 ```bash
 export PRORM_IMAGE="images/prorm-hpc4.sif"
@@ -43,20 +41,22 @@ bash scripts/hpc4/fetch_candidate_image.sh <image-build-commit>
 export PRORM_IMAGE="$PRORM_PROJECT_ROOT/images/prorm-hpc4.sif"
 ```
 
-Submit the L20 image smoke and require `COMPLETED` with `ExitCode=0:0`:
+The fetch validates the public OCI manifest, SIF digest, embedded Git revision, dependency
+lock, and local report before installing the image.
+
+## GPU image smoke
 
 ```bash
 bash scripts/hpc4/submit_gpu_smoke.sh \
   "$PRORM_IMAGE" "$PRORM_PROJECT_ROOT/system-reports" gpu-l20 00:20:00
-squeue -u "$USER"
-sacct -j <smoke-job-id> --format=JobID,State,Elapsed,ExitCode,AllocTRES
 ```
+
+Require terminal `COMPLETED`, `ExitCode=0:0`, and a report containing the L20, CUDA forward
+and backward pass, package contract, config check, Git commit, and image SHA-256.
 
 ## Hugging Face staging
 
-`smoke.yaml` and `main.yaml` have different semantic hashes, so each needs its own
-config-bound inventory even though they resolve the same public repositories. Run these
-jobs sequentially; wait for the first to complete before submitting the second.
+Stage the two config-bound inventories sequentially because they share one cache:
 
 ```bash
 bash scripts/hpc4/submit_hf_stage.sh \
@@ -66,71 +66,77 @@ bash scripts/hpc4/submit_hf_stage.sh \
   configs/main.yaml "$PRORM_IMAGE" "$PRORM_PROJECT_ROOT/hf-cache" amd 04:00:00
 ```
 
-Both jobs must finish with `ExitCode=0:0`. Their inventories are written under
-`$PRORM_PROJECT_ROOT/hf-cache/inventories/`.
+Each must finish `COMPLETED` with `ExitCode=0:0`. Inventories live in
+`$PRORM_PROJECT_ROOT/hf-cache/inventories/<config-sha256>.json`.
 
-## Execution-equivalent smoke
+## Dependency-ordered smoke
 
-This runs the complete pipeline on 24 prompts. It is the required resource and convergence
-gate for the formal experiment, especially for the nested Pro-RM solve.
+`submit_pipeline.sh` reads stage walltimes and rollout concurrency from YAML. It submits:
+
+```text
+materialize array
+  -> reward array
+  -> adapter array
+  -> seed x policy rollout array with a concurrency cap
+  -> per-seed rollout aggregate array
+  -> config-wide aggregate
+```
+
+Submit the complete 24-prompt pipeline:
 
 ```bash
-bash scripts/hpc4/submit_controlled.sh \
+bash scripts/hpc4/submit_pipeline.sh \
   configs/smoke.yaml \
   "$PRORM_IMAGE" \
   "$PRORM_PROJECT_ROOT/hf-cache" \
-  "$PRORM_SCRATCH_ROOT/runs/smoke" \
-  gpu-l20 08:00:00
+  "$PRORM_SCRATCH_ROOT/runs/smoke"
 ```
 
-Require all of the following before the main submission:
-
-- array task is `COMPLETED` with `ExitCode=0:0`;
-- `reward_result.json`, nine adapters, rollout metrics, and response JSONL exist;
-- MLE-RM, Pro-RM, and all three NGD solves report convergence;
-- peak memory fits one L20 and measured runtime supports the main wall-time request.
-
-```bash
-sacct -j <smoke-job-id> \
-  --format=JobID,State,Elapsed,ExitCode,MaxRSS,AllocTRES
-```
-
-## Three formal seeds
-
-Only after the execution smoke passes:
-
-```bash
-bash scripts/hpc4/submit_controlled.sh \
-  configs/main.yaml \
-  "$PRORM_IMAGE" \
-  "$PRORM_PROJECT_ROOT/hf-cache" \
-  "$PRORM_SCRATCH_ROOT/runs/main" \
-  gpu-l20 48:00:00
-```
-
-The three-task array maps indices `0,1,2` to seeds `20261001,20261002,20261003`.
-Monitor it without editing partial outputs:
+The command prints all six job IDs. Monitor terminal evidence:
 
 ```bash
 squeue -u "$USER"
-sacct -j <main-job-id> --format=JobID,State,Elapsed,ExitCode,MaxRSS,AllocTRES
-tail -f "$PRORM_SCRATCH_ROOT/runs/main/logs/prorm-main-<job-id>_<task>.out"
+sacct -j <job-id> --format=JobID,State,Elapsed,ExitCode,MaxRSS,AllocTRES
+tail -f "$PRORM_SCRATCH_ROOT/runs/smoke/logs/<stage>-<job-id>_<task>.out"
 ```
 
-## Aggregate and archive
+Re-running the same submission is safe: complete stages validate and return immediately;
+incomplete materialization and rollout work resumes from the last complete prompt checkpoint.
+Foreign or corrupted outputs are rejected.
 
-Only after all three tasks are terminal `COMPLETED` with `ExitCode=0:0`:
+Do not submit `main.yaml` until smoke proves:
+
+- every dependency job is terminal `COMPLETED` with `ExitCode=0:0`;
+- MLE-RM, Pro-RM, and all three NGD solves converge;
+- artifact, nine adapters, ten policy rollouts, per-seed metrics, and aggregate exist;
+- one L20 has safe peak memory at configured batch sizes;
+- measured stage runtimes justify the main walltimes and rollout concurrency.
+
+## Three formal seeds
+
+After freezing the execution fields from smoke and restaging any changed config:
 
 ```bash
-bash scripts/hpc4/submit_aggregate.sh \
-  configs/main.yaml "$PRORM_IMAGE" "$PRORM_SCRATCH_ROOT/runs/main" amd 01:00:00
+bash scripts/hpc4/submit_pipeline.sh \
+  configs/main.yaml \
+  "$PRORM_IMAGE" \
+  "$PRORM_PROJECT_ROOT/hf-cache" \
+  "$PRORM_SCRATCH_ROOT/runs/main"
 ```
 
-After verifying `aggregate.json`, archive the immutable run directory to project storage
-with `rsync`. Do not delete the scratch source until checksums and the copied files agree.
+Materialize/reward/adapters use three-task arrays. Rollout uses thirty tasks with the YAML
+concurrency cap. Aggregation runs only after all upstream tasks succeed.
+
+## Archive and transfer
+
+After verifying `aggregate.json` and all three seed receipts:
 
 ```bash
 rsync -a --info=progress2 \
   "$PRORM_SCRATCH_ROOT/runs/main/" \
   "$PRORM_PROJECT_ROOT/archive/main/"
 ```
+
+Generate and compare checksums before treating the archive as durable. Pull compact JSON,
+JSONL, receipts, and reports locally; pull tensors and adapters only when needed. Do not
+copy the SIF or Hugging Face cache back to the workstation.

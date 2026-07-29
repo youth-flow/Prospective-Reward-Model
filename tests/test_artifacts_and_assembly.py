@@ -11,7 +11,11 @@ from smart_reward.artifacts import (
     load_exact_delta_artifact,
     save_exact_delta_artifact,
 )
-from smart_reward.exact_phase import assemble_exact_delta_experiment
+from smart_reward.exact_phase import (
+    _load_candidate_shard,
+    _save_candidate_shard,
+    assemble_exact_delta_experiment,
+)
 from smart_reward.prompts import ChatMessage, PromptRecord
 
 
@@ -92,3 +96,45 @@ def test_metadata_is_human_inspectable(tmp_path) -> None:
     metadata = json.loads((target / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["seed"] == 11
     assert metadata["prompt_ids"]["test"] == ["test-0"]
+
+
+def test_materialization_shard_roundtrip_and_tamper_detection(tmp_path) -> None:
+    target = tmp_path / "shard"
+    manifest = {
+        "schema": "exact-delta-materialization-work/v1",
+        "config_sha256": "d" * 64,
+        "seed": 7,
+    }
+    scores = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+    features = torch.arange(2 * 3 * 2, dtype=torch.float32).reshape(2, 3, 2)
+    payloads = [{"prompt_id": "p0"}, {"prompt_id": "p1"}]
+    _save_candidate_shard(
+        target,
+        manifest=manifest,
+        start=0,
+        stop=2,
+        prompt_ids=["p0", "p1"],
+        policy_scores=scores,
+        reward_features=features,
+        payloads=payloads,
+    )
+    loaded_scores, loaded_features, loaded_payloads = _load_candidate_shard(
+        target,
+        manifest=manifest,
+        start=0,
+        stop=2,
+        prompt_ids=["p0", "p1"],
+    )
+    assert torch.equal(loaded_scores, scores)
+    assert torch.equal(loaded_features, features)
+    assert loaded_payloads == payloads
+    payload_file = target / "payloads.json"
+    payload_file.write_bytes(payload_file.read_bytes() + b"tamper")
+    with pytest.raises(ValueError, match="payload digest"):
+        _load_candidate_shard(
+            target,
+            manifest=manifest,
+            start=0,
+            stop=2,
+            prompt_ids=["p0", "p1"],
+        )

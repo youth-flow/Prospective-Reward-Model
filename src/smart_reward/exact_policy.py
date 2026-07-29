@@ -21,7 +21,13 @@ from .config import PROTOCOL, config_hash, validate_config
 from .exact_run import load_exact_reward_comparison
 from .hf import configure_fixed_a_lora
 from .policy_update import set_tangent_update_
-from .runtime import fork_torch_seed, load_pretrained, require_module, sha256_file
+from .runtime import (
+    fork_torch_seed,
+    load_pretrained,
+    producer_identity,
+    require_module,
+    sha256_file,
+)
 from .seeding import SeedBundle
 
 SCHEMA = "prorm-ngd-adapters/v1"
@@ -144,12 +150,21 @@ def export_exact_ngd_adapters(
                 )
                 directory = _method_directory(method, beta)
                 setup.model.save_pretrained(staging / directory, safe_serialization=True)
+                saved_files = {
+                    path.relative_to(staging / directory).as_posix(): sha256_file(path)
+                    for path in sorted((staging / directory).rglob("*"))
+                    if path.is_file()
+                }
+                if not saved_files:
+                    raise RuntimeError(f"adapter serialization produced no files: {directory}")
                 adapters[directory] = {
                     "reward_source": method,
                     "beta": beta,
                     "step_scale": 1.0 / beta,
                     "direction_norm": float(torch.linalg.vector_norm(direction).item()),
+                    "files": saved_files,
                 }
+                print(f"adapter name={directory} status=checkpointed", flush=True)
         _zero_b(setup)
         metadata = {
             "schema": SCHEMA,
@@ -175,6 +190,7 @@ def export_exact_ngd_adapters(
                 for method, serialized in (("mle_rm", "MLE-RM"), ("pro_rm", "Pro-RM"))
             },
             "adapters": adapters,
+            "producer": producer_identity(),
         }
         (staging / "metadata.json").write_text(
             json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",

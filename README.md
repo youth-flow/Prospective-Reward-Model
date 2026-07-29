@@ -33,7 +33,7 @@ MultiPref prompts
   -> reward-fit and held-out local/tabular evaluation
   -> three beta-free NGD directions
   -> nine beta-scaled LoRA adapters
-  -> fresh test rollouts
+  -> ten independently resumable fresh test rollouts
   -> three-seed descriptive aggregate
 ```
 
@@ -64,10 +64,21 @@ runs/20261001/
   adapters/
     metadata.json
     mle_rm__beta_1/ ... oracle__beta_4/
+  policy_rollout_parts/
+    pi0/ ... oracle__beta_4/
   policy_utility/
     rollouts.jsonl
     metrics.json
+  stage_receipts/
+    materialize.json
+    reward.json
+    adapters.json
 ```
+
+Production runs use `scripts/hpc4/submit_pipeline.sh`. It submits dependency-ordered
+Slurm arrays for materialization, reward fitting, adapter export, per-policy rollout,
+per-seed rollout assembly, and final aggregation. Every completed stage is hash-bound
+to the config, seed, Git commit, SIF, Hugging Face inventory, and upstream artifacts.
 
 Aggregate the three seeds:
 

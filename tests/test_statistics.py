@@ -51,7 +51,7 @@ def test_three_seed_aggregation_preserves_pairing(tmp_path) -> None:
             }
             for beta in config["policy_update"]["beta_grid"]
         }
-        common = {"protocol": PROTOCOL, "config_sha256": digest, "seed": seed}
+        common = {"protocol": PROTOCOL, "config_sha256": digest, "seed": seed, "producer": {}}
         reward_paths.append(
             _write(
                 tmp_path / f"reward-{seed}.json",

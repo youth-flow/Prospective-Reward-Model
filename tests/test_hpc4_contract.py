@@ -10,7 +10,7 @@ ROOT = Path(__file__).parents[1]
 
 
 def test_hpc4_gpu_jobs_request_only_the_primary_resource() -> None:
-    for name in ("controlled.sbatch", "gpu_smoke.sbatch"):
+    for name in ("stage_gpu.sbatch", "gpu_smoke.sbatch"):
         text = (ROOT / "scripts" / "hpc4" / name).read_text(encoding="utf-8")
         assert "#SBATCH --account=sigroup" in text
         assert "#SBATCH --gpus-per-node=1" in text
@@ -31,11 +31,22 @@ def test_hpc4_contract_contains_no_retired_model_or_environment_names() -> None:
 
 def test_hpc4_paths_follow_project_and_scratch_policy() -> None:
     documentation = (ROOT / "docs" / "hpc4.md").read_text(encoding="utf-8")
-    controlled = (ROOT / "scripts" / "hpc4" / "submit_controlled.sh").read_text(encoding="utf-8")
+    controlled = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
     assert "/project/sigroup/$USER" in documentation
     assert "/scratch/$USER" in documentation
     assert 'case "${run_root}" in "/scratch/${USER}/"*' in controlled
-    assert '"${partition}" = "gpu-l20"' in controlled
+    assert "--partition=gpu-l20" in controlled
+
+
+def test_hpc4_pipeline_is_dependency_ordered_and_concurrency_limited() -> None:
+    text = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
+    assert "afterok:${materialize_job}" in text
+    assert "afterok:${reward_job}" in text
+    assert "afterok:${adapter_job}" in text
+    assert "%${rollout_concurrency}" in text
+    assert "afterok:${rollout_job}" in text
+    assert "afterok:${rollout_aggregate_job}" in text
+    assert not (ROOT / "scripts" / "hpc4" / "controlled.sbatch").exists()
 
 
 def test_producer_identity_uses_only_current_environment_names(monkeypatch) -> None:

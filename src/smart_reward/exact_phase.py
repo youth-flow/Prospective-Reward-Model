@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import json
 import math
 import os
 import shutil
@@ -46,11 +47,13 @@ from .runtime import (
     validate_seed,
 )
 from .scores import per_sample_scores
-from .seeding import SeedBundle
+from .seeding import SeedBundle, derive_seed
 
 _SPLITS = ("train", "validation", "test")
 _ASSEMBLY_SCHEMA = "exact-delta-assembly/v1"
 _MATERIALIZATION_SCHEMA = "exact-delta-materialization/v1"
+_WORK_SCHEMA = "exact-delta-materialization-work/v1"
+_SHARD_SCHEMA = "exact-delta-candidate-shard/v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,115 @@ class ExactDeltaMaterialization:
     assembly: ExactDeltaAssembly
     candidates: tuple[CandidateNode, ...]
     artifact_directory: Path
+
+
+def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                payload,
+                stream,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"expected JSON object: {path}")
+    return value
+
+
+def _save_candidate_shard(
+    path: Path,
+    *,
+    manifest: Mapping[str, Any],
+    start: int,
+    stop: int,
+    prompt_ids: Sequence[str],
+    policy_scores: torch.Tensor,
+    reward_features: torch.Tensor,
+    payloads: Sequence[Mapping[str, Any]],
+) -> None:
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite materialization shard: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+    try:
+        tensors_path = staging / "tensors.safetensors"
+        require_module("safetensors.torch").save_file(
+            {
+                "policy_scores": policy_scores.contiguous(),
+                "reward_features": reward_features.contiguous(),
+            },
+            str(tensors_path),
+        )
+        payload_path = staging / "payloads.json"
+        _atomic_json(payload_path, {"rows": list(payloads)})
+        _atomic_json(
+            staging / "metadata.json",
+            {
+                "schema": _SHARD_SCHEMA,
+                "manifest": dict(manifest),
+                "start": start,
+                "stop": stop,
+                "prompt_ids": list(prompt_ids),
+                "tensors_sha256": sha256_file(tensors_path),
+                "payloads_sha256": sha256_file(payload_path),
+            },
+        )
+        os.replace(staging, path)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def _load_candidate_shard(
+    path: Path,
+    *,
+    manifest: Mapping[str, Any],
+    start: int,
+    stop: int,
+    prompt_ids: Sequence[str],
+) -> tuple[torch.Tensor, torch.Tensor, list[dict[str, Any]]]:
+    metadata = _read_json(path / "metadata.json")
+    expected_header = {
+        "schema": _SHARD_SCHEMA,
+        "manifest": dict(manifest),
+        "start": start,
+        "stop": stop,
+        "prompt_ids": list(prompt_ids),
+    }
+    for key, expected in expected_header.items():
+        if metadata.get(key) != expected:
+            raise ValueError(f"materialization shard identity mismatch: {path}")
+    tensors_path = path / "tensors.safetensors"
+    payload_path = path / "payloads.json"
+    if metadata.get("tensors_sha256") != sha256_file(tensors_path):
+        raise ValueError(f"materialization shard tensor digest mismatch: {path}")
+    if metadata.get("payloads_sha256") != sha256_file(payload_path):
+        raise ValueError(f"materialization shard payload digest mismatch: {path}")
+    tensors = require_module("safetensors.torch").load_file(str(tensors_path), device="cpu")
+    if set(tensors) != {"policy_scores", "reward_features"}:
+        raise ValueError(f"materialization shard tensor keys mismatch: {path}")
+    payload_value = _read_json(payload_path).get("rows")
+    if not isinstance(payload_value, list) or not all(
+        isinstance(row, dict) for row in payload_value
+    ):
+        raise ValueError(f"materialization shard payload is malformed: {path}")
+    return tensors["policy_scores"], tensors["reward_features"], payload_value
 
 
 def _validate_inputs(
@@ -302,6 +414,7 @@ def materialize_exact_delta(
         raise ValueError("policy tokenizer must provide a non-empty chat_template")
     if getattr(tokenizer, "pad_token_id", None) is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
+    tokenizer.padding_side = "left"
     prompt_limit = int(policy_config["max_prompt_tokens"])
     prompts = load_prompts(
         datasets,
@@ -360,83 +473,170 @@ def materialize_exact_delta(
         "pad_token_id": tokenizer.pad_token_id,
         "use_cache": True,
     }
-    candidate_payloads: list[dict[str, Any]] = []
-    policy_score_rows: list[torch.Tensor] = []
-    reward_feature_rows: list[torch.Tensor] = []
-    with fork_torch_seed(seeds.candidate_generation, target_device):
-        for prompt in prompts:
-            encoded = tokenizer.apply_chat_template(
-                [message.to_dict() for message in prompt.messages],
-                tokenize=True,
-                add_generation_prompt=True,
-                truncation=False,
-                return_tensors="pt",
-                return_dict=True,
-            )
-            prompt_inputs = model_inputs(encoded, target_device)
-            candidates = generate_exact_candidates(
-                policy_model,
-                prompt_inputs["input_ids"],
-                prompt_attention_mask=prompt_inputs["attention_mask"],
-                generation_kwargs=generation_kwargs,
-            )
-            log_probabilities = score_exact_candidates(policy_model, candidates)
-            scores = per_sample_scores(
-                log_probabilities,
-                setup.named_tangent_parameters(),
-                layout=setup.layout,
-            )
-            if scores.shape[0] != num_candidates:
-                raise RuntimeError("policy returned an unexpected candidate count")
-            policy_score_rows.append(scores.to(device="cpu", dtype=torch.float32))
-            with torch.inference_mode():
-                hidden_output = policy_model(
-                    input_ids=candidates.input_ids,
-                    attention_mask=candidates.attention_mask,
-                    use_cache=False,
-                    output_hidden_states=True,
-                    return_dict=True,
-                )
-                features = pool_final_response_hidden_state(
-                    hidden_output.hidden_states,
-                    candidates.response_mask,
-                )
-            reward_feature_rows.append(features.detach().to(device="cpu", dtype=torch.float32))
-            text = prompt_text(prompt)
-            for candidate_index in range(num_candidates):
-                active_response_ids = candidates.input_ids[candidate_index][
-                    candidates.response_mask[candidate_index].bool()
-                ]
-                candidate_payloads.append(
-                    {
-                        "prompt_id": prompt.prompt_id,
-                        "candidate_id": candidate_id(prompt.prompt_id, candidate_index),
-                        "candidate_index": candidate_index,
-                        "split": prompt.split,
-                        "prompt": text,
-                        "response": decode_response(tokenizer, active_response_ids),
-                        "token_ids": tuple(
-                            int(value) for value in candidates.input_ids[candidate_index].tolist()
-                        ),
-                        "response_mask": tuple(
-                            int(value)
-                            for value in candidates.response_mask[candidate_index].tolist()
-                        ),
-                        "terminated_by_eos": bool(
-                            candidates.terminated_by_eos[candidate_index].item()
-                        ),
-                        "reached_max_length": bool(
-                            candidates.reached_max_length[candidate_index].item()
-                        ),
-                    }
-                )
-            del log_probabilities, scores, hidden_output, features, candidates
-
-    policy_scores = torch.stack(policy_score_rows, dim=0)
-    reward_features = torch.stack(reward_feature_rows, dim=0)
     layout_metadata = setup.layout.to_metadata()
     a_state_sha256 = setup.a_state_sha256
-    del setup, policy_model, policy_score_rows, reward_feature_rows, probe_inputs
+    execution = normalized["execution"]
+    prompt_batch_size = int(execution["materialization_prompt_batch_size"])
+    checkpoint_prompts = int(execution["materialization_checkpoint_prompts"])
+    work = destination.parent / f".{destination.name}.materialize-work"
+    work_manifest = {
+        "schema": _WORK_SCHEMA,
+        "config_sha256": config_hash(normalized),
+        "seed": validated_seed,
+        "producer": producer_identity(),
+        "policy_a_sha256": a_state_sha256,
+        "policy_layout": layout_metadata,
+        "num_prompts": len(prompts),
+        "num_candidates": num_candidates,
+        "prompt_batch_size": prompt_batch_size,
+        "checkpoint_prompts": checkpoint_prompts,
+    }
+    work_manifest_path = work / "manifest.json"
+    if work_manifest_path.exists():
+        if _read_json(work_manifest_path) != work_manifest:
+            raise ValueError(f"materialization work identity mismatch: {work}")
+    else:
+        if work.exists() and any(work.iterdir()):
+            raise FileExistsError(f"unidentified materialization work directory: {work}")
+        _atomic_json(work_manifest_path, work_manifest)
+
+    candidate_payloads: list[dict[str, Any]] = []
+    policy_score_chunks: list[torch.Tensor] = []
+    reward_feature_chunks: list[torch.Tensor] = []
+    for checkpoint_start in range(0, len(prompts), checkpoint_prompts):
+        checkpoint_stop = min(checkpoint_start + checkpoint_prompts, len(prompts))
+        checkpoint_records = prompts[checkpoint_start:checkpoint_stop]
+        shard = work / "shards" / f"{checkpoint_start:06d}-{checkpoint_stop:06d}"
+        if shard.exists():
+            shard_scores, shard_features, shard_payloads = _load_candidate_shard(
+                shard,
+                manifest=work_manifest,
+                start=checkpoint_start,
+                stop=checkpoint_stop,
+                prompt_ids=[record.prompt_id for record in checkpoint_records],
+            )
+            print(
+                f"materialize candidates={checkpoint_stop}/{len(prompts)} status=reused",
+                flush=True,
+            )
+        else:
+            score_batches: list[torch.Tensor] = []
+            feature_batches: list[torch.Tensor] = []
+            shard_payloads = []
+            for batch_start in range(checkpoint_start, checkpoint_stop, prompt_batch_size):
+                batch_stop = min(batch_start + prompt_batch_size, checkpoint_stop)
+                batch_records = prompts[batch_start:batch_stop]
+                chats = [
+                    [message.to_dict() for message in prompt.messages] for prompt in batch_records
+                ]
+                encoded = tokenizer.apply_chat_template(
+                    chats,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    padding=True,
+                    truncation=False,
+                    return_tensors="pt",
+                    return_dict=True,
+                )
+                prompt_inputs = model_inputs(encoded, target_device)
+                batch_seed = derive_seed(
+                    seeds.candidate_generation,
+                    f"candidate-batch:{batch_start}",
+                )
+                with fork_torch_seed(batch_seed, target_device):
+                    candidates = generate_exact_candidates(
+                        policy_model,
+                        prompt_inputs["input_ids"],
+                        prompt_attention_mask=prompt_inputs["attention_mask"],
+                        generation_kwargs=generation_kwargs,
+                    )
+                log_probabilities = score_exact_candidates(policy_model, candidates)
+                scores = per_sample_scores(
+                    log_probabilities,
+                    setup.named_tangent_parameters(),
+                    layout=setup.layout,
+                )
+                batch_count = len(batch_records)
+                expected_candidates = batch_count * num_candidates
+                if scores.shape[0] != expected_candidates:
+                    raise RuntimeError("policy returned an unexpected candidate count")
+                score_batches.append(
+                    scores.reshape(batch_count, num_candidates, -1).to(
+                        device="cpu", dtype=torch.float32
+                    )
+                )
+                with torch.inference_mode():
+                    hidden_output = policy_model(
+                        input_ids=candidates.input_ids,
+                        attention_mask=candidates.attention_mask,
+                        use_cache=False,
+                        output_hidden_states=True,
+                        return_dict=True,
+                    )
+                    features = pool_final_response_hidden_state(
+                        hidden_output.hidden_states,
+                        candidates.response_mask,
+                    )
+                feature_batches.append(
+                    features.reshape(batch_count, num_candidates, -1)
+                    .detach()
+                    .to(device="cpu", dtype=torch.float32)
+                )
+                for prompt_index, prompt in enumerate(batch_records):
+                    text = prompt_text(prompt)
+                    for candidate_index in range(num_candidates):
+                        flat_index = prompt_index * num_candidates + candidate_index
+                        active_response_ids = candidates.input_ids[flat_index][
+                            candidates.response_mask[flat_index].bool()
+                        ]
+                        shard_payloads.append(
+                            {
+                                "prompt_id": prompt.prompt_id,
+                                "candidate_id": candidate_id(prompt.prompt_id, candidate_index),
+                                "candidate_index": candidate_index,
+                                "split": prompt.split,
+                                "prompt": text,
+                                "response": decode_response(tokenizer, active_response_ids),
+                                "token_ids": [
+                                    int(value)
+                                    for value in candidates.input_ids[flat_index].tolist()
+                                ],
+                                "response_mask": [
+                                    int(value)
+                                    for value in candidates.response_mask[flat_index].tolist()
+                                ],
+                                "terminated_by_eos": bool(
+                                    candidates.terminated_by_eos[flat_index].item()
+                                ),
+                                "reached_max_length": bool(
+                                    candidates.reached_max_length[flat_index].item()
+                                ),
+                            }
+                        )
+                del log_probabilities, scores, hidden_output, features, candidates, prompt_inputs
+            shard_scores = torch.cat(score_batches, dim=0)
+            shard_features = torch.cat(feature_batches, dim=0)
+            _save_candidate_shard(
+                shard,
+                manifest=work_manifest,
+                start=checkpoint_start,
+                stop=checkpoint_stop,
+                prompt_ids=[record.prompt_id for record in checkpoint_records],
+                policy_scores=shard_scores,
+                reward_features=shard_features,
+                payloads=shard_payloads,
+            )
+            print(
+                f"materialize candidates={checkpoint_stop}/{len(prompts)} status=checkpointed",
+                flush=True,
+            )
+        policy_score_chunks.append(shard_scores)
+        reward_feature_chunks.append(shard_features)
+        candidate_payloads.extend(shard_payloads)
+
+    policy_scores = torch.cat(policy_score_chunks, dim=0)
+    reward_features = torch.cat(reward_feature_chunks, dim=0)
+    del setup, policy_model, policy_score_chunks, reward_feature_chunks, probe_inputs
     gc.collect()
     if target_device.type == "cuda":
         torch.cuda.empty_cache()
@@ -478,6 +678,11 @@ def materialize_exact_delta(
                 device=target_device,
             ).to(device="cpu", dtype=torch.float32)
         )
+        if stop == len(candidate_payloads) or stop % (oracle_batch_size * 64) == 0:
+            print(
+                f"materialize oracle_scores={stop}/{len(candidate_payloads)}",
+                flush=True,
+            )
     raw_oracle_scores = torch.cat(raw_batches).reshape(len(prompts), num_candidates)
     del oracle_model, oracle_tokenizer, raw_batches
     gc.collect()
@@ -566,6 +771,7 @@ def materialize_exact_delta(
         if destination.exists():
             destination.rmdir()
         os.replace(staging, destination)
+        shutil.rmtree(work)
     finally:
         if staging.exists():
             shutil.rmtree(staging)

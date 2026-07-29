@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=prorm-main
 #SBATCH --account=sigroup
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
@@ -15,6 +14,7 @@ umask 027
 : "${PRORM_HF_INVENTORY_SHA256:?}"
 : "${PRORM_GIT_COMMIT:?}"
 : "${PRORM_RUN_ROOT:?}"
+: "${PRORM_STAGE:?}"
 : "${SLURM_ARRAY_TASK_ID:?}"
 
 container=(
@@ -44,11 +44,21 @@ for seed in load_config(sys.argv[1])["run"]["seeds"]:
 PY
 )
 
-index="${SLURM_ARRAY_TASK_ID}"
-(( index >= 0 && index < ${#seeds[@]} )) || { echo "invalid array index" >&2; exit 2; }
-seed="${seeds[index]}"
-output="${PRORM_RUN_ROOT}/seed-${seed}"
-[[ ! -e "${output}" ]] || { echo "refusing existing output: ${output}" >&2; exit 2; }
+task="${SLURM_ARRAY_TASK_ID}"
+policy_args=()
+if [[ "${PRORM_STAGE}" = "rollout-policy" ]]; then
+  mapfile -t policies < <("${container[@]}" python -m smart_reward.cli policy-names "${PRORM_CONFIG}")
+  seed_index=$((task / ${#policies[@]}))
+  policy_index=$((task % ${#policies[@]}))
+  (( seed_index >= 0 && seed_index < ${#seeds[@]} )) || { echo "invalid seed index" >&2; exit 2; }
+  seed="${seeds[seed_index]}"
+  policy_args=(--policy-name "${policies[policy_index]}")
+else
+  (( task >= 0 && task < ${#seeds[@]} )) || { echo "invalid seed index" >&2; exit 2; }
+  seed="${seeds[task]}"
+fi
 
-"${container[@]}" python -m smart_reward.cli run-seed \
-  "${PRORM_CONFIG}" "${output}" --seed "${seed}" --device cuda
+seed_root="${PRORM_RUN_ROOT}/seed-${seed}"
+"${container[@]}" python -m smart_reward.cli run-stage \
+  "${PRORM_CONFIG}" "${seed_root}" \
+  --stage "${PRORM_STAGE}" --seed "${seed}" --device cuda "${policy_args[@]}"

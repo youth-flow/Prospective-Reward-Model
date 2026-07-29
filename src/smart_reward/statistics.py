@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import PROTOCOL, config_hash, validate_config
+from .runtime import producer_identity, sha256_file
 
 
 def _read(path: str | Path) -> dict[str, Any]:
@@ -49,6 +50,14 @@ def aggregate_results(
     rollout_payloads = [_read(path) for path in rollout_result_paths]
     rewards = {payload["seed"]: payload for payload in reward_payloads}
     rollouts = {payload["seed"]: payload for payload in rollout_payloads}
+    reward_paths = {
+        payload["seed"]: Path(path)
+        for payload, path in zip(reward_payloads, reward_result_paths, strict=True)
+    }
+    rollout_paths = {
+        payload["seed"]: Path(path)
+        for payload, path in zip(rollout_payloads, rollout_result_paths, strict=True)
+    }
     if len(rewards) != len(reward_payloads) or len(rollouts) != len(rollout_payloads):
         raise ValueError("aggregate inputs contain duplicate seeds")
     if sorted(rewards) != sorted(expected_seeds) or sorted(rollouts) != sorted(expected_seeds):
@@ -56,6 +65,8 @@ def aggregate_results(
     for payload in (*rewards.values(), *rollouts.values()):
         if payload.get("config_sha256") != digest or payload.get("protocol") != PROTOCOL:
             raise ValueError("aggregate input protocol/config mismatch")
+        if payload.get("producer") != producer_identity():
+            raise ValueError("aggregate input producer identity mismatch")
     reward_metrics: dict[str, Any] = {}
     for method in ("MLE-RM", "Pro-RM"):
         reward_metrics[method] = {
@@ -130,6 +141,15 @@ def aggregate_results(
         "rollout_policy": rollout,
         "rollout_policy_pro_minus_mle": rollout_paired,
         "inference_scope": "descriptive_three_seed_experiment",
+        "producer": producer_identity(),
+        "inputs": {
+            "reward_results": {
+                str(seed): sha256_file(reward_paths[seed]) for seed in expected_seeds
+            },
+            "rollout_results": {
+                str(seed): sha256_file(rollout_paths[seed]) for seed in expected_seeds
+            },
+        },
     }
 
 

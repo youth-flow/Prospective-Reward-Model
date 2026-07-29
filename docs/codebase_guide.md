@@ -5,6 +5,7 @@
 - `configs/main.yaml`: the formal three-seed experiment
 - `configs/smoke.yaml`: a small execution-equivalent profiling configuration
 - `src/smart_reward/config.py`: closed-schema validation and semantic hashing
+- `src/smart_reward/checkpoints.py`: immutable stage receipts bound to production identities
 
 ## Data construction
 
@@ -30,8 +31,11 @@
 ## Fresh rollout and execution
 
 - `rollout.py`: generates new test responses and writes per-response and aggregate utility
+- `pipeline.py`: validates and resumes the dependency-ordered execution stages
 - `statistics.py`: descriptive three-seed aggregation
 - `cli.py`: the only command-line interface
-- `scripts/hpc4/`: staging, smoke, seed, and aggregation Slurm entry points
+- `scripts/hpc4/stage_gpu.sbatch`: GPU array worker for materialize/reward/adapters/rollout
+- `scripts/hpc4/stage_cpu.sbatch`: per-seed rollout assembly worker
+- `scripts/hpc4/submit_pipeline.sh`: submits the complete dependency graph
 
 There is no alternate training or evaluation route in the package.

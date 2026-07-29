@@ -17,6 +17,8 @@ def test_main_config_is_the_frozen_protocol() -> None:
     assert config["policy_update"]["beta_grid"] == [1.0, 2.0, 4.0]
     assert config["policy_update"]["reward_sources"] == ["mle_rm", "pro_rm", "oracle"]
     assert "measured_kl_budget" not in config["policy_update"]
+    assert config["execution"]["rollout_max_parallel_policies"] == 6
+    assert config["execution"]["materialization_checkpoint_prompts"] == 16
 
 
 def test_smoke_uses_same_scientific_choices() -> None:
@@ -38,6 +40,14 @@ def test_smoke_uses_same_scientific_choices() -> None:
         (
             lambda value: value["evaluation"].update(validation_usage="early_stopping"),
             "diagnostics",
+        ),
+        (
+            lambda value: value["execution"].update(rollout_checkpoint_prompts=3),
+            "divisible",
+        ),
+        (
+            lambda value: value["execution"].update(materialization_walltime="unlimited"),
+            "walltime",
         ),
     ],
 )

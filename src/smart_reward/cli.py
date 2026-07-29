@@ -12,7 +12,14 @@ from .config import ConfigError, config_hash, load_config
 from .exact_phase import materialize_exact_delta
 from .exact_policy import export_exact_ngd_adapters
 from .exact_run import run_exact_reward_comparison
-from .rollout import evaluate_policy_rollouts
+from .pipeline import (
+    run_adapter_stage,
+    run_materialization_stage,
+    run_policy_rollout_stage,
+    run_reward_stage,
+    run_rollout_aggregate_stage,
+)
+from .rollout import evaluate_policy_rollouts, policy_instance_names
 from .statistics import aggregate_results
 
 
@@ -83,44 +90,86 @@ def _evaluate_rollouts(arguments: argparse.Namespace) -> int:
 def _run_seed(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
     root = Path(arguments.output_dir)
-    if root.exists():
-        raise FileExistsError(f"refusing to overwrite seed directory: {root}")
-    artifact = root / "artifact"
-    reward_result = root / "reward_result.json"
-    adapters = root / "adapters"
-    rollout = root / "policy_utility"
-    materialize_exact_delta(
+    run_materialization_stage(
         config,
-        seed=arguments.seed,
-        artifact_dir=artifact,
-        device=arguments.device,
-        local_files_only=not arguments.allow_download,
-    )
-    run_exact_reward_comparison(
-        config,
-        artifact,
-        reward_result,
-        seed=arguments.seed,
-        device=arguments.device,
-    )
-    export_exact_ngd_adapters(
-        config,
-        artifact,
-        reward_result,
-        adapters,
+        root,
         seed=arguments.seed,
         device=arguments.device,
         local_files_only=not arguments.allow_download,
     )
-    evaluate_policy_rollouts(
+    run_reward_stage(
         config,
-        artifact,
-        adapters,
-        rollout,
+        root,
+        seed=arguments.seed,
+        device=arguments.device,
+    )
+    run_adapter_stage(
+        config,
+        root,
         seed=arguments.seed,
         device=arguments.device,
         local_files_only=not arguments.allow_download,
     )
+    for policy_name in policy_instance_names(config):
+        run_policy_rollout_stage(
+            config,
+            root,
+            policy_name=policy_name,
+            seed=arguments.seed,
+            device=arguments.device,
+            local_files_only=not arguments.allow_download,
+        )
+    run_rollout_aggregate_stage(config, root, seed=arguments.seed)
+    return 0
+
+
+def _run_stage(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    common = {"seed": arguments.seed}
+    if arguments.stage == "materialize":
+        run_materialization_stage(
+            config,
+            arguments.seed_root,
+            **common,
+            device=arguments.device,
+            local_files_only=not arguments.allow_download,
+        )
+    elif arguments.stage == "reward":
+        run_reward_stage(
+            config,
+            arguments.seed_root,
+            **common,
+            device=arguments.device,
+        )
+    elif arguments.stage == "adapters":
+        run_adapter_stage(
+            config,
+            arguments.seed_root,
+            **common,
+            device=arguments.device,
+            local_files_only=not arguments.allow_download,
+        )
+    elif arguments.stage == "rollout-policy":
+        if arguments.policy_name is None:
+            raise ValueError("--policy-name is required for rollout-policy")
+        run_policy_rollout_stage(
+            config,
+            arguments.seed_root,
+            **common,
+            policy_name=arguments.policy_name,
+            device=arguments.device,
+            local_files_only=not arguments.allow_download,
+        )
+    elif arguments.stage == "rollout-aggregate":
+        run_rollout_aggregate_stage(config, arguments.seed_root, **common)
+    else:  # pragma: no cover - argparse enforces choices
+        raise ValueError(f"unknown stage: {arguments.stage}")
+    return 0
+
+
+def _policy_names(arguments: argparse.Namespace) -> int:
+    for name in policy_instance_names(load_config(arguments.config)):
+        print(name)
     return 0
 
 
@@ -130,7 +179,15 @@ def _aggregate(arguments: argparse.Namespace) -> int:
         arguments.reward_results,
         arguments.rollout_results,
     )
-    _write_json(Path(arguments.output), payload)
+    output = Path(arguments.output)
+    if output.exists():
+        with output.open("r", encoding="utf-8") as stream:
+            if json.load(stream) != payload:
+                raise ValueError(f"existing aggregate does not match validated inputs: {output}")
+        print("stage=three-seed-aggregate status=reused", flush=True)
+    else:
+        _write_json(output, payload)
+        print("stage=three-seed-aggregate status=complete", flush=True)
     return 0
 
 
@@ -186,6 +243,22 @@ def build_parser() -> argparse.ArgumentParser:
     seed.add_argument("output_dir")
     _add_execution_options(seed)
     seed.set_defaults(handler=_run_seed)
+
+    stage = commands.add_parser("run-stage")
+    stage.add_argument("config")
+    stage.add_argument("seed_root")
+    stage.add_argument(
+        "--stage",
+        required=True,
+        choices=("materialize", "reward", "adapters", "rollout-policy", "rollout-aggregate"),
+    )
+    stage.add_argument("--policy-name")
+    _add_execution_options(stage)
+    stage.set_defaults(handler=_run_stage)
+
+    policies = commands.add_parser("policy-names")
+    policies.add_argument("config")
+    policies.set_defaults(handler=_policy_names)
 
     aggregate = commands.add_parser("aggregate")
     aggregate.add_argument("config")

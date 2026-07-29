@@ -91,3 +91,16 @@ evaluation:
     metrics:
       [oracle_reward, reward_improvement, forward_kl, regularized_utility,
        utility_improvement, oracle_ngd_regret]
+
+execution:
+  materialization_prompt_batch_size: 1
+  materialization_checkpoint_prompts: 16
+  rollout_prompt_batch_size: 2
+  rollout_checkpoint_prompts: 16
+  rollout_max_parallel_policies: 6
+  materialization_walltime: "24:00:00"
+  reward_walltime: "12:00:00"
+  adapter_walltime: "04:00:00"
+  rollout_walltime: "12:00:00"
+  rollout_aggregate_walltime: "02:00:00"
+  three_seed_aggregate_walltime: "01:00:00"
