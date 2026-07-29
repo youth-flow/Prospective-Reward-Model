@@ -79,6 +79,21 @@ def test_compute_jobs_verify_the_image_revision() -> None:
         assert "verify_image_revision" in text
 
 
+def test_compute_jobs_use_the_hpc4_apptainer_entrypoint() -> None:
+    helper = (ROOT / "scripts" / "hpc4" / "runtime.sh").read_text(encoding="utf-8")
+    assert "apptainer exec --no-mount /opt/knem-1.1.4.90mlnx3" in helper
+    for name in (
+        "gpu_smoke.sbatch",
+        "hf_stage.sbatch",
+        "stage_gpu.sbatch",
+        "stage_cpu.sbatch",
+        "aggregate.sbatch",
+    ):
+        text = (ROOT / "scripts" / "hpc4" / name).read_text(encoding="utf-8")
+        assert "prorm_apptainer_exec" in text
+        assert "apptainer exec" not in text
+
+
 @pytest.mark.parametrize("revision", ["a" * 40, json.dumps("a" * 40)])
 def test_image_revision_parser_accepts_apptainer_label_encodings(revision: str) -> None:
     payload = {"data": {"attributes": {"labels": {"org.opencontainers.image.revision": revision}}}}

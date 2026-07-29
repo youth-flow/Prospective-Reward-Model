@@ -24,6 +24,7 @@ printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" \
 [[ -z "$(git -C "${PRORM_REPO_ROOT}" status --porcelain)" ]]
 source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
 verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+source "${PRORM_REPO_ROOT}/scripts/hpc4/runtime.sh"
 
 report="${PRORM_REPORT_ROOT}/gpu-smoke-${SLURM_JOB_ID}.txt"
 [[ ! -e "${report}" ]] || {
@@ -45,7 +46,7 @@ echo "git_commit=${PRORM_GIT_COMMIT}"
 echo "image_sha256=${PRORM_IMAGE_SHA256}"
 nvidia-smi
 
-apptainer exec --cleanenv --nv \
+prorm_apptainer_exec --cleanenv --nv \
   --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT}" \
   --pwd "${PRORM_REPO_ROOT}" \
   --env "PYTHONPATH=${PRORM_REPO_ROOT}/src" \
@@ -108,12 +109,12 @@ print("gpu", torch.cuda.get_device_name(0))
 print("cuda_fp32_loss", loss.item())
 PY
 
-apptainer exec --cleanenv \
+prorm_apptainer_exec --cleanenv \
   --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT}" \
   --pwd "${PRORM_REPO_ROOT}" \
   --env "PYTHONPATH=${PRORM_REPO_ROOT}/src" \
   "${PRORM_IMAGE}" \
   python -m smart_reward.cli config-check configs/smoke.yaml
 
-apptainer exec --cleanenv "${PRORM_IMAGE}" python -m pip check
+prorm_apptainer_exec --cleanenv "${PRORM_IMAGE}" python -m pip check
 echo "status=passed"

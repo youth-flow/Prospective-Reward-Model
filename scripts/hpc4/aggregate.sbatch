@@ -16,8 +16,9 @@ set -euo pipefail
 
 source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
 verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+source "${PRORM_REPO_ROOT}/scripts/hpc4/runtime.sh"
 
-container=(apptainer exec --cleanenv
+container=(prorm_apptainer_exec --cleanenv
   --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_RUN_ROOT}:${PRORM_RUN_ROOT}"
   --pwd "${PRORM_REPO_ROOT}" --env "PYTHONPATH=${PRORM_REPO_ROOT}/src"
   --env "PRORM_GIT_COMMIT=${PRORM_GIT_COMMIT}"

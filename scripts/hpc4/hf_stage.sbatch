@@ -16,7 +16,8 @@ set -euo pipefail
 mkdir -p "${PRORM_HF_CACHE}"
 source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
 verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
-apptainer exec --cleanenv \
+source "${PRORM_REPO_ROOT}/scripts/hpc4/runtime.sh"
+prorm_apptainer_exec --cleanenv \
   --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}" \
   --pwd "${PRORM_REPO_ROOT}" \
   --env "PYTHONPATH=${PRORM_REPO_ROOT}/src" \

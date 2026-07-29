@@ -8,6 +8,11 @@ Persistent source, images, Hugging Face assets, reports, and archives live under
 `/project/sigroup/yyangjo`. Active outputs live under `/scratch/yyangjo`; inactive scratch
 files may be removed after 60 days.
 
+All compute jobs use `scripts/hpc4/runtime.sh`, which disables HPC4's stale
+`/opt/knem-1.1.4.90mlnx3` bind before starting Apptainer. Keep this site workaround on every
+container execution path unless HPC4 removes the injected bind and a fresh compute-node probe
+proves it is no longer needed.
+
 ## One-time setup
 
 ```bash
