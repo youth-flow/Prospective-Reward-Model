@@ -79,4 +79,6 @@ Final adapter metadata binds all nine component-receipt hashes.
 This implementation change has `adapters` as its earliest affected stage. No formal adapter
 has yet been produced for the current three-seed experiment, so it causes no recomputation:
 the nine adapters and all downstream stages will be computed for the first time after the
-formal reward receipts pass.
+formal reward receipts pass. The checkpoint identity accepts the artifact's actual
+JSON-serialized LoRA layout (a list of tensor records) and hashes that complete structure;
+it does not reinterpret or modify the layout.

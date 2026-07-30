@@ -126,7 +126,7 @@ def _component_fixed_fields(
     beta: float,
     direction: torch.Tensor,
     lora_a_sha256: str,
-    lora_layout: Mapping[str, Any],
+    lora_layout: object,
     producer: Mapping[str, str],
 ) -> dict[str, Any]:
     direction_values = direction.detach().to(dtype=torch.float64, device="cpu").tolist()
@@ -224,7 +224,7 @@ def validate_adapter_metadata(
         raise ValueError("adapter metadata must describe exactly nine adapters")
     lora_layout = metadata.get("lora_layout")
     directions = metadata.get("directions")
-    if not isinstance(lora_layout, dict) or not isinstance(directions, dict):
+    if not isinstance(lora_layout, (dict, list)) or not isinstance(directions, dict):
         raise ValueError("adapter metadata geometry is missing")
     for name, record in records.items():
         if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
@@ -312,7 +312,7 @@ def export_exact_ngd_adapters(
     ]
     lora_a_sha256 = evidence["policy_a_sha256"]
     lora_layout = evidence["policy_layout"]
-    if not isinstance(lora_a_sha256, str) or not isinstance(lora_layout, dict):
+    if not isinstance(lora_a_sha256, str) or not isinstance(lora_layout, (dict, list)):
         raise ValueError("materialization LoRA evidence is malformed")
     current_producer = producer_identity()
     target = Path(output_dir)

@@ -12,8 +12,8 @@ from smart_reward.exact_policy import export_exact_ngd_adapters, validate_adapte
 
 
 class _FakeLayout:
-    def to_metadata(self) -> dict[str, object]:
-        return {"names": ["adapter"], "total": 2}
+    def to_metadata(self) -> list[dict[str, object]]:
+        return [{"name": "adapter", "shape": [1, 2], "numel": 2, "offset": 0}]
 
 
 class _FakeModel:
@@ -52,7 +52,9 @@ def test_adapters_resume_independently_and_quarantine_only_invalid_component(
             {
                 "evidence": {
                     "policy_a_sha256": "1" * 64,
-                    "policy_layout": {"names": ["adapter"], "total": 2},
+                    "policy_layout": [
+                        {"name": "adapter", "shape": [1, 2], "numel": 2, "offset": 0}
+                    ],
                 }
             }
         )
