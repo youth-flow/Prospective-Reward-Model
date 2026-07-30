@@ -170,6 +170,82 @@ def test_mle_uses_identifiable_coordinates_for_underdetermined_head() -> None:
     assert torch.allclose(result.weight, projected, atol=1.0e-8, rtol=1.0e-8)
 
 
+def test_mle_full_rank_coordinates_are_exact_and_orthogonally_scaled() -> None:
+    generator = torch.Generator().manual_seed(23)
+    design = torch.randn(40, 5, generator=generator, dtype=torch.float64)
+    design = design * torch.tensor(
+        [1.0e-4, 1.0e-2, 1.0, 10.0, 100.0],
+        dtype=torch.float64,
+    )
+
+    coordinates, head_map = exact_module._mle_parameterization(
+        design,
+        maximum_identifiable_rank=design.shape[1],
+        source_epsilon=torch.finfo(torch.float64).eps,
+    )
+
+    assert head_map is not None
+    assert torch.allclose(design @ head_map, coordinates, atol=1.0e-9, rtol=1.0e-9)
+    gram = coordinates.mT @ coordinates
+    scale_squared = torch.diagonal(gram).mean()
+    assert torch.allclose(
+        gram,
+        torch.eye(gram.shape[0], dtype=gram.dtype) * scale_squared,
+        atol=1.0e-7,
+        rtol=1.0e-10,
+    )
+    residual = torch.randn(40, generator=generator, dtype=torch.float64)
+    assert torch.linalg.vector_norm(design.mT @ residual) <= (
+        torch.linalg.vector_norm(coordinates.mT @ residual) * (1.0 + 1.0e-12)
+    )
+
+
+def test_mle_converges_for_ill_conditioned_full_rank_features() -> None:
+    generator = torch.Generator().manual_seed(29)
+    prompts, candidates, reward_dimension = 12, 6, 5
+    feature_scales = torch.tensor(
+        [1.0e-3, 3.0e-2, 1.0, 3.0e1, 1.0e3],
+        dtype=torch.float64,
+    )
+    features = (
+        torch.randn(
+            prompts,
+            candidates,
+            reward_dimension,
+            generator=generator,
+            dtype=torch.float64,
+        )
+        * feature_scales
+    )
+    oracle_weight = torch.tensor([0.3, -0.2, 0.1, 0.2, -0.3], dtype=torch.float64) / feature_scales
+    split = ExactSplitData(
+        prompt_ids=tuple(f"full-rank-{index}" for index in range(prompts)),
+        policy_scores=torch.randn(
+            prompts,
+            candidates,
+            3,
+            generator=generator,
+            dtype=torch.float64,
+        ),
+        reward_features=features,
+        true_rewards=features @ oracle_weight,
+    )
+
+    result = fit_mle_reward(
+        split,
+        MLETrainingConfig(
+            max_iterations=50,
+            history_size=20,
+            gradient_tolerance=1.0e-7,
+            change_tolerance=1.0e-12,
+            microbatch_size=64,
+        ),
+    )
+
+    assert result.converged
+    assert result.gradient_norm <= 1.0e-7
+
+
 def test_pro_nested_solve_tightens_inner_accuracy_and_preconditions_outer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -216,7 +292,45 @@ def test_reward_metrics_are_prompt_aggregated_and_finite() -> None:
     assert result.probability_mse >= 0.0
     assert 0.0 <= result.pairwise_accuracy <= 1.0
     assert result.centered_reward_nmse >= 0.0
+    assert result.centered_reward_nmse_defined_fraction == 1.0
     assert all(math.isfinite(value) for value in result.to_dict().values())
+
+
+def test_centered_reward_nmse_records_and_skips_zero_energy_prompts() -> None:
+    split = make_split(31, 7)
+    rewards = split.true_rewards.clone()
+    rewards[0] = 2.0
+    with_zero_energy = ExactSplitData(
+        prompt_ids=split.prompt_ids,
+        policy_scores=split.policy_scores,
+        reward_features=split.reward_features,
+        true_rewards=rewards,
+    )
+
+    result = evaluate_reward_head(
+        with_zero_energy,
+        torch.tensor([1.5, -0.7], dtype=torch.float64),
+    )
+
+    assert result.centered_reward_nmse >= 0.0
+    assert result.centered_reward_nmse_defined_fraction == pytest.approx(6.0 / 7.0)
+    assert all(math.isfinite(value) for value in result.to_dict().values())
+
+
+def test_centered_reward_nmse_rejects_fully_degenerate_oracle() -> None:
+    split = make_split(32, 3)
+    degenerate = ExactSplitData(
+        prompt_ids=split.prompt_ids,
+        policy_scores=split.policy_scores,
+        reward_features=split.reward_features,
+        true_rewards=torch.ones_like(split.true_rewards),
+    )
+
+    with pytest.raises(ValueError, match="positive energy for some prompt"):
+        evaluate_reward_head(
+            degenerate,
+            torch.tensor([1.5, -0.7], dtype=torch.float64),
+        )
 
 
 def test_oracle_direction_has_zero_local_regret() -> None:

@@ -299,7 +299,7 @@ def _mle_parameterization(
     maximum_identifiable_rank: int,
     source_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Return stable MLE coordinates and an optional map back to head space.
+    """Return stable MLE coordinates and a map back to head space.
 
     Complete pairwise edges from one prompt span at most ``M - 1`` directions.
     When that structural rank bound is below the head dimension, optimizing the
@@ -308,10 +308,32 @@ def _mle_parameterization(
     scale makes the configured coordinate-gradient tolerance upper-bound the
     original head-gradient norm.  Mapping through the pseudoinverse returns the
     minimum-norm head.
+
+    Once the design can be full column rank, a reduced QR supplies the same
+    scaled orthogonal coordinates without changing the represented logits.  A
+    numerically rank-deficient QR falls back to the rank-revealing SVD path.
     """
 
     if maximum_identifiable_rank >= design.shape[1]:
-        return design, None
+        orthogonal, upper = torch.linalg.qr(design, mode="reduced")
+        diagonal = torch.diagonal(upper).abs()
+        tolerance = max(design.shape) * source_epsilon * diagonal.max()
+        if bool((diagonal > tolerance).all()):
+            coordinate_scale = torch.linalg.vector_norm(upper)
+            identity = torch.eye(
+                upper.shape[0],
+                dtype=upper.dtype,
+                device=upper.device,
+            )
+            head_map = torch.linalg.solve_triangular(
+                upper,
+                identity * coordinate_scale,
+                upper=True,
+            )
+            return (
+                (orthogonal * coordinate_scale).contiguous(),
+                head_map.contiguous(),
+            )
     left, singular_values, right_transpose = torch.linalg.svd(
         design,
         full_matrices=False,
@@ -532,6 +554,7 @@ class RewardEvaluation:
     probability_mse: float
     pairwise_accuracy: float
     centered_reward_nmse: float
+    centered_reward_nmse_defined_fraction: float
 
     def to_dict(self) -> dict[str, float]:
         return {
@@ -540,6 +563,7 @@ class RewardEvaluation:
             "probability_mse": self.probability_mse,
             "pairwise_accuracy": self.pairwise_accuracy,
             "centered_reward_nmse": self.centered_reward_nmse,
+            "centered_reward_nmse_defined_fraction": (self.centered_reward_nmse_defined_fraction),
         }
 
 
@@ -580,14 +604,22 @@ def evaluate_reward_head(split: ExactSplitData, weight: torch.Tensor) -> RewardE
     centered_target = target_rewards - target_rewards.mean(dim=1, keepdim=True)
     centered_squared_error = (centered_predicted - centered_target).square().mean(dim=1)
     centered_target_energy = centered_target.square().mean(dim=1)
-    if bool((centered_target_energy <= 0.0).any()):
-        raise ValueError("centered oracle reward must have positive energy for every prompt")
+    positive_energy = centered_target_energy > 0.0
+    if not bool(positive_energy.any()):
+        raise ValueError("centered oracle reward must have positive energy for some prompt")
     return RewardEvaluation(
         pair_kl=float((prompt_nll - oracle_entropy).mean().item()),
         soft_btl_nll=float(prompt_nll.mean().item()),
         probability_mse=float(prompt_probability_mse.mean().item()),
         pairwise_accuracy=float(correct.mean(dim=1).mean().item()),
-        centered_reward_nmse=float((centered_squared_error / centered_target_energy).mean().item()),
+        centered_reward_nmse=float(
+            (centered_squared_error[positive_energy] / centered_target_energy[positive_energy])
+            .mean()
+            .item()
+        ),
+        centered_reward_nmse_defined_fraction=float(
+            positive_energy.to(dtype=predicted.dtype).mean().item()
+        ),
     )
 
 

@@ -69,6 +69,11 @@ Metrics are averaged over edges within each prompt, then over test prompts:
 Validation reports the same metrics for diagnostics only. It does not select an epoch,
 head, beta, or damping value.
 
+Prompt-centered reward NMSE is defined only for prompts whose oracle rewards have positive
+centered energy. Pairwise metrics continue to include every prompt, while the reward result
+also records the fraction of prompts on which centered NMSE is defined. A split in which
+every prompt has zero oracle energy fails closed.
+
 ## Policy update
 
 For each source in `{MLE-RM, Pro-RM, r*}`, use only the train split to solve one
