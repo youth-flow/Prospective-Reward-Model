@@ -59,3 +59,17 @@ This change does not alter `configs/main.yaml`, seeds, data/model revisions, exa
 targets, Fisher estimator, damping, solver gates, beta grid, rollout budget, metrics, or the
 estimand. Formal retry remains required under a new immutable producer only after local
 tests, CI, image build, GPU gate, and an affected-path smoke pass.
+
+## Adapter recovery implementation
+
+The same change series makes each of the nine adapter exports an independent atomic
+checkpoint. Every adapter now has a component receipt binding config, artifact, reward
+result, seed, method, beta, direction, fixed LoRA-A/layout, producer, and all output file
+hashes. A retry reuses each valid component without reloading the policy; an invalid
+component is moved to a recoverable rejection directory and only that adapter is rebuilt.
+Final adapter metadata binds all nine component-receipt hashes.
+
+This implementation change has `adapters` as its earliest affected stage. No formal adapter
+has yet been produced for the current three-seed experiment, so it causes no recomputation:
+the nine adapters and all downstream stages will be computed for the first time after the
+formal reward receipts pass.

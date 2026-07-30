@@ -20,7 +20,7 @@ from .checkpoints import (
 from .config import config_hash, validate_config
 from .exact_phase import materialize_exact_delta
 from .exact_policy import SCHEMA as ADAPTER_SCHEMA
-from .exact_policy import export_exact_ngd_adapters
+from .exact_policy import export_exact_ngd_adapters, validate_adapter_metadata
 from .exact_run import load_exact_reward_comparison, run_exact_reward_comparison
 from .rollout import (
     assemble_policy_rollouts,
@@ -406,26 +406,13 @@ def _validated_reward(
 
 
 def _adapter_outputs(adapters: Path) -> dict[str, str]:
-    metadata_path = adapters / "metadata.json"
-    metadata = _read_json(metadata_path)
+    metadata = validate_adapter_metadata(
+        adapters,
+        expected_producer=producer_identity(),
+    )
     if metadata.get("schema") != ADAPTER_SCHEMA:
         raise ValueError("unsupported adapter metadata")
-    if metadata.get("producer") != producer_identity():
-        raise ValueError("adapter producer identity mismatch")
-    records = metadata.get("adapters")
-    if not isinstance(records, dict) or len(records) != 9:
-        raise ValueError("adapter metadata must describe exactly nine adapters")
-    for name, record in records.items():
-        if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
-            raise ValueError(f"adapter file inventory is missing: {name}")
-        for relative, expected in record["files"].items():
-            relative_path = Path(relative)
-            if relative_path.is_absolute() or ".." in relative_path.parts:
-                raise ValueError(f"adapter file inventory escapes its directory: {name}")
-            path = adapters / name / relative
-            if sha256_file(path) != expected:
-                raise ValueError(f"adapter file digest mismatch: {name}/{relative}")
-    return {"adapter_metadata": sha256_file(metadata_path)}
+    return {"adapter_metadata": sha256_file(adapters / "metadata.json")}
 
 
 def run_adapter_stage(
@@ -441,17 +428,16 @@ def run_adapter_stage(
     artifact_outputs = _validated_materialization(normalized, root, seed=seed)
     _, reward_identity = _validated_reward(normalized, root, seed=seed)
     adapters = root / "adapters"
-    if not adapters.exists():
-        print("stage=adapters status=running", flush=True)
-        export_exact_ngd_adapters(
-            normalized,
-            root / "artifact",
-            root / "reward_result.json",
-            adapters,
-            seed=seed,
-            device=device,
-            local_files_only=local_files_only,
-        )
+    print("stage=adapters status=running", flush=True)
+    export_exact_ngd_adapters(
+        normalized,
+        root / "artifact",
+        root / "reward_result.json",
+        adapters,
+        seed=seed,
+        device=device,
+        local_files_only=local_files_only,
+    )
     outputs = _adapter_outputs(adapters)
     metadata = _read_json(adapters / "metadata.json")
     if metadata.get("artifact_metadata_sha256") != artifact_outputs["artifact_metadata"]:
