@@ -81,6 +81,45 @@ def solve_natural_direction(
     return result.solution
 
 
+@torch.no_grad()
+def validate_natural_direction(
+    split: ExactSplitData,
+    rewards: torch.Tensor,
+    direction: torch.Tensor,
+    settings: GeometrySettings,
+) -> float:
+    """Validate a saved natural direction without repeating its PCG solve."""
+
+    if rewards.shape != split.true_rewards.shape:
+        raise ValueError("rewards must have shape (P, M)")
+    if (
+        not isinstance(direction, torch.Tensor)
+        or direction.shape != (split.policy_dimension,)
+        or not bool(torch.isfinite(direction).all())
+    ):
+        raise ValueError("direction must be a finite policy-tangent vector")
+    _, damped, _ = _geometry(split, settings)
+    moment = policy_reward_moment(
+        split.policy_scores.to(dtype=torch.float64),
+        rewards.to(device=split.policy_scores.device, dtype=torch.float64),
+    )
+    moment_norm = torch.linalg.vector_norm(moment)
+    if float(moment_norm.item()) == 0.0:
+        raise ValueError("natural-direction equation has a zero right-hand side")
+    candidate = direction.to(
+        device=split.policy_scores.device,
+        dtype=torch.float64,
+    )
+    residual = damped.matvec(candidate) - moment
+    relative_residual = float((torch.linalg.vector_norm(residual) / moment_norm).item())
+    if not math.isfinite(relative_residual) or relative_residual > settings.cg_tolerance:
+        raise RuntimeError(
+            "reused natural direction did not pass recomputed residual gate: "
+            f"relative_residual={relative_residual:.3e}"
+        )
+    return relative_residual
+
+
 def _quadratic(vector: torch.Tensor, operator: DampedEmpiricalFisher) -> torch.Tensor:
     return torch.dot(vector, operator.matvec(vector))
 
@@ -231,4 +270,5 @@ __all__ = [
     "evaluate_reference_policy",
     "solve_natural_direction",
     "summarize_rollouts",
+    "validate_natural_direction",
 ]

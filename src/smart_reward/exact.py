@@ -304,13 +304,13 @@ def _mle_parameterization(
     Complete pairwise edges from one prompt span at most ``M - 1`` directions.
     When that structural rank bound is below the head dimension, optimizing the
     1536-dimensional head directly is needlessly singular.  A compact SVD gives
-    scaled orthogonal coordinates for exactly the same feasible logits.  The
-    scale makes the configured coordinate-gradient tolerance upper-bound the
-    original head-gradient norm.  Mapping through the pseudoinverse returns the
-    minimum-norm head.
+    whitened coordinates for exactly the same feasible logits.  Scaling the
+    orthonormal design by ``sqrt(num_edges)`` makes its empirical Gram matrix
+    the identity, matching the mean-reduced likelihood's natural curvature
+    scale.  Mapping through the pseudoinverse returns the minimum-norm head.
 
     Once the design can be full column rank, a reduced QR supplies the same
-    scaled orthogonal coordinates without changing the represented logits.  A
+    whitened coordinates without changing the represented logits.  A
     numerically rank-deficient QR falls back to the rank-revealing SVD path.
     """
 
@@ -319,7 +319,7 @@ def _mle_parameterization(
         diagonal = torch.diagonal(upper).abs()
         tolerance = max(design.shape) * source_epsilon * diagonal.max()
         if bool((diagonal > tolerance).all()):
-            coordinate_scale = torch.linalg.vector_norm(upper)
+            coordinate_scale = math.sqrt(design.shape[0])
             identity = torch.eye(
                 upper.shape[0],
                 dtype=upper.dtype,
@@ -345,7 +345,7 @@ def _mle_parameterization(
     if rank < 1:
         raise RuntimeError("MLE edge design has zero numerical rank")
     retained_singular_values = singular_values[:rank]
-    coordinate_scale = torch.linalg.vector_norm(retained_singular_values)
+    coordinate_scale = math.sqrt(design.shape[0])
     coordinate_design = (left[:, :rank] * coordinate_scale).contiguous()
     head_map = (
         right_transpose[:rank].mT * (coordinate_scale / retained_singular_values).unsqueeze(0)
@@ -374,9 +374,9 @@ def fit_mle_reward(
     if not isinstance(effective, MLETrainingConfig):
         raise TypeError("config must be MLETrainingConfig")
     design, target_margins = _edge_design(train)
-    source_epsilon = torch.finfo(design.dtype).eps
     design = design.to(dtype=torch.float64)
     target_margins = target_margins.to(dtype=torch.float64)
+    source_epsilon = torch.finfo(design.dtype).eps
     targets = torch.sigmoid(target_margins).detach()
     coordinate_design, head_map = _mle_parameterization(
         design,
@@ -389,46 +389,58 @@ def fit_mle_reward(
         device=train.reward_features.device,
         requires_grad=True,
     )
-    optimizer = torch.optim.LBFGS(
-        [parameter],
-        lr=1.0,
-        max_iter=effective.max_iterations,
-        history_size=effective.history_size,
-        tolerance_grad=effective.gradient_tolerance,
-        # In identifiable logit coordinates, tiny loss changes can coexist with
-        # a head-space gradient above the scientific convergence gate.  Keep
-        # LBFGS gradient-controlled for this structurally underdetermined case.
-        tolerance_change=(
-            effective.change_tolerance
-            if head_map is None
-            else min(effective.change_tolerance, torch.finfo(design.dtype).eps)
-        ),
-        line_search_fn="strong_wolfe",
-    )
     closure_calls = 0
-
-    def closure() -> torch.Tensor:
-        nonlocal closure_calls
-        closure_calls += 1
-        optimizer.zero_grad(set_to_none=True)
-        objective = torch.zeros((), dtype=parameter.dtype, device=parameter.device)
-        total = coordinate_design.shape[0]
-        for start in range(0, total, effective.microbatch_size):
-            stop = min(start + effective.microbatch_size, total)
-            chunk_loss = F.binary_cross_entropy_with_logits(
-                coordinate_design[start:stop] @ parameter,
-                targets[start:stop],
-            )
-            scale = (stop - start) / total
-            (chunk_loss * scale).backward()
-            objective = objective + chunk_loss.detach() * scale
-        return objective
-
-    optimizer.step(closure)
-    detached_parameter = parameter.detach()
-    detached = detached_parameter.clone() if head_map is None else head_map @ detached_parameter
+    initial_parameter = parameter.detach()
+    detached = initial_parameter.clone() if head_map is None else head_map @ initial_parameter
     objective, full_gradient = _mle_objective_and_gradient(design, targets, detached)
     gradient_norm = float(torch.linalg.vector_norm(full_gradient).item())
+    while closure_calls < effective.max_iterations and gradient_norm > effective.gradient_tolerance:
+        remaining = effective.max_iterations - closure_calls
+        optimizer = torch.optim.LBFGS(
+            [parameter],
+            lr=1.0,
+            max_iter=remaining,
+            max_eval=remaining,
+            history_size=effective.history_size,
+            tolerance_grad=(effective.gradient_tolerance if head_map is None else 0.0),
+            # In identifiable logit coordinates, tiny parameter steps and loss
+            # changes can coexist with a head-space gradient above the scientific
+            # convergence gate.  Disable those two LBFGS progress heuristics when
+            # a coordinate map is active and let the gradient gate or iteration
+            # budget decide termination.
+            tolerance_change=(effective.change_tolerance if head_map is None else 0.0),
+            line_search_fn="strong_wolfe",
+        )
+        calls_before_restart = closure_calls
+
+        def closure(active_optimizer: torch.optim.LBFGS = optimizer) -> torch.Tensor:
+            nonlocal closure_calls
+            closure_calls += 1
+            active_optimizer.zero_grad(set_to_none=True)
+            chunked_objective = torch.zeros(
+                (),
+                dtype=parameter.dtype,
+                device=parameter.device,
+            )
+            total = coordinate_design.shape[0]
+            for start in range(0, total, effective.microbatch_size):
+                stop = min(start + effective.microbatch_size, total)
+                chunk_loss = F.binary_cross_entropy_with_logits(
+                    coordinate_design[start:stop] @ parameter,
+                    targets[start:stop],
+                )
+                scale = (stop - start) / total
+                (chunk_loss * scale).backward()
+                chunked_objective = chunked_objective + chunk_loss.detach() * scale
+            return chunked_objective
+
+        optimizer.step(closure)
+        detached_parameter = parameter.detach()
+        detached = detached_parameter.clone() if head_map is None else head_map @ detached_parameter
+        objective, full_gradient = _mle_objective_and_gradient(design, targets, detached)
+        gradient_norm = float(torch.linalg.vector_norm(full_gradient).item())
+        if closure_calls == calls_before_restart:
+            break
     return RewardFitResult(
         method="MLE-RM",
         weight=detached,
@@ -450,23 +462,15 @@ def _require_converged(name: str, result: PCGResult) -> torch.Tensor:
 
 
 @torch.no_grad()
-def fit_pro_reward(
+def _pro_reward_problem(
     train: ExactSplitData,
-    config: ProTrainingConfig | None = None,
-) -> RewardFitResult:
-    """Solve the exact linear-head ProRM normal equation with nested CG.
-
-    For ``G = A X`` and ``g* = A r*``, the normal equation is
-
-    ``G.T (F + lambda I)^-1 G w = G.T (F + lambda I)^-1 g*``.
-
-    The outer solve is in reward-head coordinates. Each Hessian-vector product
-    applies the inverse damped Fisher with an inner PCG solve.
-    """
-
-    effective = ProTrainingConfig() if config is None else config
-    if not isinstance(effective, ProTrainingConfig):
-        raise TypeError("config must be ProTrainingConfig")
+    effective: ProTrainingConfig,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    DampedEmpiricalFisher,
+    float,
+]:
     solve_dtype = torch.float64
     scores = train.policy_scores.to(dtype=solve_dtype)
     features = train.reward_features.to(dtype=solve_dtype)
@@ -485,7 +489,6 @@ def fit_pro_reward(
         raise ValueError("train policy Fisher has non-positive mean diagonal")
     damping = effective.relative_damping * mean_fisher_diagonal
     fisher = DampedEmpiricalFisher(fisher_rows, damping=damping)
-    inner_calls = 0
     # A nested solve cannot reliably target an outer residual below the error
     # of its Fisher inverse. Treat the configured inner tolerance as an upper
     # bound and tighten it relative to the requested outer accuracy.
@@ -493,19 +496,60 @@ def fit_pro_reward(
         effective.inner_tolerance,
         effective.outer_tolerance * 0.1,
     )
+    return feature_moment, target_moment, fisher, effective_inner_tolerance
+
+
+def _pro_inverse_fisher(
+    fisher: DampedEmpiricalFisher,
+    vector: torch.Tensor,
+    effective: ProTrainingConfig,
+    *,
+    tolerance: float,
+) -> torch.Tensor:
+    result = pcg(
+        fisher.matvec,
+        vector,
+        inverse_diagonal=fisher.pcg_inverse_diagonal(),
+        max_iterations=effective.inner_max_iterations,
+        tolerance=tolerance,
+        residual_recompute_interval=effective.residual_recompute_interval,
+    )
+    return _require_converged("inner Fisher PCG", result)
+
+
+@torch.no_grad()
+def fit_pro_reward(
+    train: ExactSplitData,
+    config: ProTrainingConfig | None = None,
+) -> RewardFitResult:
+    """Solve the exact linear-head ProRM normal equation with nested CG.
+
+    For ``G = A X`` and ``g* = A r*``, the normal equation is
+
+    ``G.T (F + lambda I)^-1 G w = G.T (F + lambda I)^-1 g*``.
+
+    The outer solve is in reward-head coordinates. Each Hessian-vector product
+    applies the inverse damped Fisher with an inner PCG solve.
+    """
+
+    effective = ProTrainingConfig() if config is None else config
+    if not isinstance(effective, ProTrainingConfig):
+        raise TypeError("config must be ProTrainingConfig")
+    feature_moment, target_moment, fisher, effective_inner_tolerance = _pro_reward_problem(
+        train,
+        effective,
+    )
+    inner_calls = 0
 
     def inverse_fisher(vector: torch.Tensor) -> torch.Tensor:
         nonlocal inner_calls
         inner_calls += 1
-        result = pcg(
-            fisher.matvec,
+        return _pro_inverse_fisher(
+            fisher,
             vector,
-            inverse_diagonal=fisher.pcg_inverse_diagonal(),
-            max_iterations=effective.inner_max_iterations,
+            effective,
             tolerance=effective_inner_tolerance,
-            residual_recompute_interval=effective.residual_recompute_interval,
         )
-        return _require_converged("inner Fisher PCG", result)
 
     target_natural = inverse_fisher(target_moment)
     rhs = feature_moment.mT @ target_natural
@@ -545,6 +589,71 @@ def fit_pro_reward(
         relative_residual=result.relative_residual,
         effective_inner_tolerance=effective_inner_tolerance,
     )
+
+
+@torch.no_grad()
+def validate_pro_reward_fit(
+    train: ExactSplitData,
+    weight: torch.Tensor,
+    config: ProTrainingConfig,
+    *,
+    source_iterations: int,
+    source_inner_pcg_calls: int,
+) -> RewardFitResult:
+    """Recompute the Pro-RM normal-equation gate without repeating its outer solve."""
+
+    if not isinstance(config, ProTrainingConfig):
+        raise TypeError("config must be ProTrainingConfig")
+    if not isinstance(weight, torch.Tensor) or weight.shape != (train.reward_dimension,):
+        raise ValueError("weight must match the reward feature dimension")
+    candidate = weight.detach().to(
+        device=train.reward_features.device,
+        dtype=torch.float64,
+    )
+    if not bool(torch.isfinite(candidate).all()):
+        raise ValueError("reused Pro-RM weight must be finite")
+    feature_moment, target_moment, fisher, effective_inner_tolerance = _pro_reward_problem(
+        train,
+        config,
+    )
+    target_natural = _pro_inverse_fisher(
+        fisher,
+        target_moment,
+        config,
+        tolerance=effective_inner_tolerance,
+    )
+    rhs = feature_moment.mT @ target_natural
+    error_moment = feature_moment @ candidate - target_moment
+    weighted_error = _pro_inverse_fisher(
+        fisher,
+        error_moment,
+        config,
+        tolerance=effective_inner_tolerance,
+    )
+    gradient = feature_moment.mT @ weighted_error
+    rhs_norm = torch.linalg.vector_norm(rhs)
+    if float(rhs_norm.item()) == 0.0:
+        raise ValueError("Pro-RM normal equation has a zero right-hand side")
+    relative_residual = float((torch.linalg.vector_norm(gradient) / rhs_norm).item())
+    objective = float((torch.dot(error_moment, weighted_error) / 2.0).item())
+    validated = RewardFitResult(
+        method="Pro-RM",
+        weight=candidate.clone(),
+        objective=objective,
+        gradient_norm=float(torch.linalg.vector_norm(gradient).item()),
+        converged=relative_residual <= config.outer_tolerance,
+        iterations=source_iterations,
+        head_sha256=_head_sha256(candidate),
+        inner_pcg_calls=source_inner_pcg_calls,
+        relative_residual=relative_residual,
+        effective_inner_tolerance=effective_inner_tolerance,
+    )
+    if not validated.converged:
+        raise RuntimeError(
+            "reused Pro-RM fit did not pass recomputed normal-equation gate: "
+            f"relative_residual={relative_residual:.3e}"
+        )
+    return validated
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,4 +747,5 @@ __all__ = [
     "pair_indices",
     "pairwise_differences",
     "policy_reward_moment",
+    "validate_pro_reward_fit",
 ]

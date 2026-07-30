@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 import pytest
 import torch
 
+import smart_reward.evaluation as evaluation_module
 import smart_reward.exact as exact_module
+import smart_reward.exact_run as exact_run_module
+from smart_reward.artifacts import save_exact_delta_artifact
+from smart_reward.config import config_hash, load_config
 from smart_reward.evaluation import (
     GeometrySettings,
     evaluate_local_policy,
     evaluate_reference_policy,
     solve_natural_direction,
     summarize_rollouts,
+    validate_natural_direction,
 )
 from smart_reward.exact import (
     ExactDeltaExperiment,
@@ -25,7 +32,9 @@ from smart_reward.exact import (
     pair_indices,
     pairwise_differences,
     policy_reward_moment,
+    validate_pro_reward_fit,
 )
+from smart_reward.exact_run import load_exact_reward_comparison, run_exact_reward_comparison
 from smart_reward.linear import DampedEmpiricalFisher
 
 
@@ -124,6 +133,43 @@ def test_mle_and_pro_fit_exact_delta_targets() -> None:
     assert pro.converged
 
 
+def test_pro_fit_validation_recomputes_gate_without_outer_solve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    split = make_split(7, 24)
+    config = ProTrainingConfig(
+        relative_damping=1.0e-2,
+        fisher_estimator="raw_second_moment",
+        inner_max_iterations=100,
+        inner_tolerance=1.0e-9,
+        outer_max_iterations=100,
+        outer_tolerance=1.0e-8,
+        residual_recompute_interval=10,
+    )
+    source = fit_pro_reward(split, config)
+    right_hand_side_sizes: list[int] = []
+    original_pcg = exact_module.pcg
+
+    def recording_pcg(matvec, rhs, **kwargs):
+        right_hand_side_sizes.append(rhs.numel())
+        return original_pcg(matvec, rhs, **kwargs)
+
+    monkeypatch.setattr(exact_module, "pcg", recording_pcg)
+    validated = validate_pro_reward_fit(
+        split,
+        source.weight,
+        config,
+        source_iterations=source.iterations,
+        source_inner_pcg_calls=source.inner_pcg_calls,
+    )
+
+    assert validated.converged
+    assert validated.head_sha256 == source.head_sha256
+    assert validated.relative_residual is not None
+    assert validated.relative_residual <= config.outer_tolerance
+    assert right_hand_side_sizes == [split.policy_dimension, split.policy_dimension]
+
+
 def test_mle_uses_identifiable_coordinates_for_underdetermined_head() -> None:
     generator = torch.Generator().manual_seed(17)
     prompts, candidates, reward_dimension = 4, 6, 64
@@ -170,7 +216,7 @@ def test_mle_uses_identifiable_coordinates_for_underdetermined_head() -> None:
     assert torch.allclose(result.weight, projected, atol=1.0e-8, rtol=1.0e-8)
 
 
-def test_mle_full_rank_coordinates_are_exact_and_orthogonally_scaled() -> None:
+def test_mle_full_rank_coordinates_are_exact_and_empirically_whitened() -> None:
     generator = torch.Generator().manual_seed(23)
     design = torch.randn(40, 5, generator=generator, dtype=torch.float64)
     design = design * torch.tensor(
@@ -187,16 +233,11 @@ def test_mle_full_rank_coordinates_are_exact_and_orthogonally_scaled() -> None:
     assert head_map is not None
     assert torch.allclose(design @ head_map, coordinates, atol=1.0e-9, rtol=1.0e-9)
     gram = coordinates.mT @ coordinates
-    scale_squared = torch.diagonal(gram).mean()
     assert torch.allclose(
-        gram,
-        torch.eye(gram.shape[0], dtype=gram.dtype) * scale_squared,
+        gram / design.shape[0],
+        torch.eye(gram.shape[0], dtype=gram.dtype),
         atol=1.0e-7,
         rtol=1.0e-10,
-    )
-    residual = torch.randn(40, generator=generator, dtype=torch.float64)
-    assert torch.linalg.vector_norm(design.mT @ residual) <= (
-        torch.linalg.vector_norm(coordinates.mT @ residual) * (1.0 + 1.0e-12)
     )
 
 
@@ -235,6 +276,100 @@ def test_mle_converges_for_ill_conditioned_full_rank_features() -> None:
         split,
         MLETrainingConfig(
             max_iterations=50,
+            history_size=20,
+            gradient_tolerance=1.0e-7,
+            change_tolerance=1.0e-12,
+            microbatch_size=64,
+        ),
+    )
+
+    assert result.converged
+    assert result.gradient_norm <= 1.0e-7
+
+
+def test_mle_uses_solve_precision_for_float32_full_rank_artifacts() -> None:
+    generator = torch.Generator().manual_seed(31)
+    prompts, candidates, reward_dimension = 20, 6, 5
+    feature_scales = torch.tensor(
+        [1.0e-4, 1.0e-2, 1.0, 10.0, 100.0],
+        dtype=torch.float32,
+    )
+    features = (
+        torch.randn(
+            prompts,
+            candidates,
+            reward_dimension,
+            generator=generator,
+            dtype=torch.float32,
+        )
+        * feature_scales
+    )
+    oracle_weight = torch.tensor([0.3, -0.2, 0.1, 0.2, -0.3], dtype=torch.float32) / feature_scales
+    split = ExactSplitData(
+        prompt_ids=tuple(f"float32-full-rank-{index}" for index in range(prompts)),
+        policy_scores=torch.randn(
+            prompts,
+            candidates,
+            3,
+            generator=generator,
+            dtype=torch.float32,
+        ),
+        reward_features=features,
+        true_rewards=features @ oracle_weight,
+    )
+
+    result = fit_mle_reward(
+        split,
+        MLETrainingConfig(
+            max_iterations=200,
+            history_size=20,
+            gradient_tolerance=1.0e-7,
+            change_tolerance=1.0e-12,
+            microbatch_size=64,
+        ),
+    )
+
+    assert result.converged
+    assert result.gradient_norm <= 1.0e-7
+
+
+def test_mle_does_not_stop_on_tiny_scaled_coordinate_steps() -> None:
+    generator = torch.Generator().manual_seed(29)
+    prompts, candidates, reward_dimension = 20, 6, 5
+    feature_scales = torch.logspace(
+        -4,
+        4,
+        reward_dimension,
+        dtype=torch.float64,
+    )
+    features = (
+        torch.randn(
+            prompts,
+            candidates,
+            reward_dimension,
+            generator=generator,
+            dtype=torch.float64,
+        )
+        * feature_scales
+    )
+    oracle_weight = torch.tensor([0.3, -0.2, 0.1, 0.2, -0.3], dtype=torch.float64) / feature_scales
+    split = ExactSplitData(
+        prompt_ids=tuple(f"scaled-step-{index}" for index in range(prompts)),
+        policy_scores=torch.randn(
+            prompts,
+            candidates,
+            3,
+            generator=generator,
+            dtype=torch.float64,
+        ),
+        reward_features=features,
+        true_rewards=features @ oracle_weight,
+    )
+
+    result = fit_mle_reward(
+        split,
+        MLETrainingConfig(
+            max_iterations=200,
             history_size=20,
             gradient_tolerance=1.0e-7,
             change_tolerance=1.0e-12,
@@ -367,6 +502,144 @@ def test_natural_direction_is_beta_free() -> None:
     direction = solve_natural_direction(split, split.true_rewards, settings())
     assert direction.shape == (split.policy_dimension,)
     assert torch.allclose(direction / 4.0, direction * 0.25)
+
+
+def test_saved_natural_direction_is_validated_without_repeating_pcg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    split = make_split(34)
+    geometry = settings()
+    direction = solve_natural_direction(split, split.true_rewards, geometry)
+
+    def unexpected_pcg(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("direction validation must not repeat PCG")
+
+    monkeypatch.setattr(evaluation_module, "pcg", unexpected_pcg)
+    residual = validate_natural_direction(
+        split,
+        split.true_rewards,
+        direction,
+        geometry,
+    )
+
+    assert residual <= geometry.cg_tolerance
+    with pytest.raises(RuntimeError, match="residual gate"):
+        validate_natural_direction(
+            split,
+            split.true_rewards,
+            direction + 1.0,
+            geometry,
+        )
+
+
+def test_reward_retry_reuses_independent_validated_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(Path("configs/main.yaml"))
+    seed = 20261001
+    artifact = tmp_path / "artifact"
+    save_exact_delta_artifact(
+        make_experiment(),
+        artifact,
+        config_hash=config_hash(config),
+        seed=seed,
+    )
+    source_identity = {
+        "git_commit": "a" * 40,
+        "image_sha256": "b" * 64,
+        "hf_inventory_sha256": "c" * 64,
+    }
+    monkeypatch.setattr(
+        exact_run_module,
+        "producer_identity",
+        lambda: source_identity,
+    )
+    source_path = tmp_path / "source.json"
+    source = run_exact_reward_comparison(
+        config,
+        artifact,
+        source_path,
+        seed=seed,
+        device="cpu",
+    )
+
+    def unexpected_pro_fit(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("validated Pro-RM fit must not be recomputed")
+
+    original_direction_solve = exact_run_module.solve_natural_direction
+    direction_solve_calls = 0
+
+    def record_direction_solve(*args, **kwargs):
+        nonlocal direction_solve_calls
+        direction_solve_calls += 1
+        return original_direction_solve(*args, **kwargs)
+
+    monkeypatch.setattr(exact_run_module, "fit_pro_reward", unexpected_pro_fit)
+    monkeypatch.setattr(
+        exact_run_module,
+        "solve_natural_direction",
+        record_direction_solve,
+    )
+    monkeypatch.setattr(
+        exact_run_module,
+        "producer_identity",
+        lambda: {
+            "git_commit": "d" * 40,
+            "image_sha256": "e" * 64,
+            "hf_inventory_sha256": "f" * 64,
+        },
+    )
+    retried = run_exact_reward_comparison(
+        config,
+        artifact,
+        tmp_path / "retried.json",
+        seed=seed,
+        device="cpu",
+        reuse_pro_from=source_path,
+    )
+
+    assert direction_solve_calls == 1
+    assert retried["methods"]["Pro-RM"] == source["methods"]["Pro-RM"]
+    assert retried["evaluation"]["Pro-RM"] == source["evaluation"]["Pro-RM"]
+    for method in ("pro_rm", "oracle"):
+        assert retried["policy_directions"][method] == source["policy_directions"][method]
+    for beta in config["policy_update"]["beta_grid"]:
+        for method in ("pi0", "pro_rm", "oracle"):
+            assert (
+                retried["local_policy_evaluation"][str(beta)][method]
+                == source["local_policy_evaluation"][str(beta)][method]
+            )
+    provenance = retried["component_provenance"]
+    assert provenance["reward_fit"]["Pro-RM"]["mode"] == "validated_reuse"
+    assert provenance["reward_evaluation"]["Pro-RM"]["mode"] == "validated_reuse"
+    assert provenance["natural_direction"]["pro_rm"]["mode"] == "validated_reuse"
+    assert provenance["natural_direction"]["oracle"]["mode"] == "validated_reuse"
+    assert provenance["natural_direction"]["mle_rm"] == {"mode": "computed"}
+    assert (
+        load_exact_reward_comparison(
+            tmp_path / "retried.json",
+            expected_config_hash=config_hash(config),
+            expected_seed=seed,
+        )
+        == retried
+    )
+
+    tampered = json.loads(source_path.read_text(encoding="utf-8"))
+    tampered["evaluation"]["Pro-RM"]["test"]["pair_kl"] += 1.0
+    tampered_path = tmp_path / "tampered-source.json"
+    tampered_path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="numerical mismatch"):
+        run_exact_reward_comparison(
+            config,
+            artifact,
+            tmp_path / "tampered-retry.json",
+            seed=seed,
+            device="cpu",
+            reuse_pro_from=tampered_path,
+        )
 
 
 def test_held_out_evaluation_does_not_refit_the_direction() -> None:

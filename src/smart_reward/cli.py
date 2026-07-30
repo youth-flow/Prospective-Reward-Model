@@ -69,6 +69,7 @@ def _train_rewards(arguments: argparse.Namespace) -> int:
         arguments.output,
         seed=arguments.seed,
         device=arguments.device,
+        reuse_pro_from=arguments.reuse_pro_from,
     )
     return 0
 
@@ -240,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("output")
     train.add_argument("--seed", type=int, required=True)
     train.add_argument("--device", default="cuda")
+    train.add_argument("--reuse-pro-from")
     train.set_defaults(handler=_train_rewards)
 
     policies = commands.add_parser("export-policies")

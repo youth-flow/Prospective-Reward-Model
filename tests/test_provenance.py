@@ -213,3 +213,65 @@ def test_reward_receipt_binds_materialization_provenance(
         "artifact_metadata": materialization["artifact_metadata"],
         "materialize_provenance": materialization["materialize_provenance"],
     }
+
+
+def test_reward_receipt_binds_validated_pro_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    config, _ = _source_materialization(source, monkeypatch)
+    consumer = _identity(monkeypatch, "b")
+    analysis = tmp_path / "analysis.md"
+    analysis.write_text("earliest affected stage: reward\n", encoding="utf-8")
+    materialization = import_materialization_stage(
+        config,
+        source,
+        target,
+        analysis,
+        seed=20261001,
+    )
+    pro_source = target / "reward_provenance" / "pro-source.json"
+    pro_source.parent.mkdir()
+    pro_source.write_text('{"failed_reward_result":true}\n', encoding="utf-8")
+    pro_source_sha = sha256_file(pro_source)
+
+    def write_result(
+        config,
+        artifact_dir,
+        output,
+        *,
+        seed,
+        device,
+        reuse_pro_from,
+    ) -> None:
+        del config, artifact_dir, seed, device
+        assert Path(reuse_pro_from) == pro_source
+        Path(output).write_text("{}\n", encoding="utf-8")
+
+    result = {
+        "producer": consumer,
+        "artifact_metadata_sha256": materialization["artifact_metadata"],
+        "fit_provenance": {
+            "MLE-RM": {"mode": "computed"},
+            "Pro-RM": {
+                "mode": "validated_reuse",
+                "source_result_sha256": pro_source_sha,
+            },
+        },
+    }
+    monkeypatch.setattr(pipeline_module, "run_exact_reward_comparison", write_result)
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_exact_reward_comparison",
+        lambda *args, **kwargs: result,
+    )
+
+    run_reward_stage(config, target, seed=20261001, device="cpu")
+
+    receipt = json.loads((target / "stage_receipts" / "reward.json").read_text(encoding="utf-8"))
+    assert receipt["inputs"]["pro_fit_source"] == pro_source_sha
+    pro_source.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="reused Pro-RM source SHA-256 mismatch"):
+        run_reward_stage(config, target, seed=20261001, device="cpu")

@@ -131,6 +131,17 @@ separate stages. A native stage is reusable only when its receipt and files vali
 the same config hash, seed, Git commit, SIF SHA-256, Hugging Face inventory SHA-256, and
 upstream artifact hashes.
 
+Stage boundaries are not the minimum recovery unit. Reward fit, reward evaluation, each
+natural direction, and each method's local-policy evaluation are independently
+provenance-bound components. A failed MLE fit therefore invalidates only MLE fit and its
+dependent direction/evaluations. A previously completed Pro fit is reusable only after
+checking the source result hash and producer, recomputing its exact normal-equation residual,
+and binding that validation into the new result and reward receipt. Saved independent
+directions are reused only after a fresh damped-Fisher equation residual gate; saved
+evaluations are reused only after deterministic numerical reproduction. Adapter recovery is
+per policy, rollout recovery is per policy and prompt checkpoint, rollout aggregation is per
+seed, and final aggregation is rerun whenever any seed aggregate changes.
+
 An unaffected materialization may cross a producer identity only through the explicit import
 command. Import preserves the source receipt byte-for-byte and writes a provenance bridge
 binding its SHA-256, the source producer, every artifact hash, the current consumer, and the

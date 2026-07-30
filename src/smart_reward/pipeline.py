@@ -304,6 +304,35 @@ def _materialization_inputs(outputs: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
+def _reward_inputs(
+    materialization: Mapping[str, str],
+    result: Mapping[str, Any],
+    root: Path,
+) -> dict[str, str]:
+    inputs = _materialization_inputs(materialization)
+    provenance = result.get("fit_provenance")
+    if provenance is None:
+        return inputs
+    if not isinstance(provenance, dict) or set(provenance) != {"MLE-RM", "Pro-RM"}:
+        raise ValueError("reward fit provenance is incomplete")
+    mle = provenance["MLE-RM"]
+    pro = provenance["Pro-RM"]
+    if not isinstance(mle, dict) or mle != {"mode": "computed"}:
+        raise ValueError("MLE-RM fit provenance is invalid")
+    if not isinstance(pro, dict) or pro.get("mode") not in {"computed", "validated_reuse"}:
+        raise ValueError("Pro-RM fit provenance is invalid")
+    if pro["mode"] == "computed":
+        if pro != {"mode": "computed"}:
+            raise ValueError("computed Pro-RM provenance has unexpected fields")
+        return inputs
+    source = root / "reward_provenance" / "pro-source.json"
+    observed = sha256_file(source)
+    if pro.get("source_result_sha256") != observed:
+        raise ValueError("reused Pro-RM source SHA-256 mismatch")
+    inputs["pro_fit_source"] = observed
+    return inputs
+
+
 def run_reward_stage(
     config: Mapping[str, object],
     seed_root: str | os.PathLike[str],
@@ -317,12 +346,17 @@ def run_reward_stage(
     result_path = root / "reward_result.json"
     if not result_path.exists():
         print("stage=reward status=running", flush=True)
+        pro_source = root / "reward_provenance" / "pro-source.json"
+        reuse_options: dict[str, Any] = {}
+        if pro_source.is_file():
+            reuse_options["reuse_pro_from"] = pro_source
         run_exact_reward_comparison(
             normalized,
             root / "artifact",
             result_path,
             seed=seed,
             device=device,
+            **reuse_options,
         )
     result = load_exact_reward_comparison(
         result_path,
@@ -334,7 +368,7 @@ def run_reward_stage(
     if result["artifact_metadata_sha256"] != artifact_outputs["artifact_metadata"]:
         raise ValueError("reward result artifact identity mismatch")
     outputs = {"reward_result": sha256_file(result_path)}
-    inputs = _materialization_inputs(artifact_outputs)
+    inputs = _reward_inputs(artifact_outputs, result, root)
     _ensure_receipt(
         _receipt(root, "reward"),
         normalized,
@@ -365,7 +399,7 @@ def _validated_reward(
         config,
         stage="reward",
         seed=seed,
-        inputs=_materialization_inputs(artifact_outputs),
+        inputs=_reward_inputs(artifact_outputs, result, root),
         outputs={"reward_result": identity},
     )
     return result, identity
