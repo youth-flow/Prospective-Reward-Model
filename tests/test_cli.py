@@ -12,6 +12,7 @@ def test_cli_only_exposes_current_workflow() -> None:
     subcommands = parser._subparsers._group_actions[0].choices
     assert set(subcommands) == {
         "config-check",
+        "import-materialization",
         "materialize",
         "train-rewards",
         "export-policies",

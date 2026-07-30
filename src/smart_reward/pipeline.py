@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import load_exact_delta_artifact
-from .checkpoints import validate_stage_receipt, write_stage_receipt
+from .checkpoints import (
+    validate_provenance_bridge,
+    validate_source_stage_receipt,
+    validate_stage_receipt,
+    write_provenance_bridge,
+    write_stage_receipt,
+)
 from .config import config_hash, validate_config
 from .exact_phase import materialize_exact_delta
 from .exact_policy import SCHEMA as ADAPTER_SCHEMA
@@ -37,7 +43,21 @@ def _receipt(root: Path, stage: str) -> Path:
     return root / "stage_receipts" / f"{stage}.json"
 
 
-def _artifact_outputs(config: Mapping[str, object], artifact: Path, *, seed: int) -> dict[str, str]:
+def _artifact_producer(artifact: Path) -> dict[str, str]:
+    metadata = _read_json(artifact / "metadata.json")
+    producer = metadata.get("evidence", {}).get("producer")
+    if not isinstance(producer, dict):
+        raise ValueError("artifact is missing producer identity")
+    return dict(producer)
+
+
+def _artifact_outputs(
+    config: Mapping[str, object],
+    artifact: Path,
+    *,
+    seed: int,
+    expected_producer: Mapping[str, str] | None,
+) -> dict[str, str]:
     digest = config_hash(config)
     _ = load_exact_delta_artifact(
         artifact,
@@ -45,7 +65,9 @@ def _artifact_outputs(config: Mapping[str, object], artifact: Path, *, seed: int
         expected_seed=seed,
     )
     metadata = _read_json(artifact / "metadata.json")
-    if metadata.get("evidence", {}).get("producer") != producer_identity():
+    if expected_producer is not None and metadata.get("evidence", {}).get("producer") != dict(
+        expected_producer
+    ):
         raise ValueError("artifact producer identity mismatch")
     recorded = metadata.get("evidence", {}).get("jsonl_sha256")
     if not isinstance(recorded, dict):
@@ -111,7 +133,12 @@ def run_materialization_stage(
             device=device,
             local_files_only=local_files_only,
         )
-    outputs = _artifact_outputs(normalized, artifact, seed=seed)
+    outputs = _artifact_outputs(
+        normalized,
+        artifact,
+        seed=seed,
+        expected_producer=producer_identity(),
+    )
     _ensure_receipt(
         _receipt(root, "materialize"),
         normalized,
@@ -130,16 +157,151 @@ def run_materialization_stage(
 def _validated_materialization(
     config: Mapping[str, object], root: Path, *, seed: int
 ) -> dict[str, str]:
-    outputs = _artifact_outputs(config, root / "artifact", seed=seed)
-    validate_stage_receipt(
-        _receipt(root, "materialize"),
+    artifact = root / "artifact"
+    outputs = _artifact_outputs(
+        config,
+        artifact,
+        seed=seed,
+        expected_producer=None,
+    )
+    artifact_producer = _artifact_producer(artifact)
+    receipt_path = _receipt(root, "materialize")
+    if artifact_producer == producer_identity():
+        validate_stage_receipt(
+            receipt_path,
+            config,
+            stage="materialize",
+            seed=seed,
+            inputs={},
+            outputs=outputs,
+        )
+        return outputs
+    source_receipt = validate_source_stage_receipt(
+        receipt_path,
         config,
         stage="materialize",
         seed=seed,
         inputs={},
         outputs=outputs,
     )
+    if source_receipt["producer"] != artifact_producer:
+        raise ValueError("source receipt and artifact producer identities differ")
+    analysis_path = root / "stage_receipts" / "materialize-affected-stage-analysis.md"
+    bridge_path = root / "stage_receipts" / "materialize-provenance.json"
+    validate_provenance_bridge(
+        bridge_path,
+        config,
+        stage="materialize",
+        seed=seed,
+        source_receipt_sha256=sha256_file(receipt_path),
+        source_producer=artifact_producer,
+        outputs=outputs,
+        affected_stage_analysis_sha256=sha256_file(analysis_path),
+    )
+    outputs["materialize_provenance"] = sha256_file(bridge_path)
     return outputs
+
+
+def import_materialization_stage(
+    config: Mapping[str, object],
+    source_seed_root: str | os.PathLike[str],
+    target_seed_root: str | os.PathLike[str],
+    affected_stage_analysis: str | os.PathLike[str],
+    *,
+    seed: int,
+) -> dict[str, str]:
+    normalized = validate_config(config)
+    source = Path(source_seed_root)
+    target = Path(target_seed_root)
+    analysis = Path(affected_stage_analysis)
+    current_producer = producer_identity()
+    required = {"git_commit", "image_sha256", "hf_inventory_sha256"}
+    if set(current_producer) != required:
+        raise ValueError("materialization import requires a complete consumer identity")
+    if source.resolve() == target.resolve():
+        raise ValueError("source and target seed roots must differ")
+    source_outputs = _artifact_outputs(
+        normalized,
+        source / "artifact",
+        seed=seed,
+        expected_producer=None,
+    )
+    source_receipt_path = _receipt(source, "materialize")
+    source_receipt = validate_source_stage_receipt(
+        source_receipt_path,
+        normalized,
+        stage="materialize",
+        seed=seed,
+        inputs={},
+        outputs=source_outputs,
+    )
+    source_producer = _artifact_producer(source / "artifact")
+    if source_receipt["producer"] != source_producer:
+        raise ValueError("source receipt and artifact producer identities differ")
+    if set(source_producer) != required:
+        raise ValueError("materialization import requires a complete source identity")
+    if source_producer == current_producer:
+        raise ValueError("materialization import requires distinct producer identities")
+    if not analysis.is_file():
+        raise FileNotFoundError(f"missing affected-stage analysis: {analysis}")
+    if target.exists():
+        existing_outputs = _validated_materialization(normalized, target, seed=seed)
+        existing_artifacts = {
+            key: value for key, value in existing_outputs.items() if key != "materialize_provenance"
+        }
+        if existing_artifacts != source_outputs:
+            raise ValueError("existing materialization import differs from source outputs")
+        if sha256_file(_receipt(target, "materialize")) != sha256_file(source_receipt_path):
+            raise ValueError("existing materialization import differs from source receipt")
+        imported_analysis = target / "stage_receipts" / "materialize-affected-stage-analysis.md"
+        if sha256_file(imported_analysis) != sha256_file(analysis):
+            raise ValueError("existing materialization import differs from affected-stage analysis")
+        print("stage=materialize-import status=reused", flush=True)
+        return existing_outputs
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    work = target.parent / f".{target.name}.materialization-import-work"
+    if work.exists():
+        raise FileExistsError(f"stale materialization import work directory: {work}")
+    try:
+        shutil.copytree(source / "artifact", work / "artifact")
+        receipts = work / "stage_receipts"
+        receipts.mkdir(parents=True)
+        shutil.copy2(source_receipt_path, receipts / "materialize.json")
+        shutil.copy2(analysis, receipts / "materialize-affected-stage-analysis.md")
+        copied_outputs = _artifact_outputs(
+            normalized,
+            work / "artifact",
+            seed=seed,
+            expected_producer=source_producer,
+        )
+        if copied_outputs != source_outputs:
+            raise ValueError("copied materialization outputs differ from source")
+        write_provenance_bridge(
+            receipts / "materialize-provenance.json",
+            normalized,
+            stage="materialize",
+            seed=seed,
+            source_receipt_sha256=sha256_file(receipts / "materialize.json"),
+            source_producer=source_producer,
+            outputs=copied_outputs,
+            affected_stage_analysis_sha256=sha256_file(
+                receipts / "materialize-affected-stage-analysis.md"
+            ),
+        )
+        os.replace(work, target)
+    finally:
+        if work.exists():
+            shutil.rmtree(work)
+    print("stage=materialize-import status=complete", flush=True)
+    return _validated_materialization(normalized, target, seed=seed)
+
+
+def _materialization_inputs(outputs: Mapping[str, str]) -> dict[str, str]:
+    result = {"artifact_metadata": outputs["artifact_metadata"]}
+    if "materialize_provenance" in outputs:
+        result["materialize_provenance"] = outputs["materialize_provenance"]
+    return result
 
 
 def run_reward_stage(
@@ -172,7 +334,7 @@ def run_reward_stage(
     if result["artifact_metadata_sha256"] != artifact_outputs["artifact_metadata"]:
         raise ValueError("reward result artifact identity mismatch")
     outputs = {"reward_result": sha256_file(result_path)}
-    inputs = {"artifact_metadata": artifact_outputs["artifact_metadata"]}
+    inputs = _materialization_inputs(artifact_outputs)
     _ensure_receipt(
         _receipt(root, "reward"),
         normalized,
@@ -203,7 +365,7 @@ def _validated_reward(
         config,
         stage="reward",
         seed=seed,
-        inputs={"artifact_metadata": artifact_outputs["artifact_metadata"]},
+        inputs=_materialization_inputs(artifact_outputs),
         outputs={"reward_result": identity},
     )
     return result, identity
@@ -382,6 +544,7 @@ def run_rollout_aggregate_stage(
 
 
 __all__ = [
+    "import_materialization_stage",
     "run_adapter_stage",
     "run_materialization_stage",
     "run_policy_rollout_stage",

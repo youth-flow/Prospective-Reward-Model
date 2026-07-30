@@ -127,6 +127,13 @@ seeds do not support strong asymptotic significance claims.
 
 Materialization checkpoints candidate generation at fixed prompt intervals. Reward fitting,
 adapter export, each policy rollout, per-seed rollout assembly, and the final aggregate are
-separate stages. A stage is reusable only when its receipt and files validate against the
-same config hash, seed, Git commit, SIF SHA-256, Hugging Face inventory SHA-256, and upstream
-artifact hashes. Partial or foreign outputs fail closed.
+separate stages. A native stage is reusable only when its receipt and files validate against
+the same config hash, seed, Git commit, SIF SHA-256, Hugging Face inventory SHA-256, and
+upstream artifact hashes.
+
+An unaffected materialization may cross a producer identity only through the explicit import
+command. Import preserves the source receipt byte-for-byte and writes a provenance bridge
+binding its SHA-256, the source producer, every artifact hash, the current consumer, and the
+affected-stage analysis SHA-256. The downstream reward receipt includes the bridge identity.
+All later stages remain producer-strict. Partial, unbridged, re-signed, or tampered foreign
+outputs fail closed.

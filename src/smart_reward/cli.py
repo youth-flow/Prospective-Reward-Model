@@ -13,6 +13,7 @@ from .exact_phase import materialize_exact_delta
 from .exact_policy import export_exact_ngd_adapters
 from .exact_run import run_exact_reward_comparison
 from .pipeline import (
+    import_materialization_stage,
     run_adapter_stage,
     run_materialization_stage,
     run_policy_rollout_stage,
@@ -46,6 +47,17 @@ def _materialize(arguments: argparse.Namespace) -> int:
         artifact_dir=arguments.artifact_dir,
         device=arguments.device,
         local_files_only=not arguments.allow_download,
+    )
+    return 0
+
+
+def _import_materialization(arguments: argparse.Namespace) -> int:
+    import_materialization_stage(
+        load_config(arguments.config),
+        arguments.source_seed_root,
+        arguments.target_seed_root,
+        arguments.affected_stage_analysis,
+        seed=arguments.seed,
     )
     return 0
 
@@ -213,6 +225,14 @@ def build_parser() -> argparse.ArgumentParser:
     materialize.add_argument("artifact_dir")
     _add_execution_options(materialize)
     materialize.set_defaults(handler=_materialize)
+
+    materialize_import = commands.add_parser("import-materialization")
+    materialize_import.add_argument("config")
+    materialize_import.add_argument("source_seed_root")
+    materialize_import.add_argument("target_seed_root")
+    materialize_import.add_argument("affected_stage_analysis")
+    materialize_import.add_argument("--seed", type=int, required=True)
+    materialize_import.set_defaults(handler=_import_materialization)
 
     train = commands.add_parser("train-rewards")
     train.add_argument("config")
