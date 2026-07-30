@@ -213,10 +213,11 @@ def test_mle_uses_identifiable_coordinates_for_underdetermined_head() -> None:
     projected = torch.linalg.lstsq(design, design @ result.weight).solution
     assert result.converged
     assert result.gradient_norm <= 1.0e-6
+    assert result.iterations <= 20
     assert torch.allclose(result.weight, projected, atol=1.0e-8, rtol=1.0e-8)
 
 
-def test_mle_full_rank_coordinates_are_exact_and_empirically_whitened() -> None:
+def test_mle_full_rank_coordinates_are_exact_and_spectrally_scaled() -> None:
     generator = torch.Generator().manual_seed(23)
     design = torch.randn(40, 5, generator=generator, dtype=torch.float64)
     design = design * torch.tensor(
@@ -233,12 +234,45 @@ def test_mle_full_rank_coordinates_are_exact_and_empirically_whitened() -> None:
     assert head_map is not None
     assert torch.allclose(design @ head_map, coordinates, atol=1.0e-9, rtol=1.0e-9)
     gram = coordinates.mT @ coordinates
+    spectral_scale_squared = torch.linalg.vector_norm(design).square()
     assert torch.allclose(
-        gram / design.shape[0],
+        gram / spectral_scale_squared,
         torch.eye(gram.shape[0], dtype=gram.dtype),
         atol=1.0e-7,
         rtol=1.0e-10,
     )
+
+
+def test_float32_node_features_preserve_exact_structural_edge_rank() -> None:
+    generator = torch.Generator().manual_seed(24)
+    prompts, candidates, reward_dimension = 8, 6, 128
+    features = torch.randn(
+        prompts,
+        candidates,
+        reward_dimension,
+        generator=generator,
+        dtype=torch.float32,
+    )
+    split = ExactSplitData(
+        prompt_ids=tuple(f"float32-rank-{index}" for index in range(prompts)),
+        policy_scores=torch.randn(
+            prompts,
+            candidates,
+            3,
+            generator=generator,
+            dtype=torch.float32,
+        ),
+        reward_features=features,
+        true_rewards=features[..., 0],
+    )
+
+    design, _ = exact_module._edge_design(split)
+    singular_values = torch.linalg.svdvals(design)
+    tolerance = max(design.shape) * torch.finfo(design.dtype).eps * singular_values[0]
+    numerical_rank = int(torch.count_nonzero(singular_values > tolerance).item())
+
+    assert design.dtype == torch.float64
+    assert numerical_rank <= prompts * (candidates - 1)
 
 
 def test_mle_converges_for_ill_conditioned_full_rank_features() -> None:

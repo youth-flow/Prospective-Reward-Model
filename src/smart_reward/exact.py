@@ -274,10 +274,14 @@ class RewardFitResult:
 
 
 def _edge_design(split: ExactSplitData) -> tuple[torch.Tensor, torch.Tensor]:
-    feature_differences = pairwise_differences(split.reward_features).reshape(
-        -1, split.reward_dimension
-    )
-    target_margins = pairwise_differences(split.true_rewards).reshape(-1)
+    # Cast node values before differencing. Computing the complete-edge
+    # contrasts in float32 independently can break exact within-prompt cycle
+    # identities by rounding, creating spurious singular directions when the
+    # solve is subsequently promoted to float64.
+    features = split.reward_features.to(dtype=torch.float64)
+    rewards = split.true_rewards.to(dtype=torch.float64)
+    feature_differences = pairwise_differences(features).reshape(-1, split.reward_dimension)
+    target_margins = pairwise_differences(rewards).reshape(-1)
     return feature_differences, target_margins
 
 
@@ -304,13 +308,13 @@ def _mle_parameterization(
     Complete pairwise edges from one prompt span at most ``M - 1`` directions.
     When that structural rank bound is below the head dimension, optimizing the
     1536-dimensional head directly is needlessly singular.  A compact SVD gives
-    whitened coordinates for exactly the same feasible logits.  Scaling the
-    orthonormal design by ``sqrt(num_edges)`` makes its empirical Gram matrix
-    the identity, matching the mean-reduced likelihood's natural curvature
-    scale.  Mapping through the pseudoinverse returns the minimum-norm head.
+    scaled orthogonal coordinates for exactly the same feasible logits. The
+    spectral scale keeps coordinate-gradient stopping meaningful for the
+    original head-space convergence gate. Mapping through the pseudoinverse
+    returns the minimum-norm head.
 
     Once the design can be full column rank, a reduced QR supplies the same
-    whitened coordinates without changing the represented logits.  A
+    scaled orthogonal coordinates without changing the represented logits. A
     numerically rank-deficient QR falls back to the rank-revealing SVD path.
     """
 
@@ -319,7 +323,7 @@ def _mle_parameterization(
         diagonal = torch.diagonal(upper).abs()
         tolerance = max(design.shape) * source_epsilon * diagonal.max()
         if bool((diagonal > tolerance).all()):
-            coordinate_scale = math.sqrt(design.shape[0])
+            coordinate_scale = torch.linalg.vector_norm(upper)
             identity = torch.eye(
                 upper.shape[0],
                 dtype=upper.dtype,
@@ -341,11 +345,14 @@ def _mle_parameterization(
     if singular_values.numel() == 0:
         raise RuntimeError("MLE edge design has no singular values")
     tolerance = max(design.shape) * source_epsilon * singular_values[0]
-    rank = int(torch.count_nonzero(singular_values > tolerance).item())
+    rank = min(
+        int(torch.count_nonzero(singular_values > tolerance).item()),
+        maximum_identifiable_rank,
+    )
     if rank < 1:
         raise RuntimeError("MLE edge design has zero numerical rank")
     retained_singular_values = singular_values[:rank]
-    coordinate_scale = math.sqrt(design.shape[0])
+    coordinate_scale = torch.linalg.vector_norm(retained_singular_values)
     coordinate_design = (left[:, :rank] * coordinate_scale).contiguous()
     head_map = (
         right_transpose[:rank].mT * (coordinate_scale / retained_singular_values).unsqueeze(0)
@@ -390,64 +397,57 @@ def fit_mle_reward(
         requires_grad=True,
     )
     closure_calls = 0
-    initial_parameter = parameter.detach()
-    detached = initial_parameter.clone() if head_map is None else head_map @ initial_parameter
+    optimizer = torch.optim.LBFGS(
+        [parameter],
+        lr=1.0,
+        max_iter=effective.max_iterations,
+        history_size=effective.history_size,
+        tolerance_grad=(effective.gradient_tolerance if head_map is None else 0.0),
+        # In identifiable logit coordinates, tiny parameter steps and loss
+        # changes can coexist with a head-space gradient above the scientific
+        # convergence gate. Disable those two LBFGS progress heuristics when
+        # a coordinate map is active and apply the scientific gate in head
+        # space after the configured optimizer-iteration budget.
+        tolerance_change=(effective.change_tolerance if head_map is None else 0.0),
+        line_search_fn="strong_wolfe",
+    )
+
+    def closure() -> torch.Tensor:
+        nonlocal closure_calls
+        closure_calls += 1
+        optimizer.zero_grad(set_to_none=True)
+        chunked_objective = torch.zeros(
+            (),
+            dtype=parameter.dtype,
+            device=parameter.device,
+        )
+        total = coordinate_design.shape[0]
+        for start in range(0, total, effective.microbatch_size):
+            stop = min(start + effective.microbatch_size, total)
+            chunk_loss = F.binary_cross_entropy_with_logits(
+                coordinate_design[start:stop] @ parameter,
+                targets[start:stop],
+            )
+            scale = (stop - start) / total
+            (chunk_loss * scale).backward()
+            chunked_objective = chunked_objective + chunk_loss.detach() * scale
+        return chunked_objective
+
+    optimizer.step(closure)
+    detached_parameter = parameter.detach()
+    detached = detached_parameter.clone() if head_map is None else head_map @ detached_parameter
     objective, full_gradient = _mle_objective_and_gradient(design, targets, detached)
     gradient_norm = float(torch.linalg.vector_norm(full_gradient).item())
-    while closure_calls < effective.max_iterations and gradient_norm > effective.gradient_tolerance:
-        remaining = effective.max_iterations - closure_calls
-        optimizer = torch.optim.LBFGS(
-            [parameter],
-            lr=1.0,
-            max_iter=remaining,
-            max_eval=remaining,
-            history_size=effective.history_size,
-            tolerance_grad=(effective.gradient_tolerance if head_map is None else 0.0),
-            # In identifiable logit coordinates, tiny parameter steps and loss
-            # changes can coexist with a head-space gradient above the scientific
-            # convergence gate.  Disable those two LBFGS progress heuristics when
-            # a coordinate map is active and let the gradient gate or iteration
-            # budget decide termination.
-            tolerance_change=(effective.change_tolerance if head_map is None else 0.0),
-            line_search_fn="strong_wolfe",
-        )
-        calls_before_restart = closure_calls
-
-        def closure(active_optimizer: torch.optim.LBFGS = optimizer) -> torch.Tensor:
-            nonlocal closure_calls
-            closure_calls += 1
-            active_optimizer.zero_grad(set_to_none=True)
-            chunked_objective = torch.zeros(
-                (),
-                dtype=parameter.dtype,
-                device=parameter.device,
-            )
-            total = coordinate_design.shape[0]
-            for start in range(0, total, effective.microbatch_size):
-                stop = min(start + effective.microbatch_size, total)
-                chunk_loss = F.binary_cross_entropy_with_logits(
-                    coordinate_design[start:stop] @ parameter,
-                    targets[start:stop],
-                )
-                scale = (stop - start) / total
-                (chunk_loss * scale).backward()
-                chunked_objective = chunked_objective + chunk_loss.detach() * scale
-            return chunked_objective
-
-        optimizer.step(closure)
-        detached_parameter = parameter.detach()
-        detached = detached_parameter.clone() if head_map is None else head_map @ detached_parameter
-        objective, full_gradient = _mle_objective_and_gradient(design, targets, detached)
-        gradient_norm = float(torch.linalg.vector_norm(full_gradient).item())
-        if closure_calls == calls_before_restart:
-            break
+    optimizer_iterations = int(optimizer.state[parameter].get("n_iter", 0))
+    if closure_calls < optimizer_iterations:
+        raise RuntimeError("LBFGS closure accounting is inconsistent")
     return RewardFitResult(
         method="MLE-RM",
         weight=detached,
         objective=float(objective.item()),
         gradient_norm=gradient_norm,
         converged=gradient_norm <= effective.gradient_tolerance,
-        iterations=max(1, closure_calls),
+        iterations=max(1, optimizer_iterations),
         head_sha256=_head_sha256(detached),
     )
 

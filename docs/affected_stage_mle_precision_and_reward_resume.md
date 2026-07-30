@@ -8,16 +8,20 @@ The failed results and logs remain preserved under the persistent failure archiv
 
 ## Root cause
 
-`fit_mle_reward` computed the numerical-rank epsilon from the artifact's float32 edge design
-before converting the solve to float64. On the formal full-rank designs this produced an
-approximately float32-scale QR threshold, rejected valid QR directions, and sent the solve
-through a truncated SVD. The discarded directions left the head-space gradient near
-`2.96e-3`, independent of additional LBFGS closures.
+`fit_mle_reward` computed complete-edge differences and the numerical-rank epsilon in the
+artifact's float32 precision before converting the solve to float64. On the formal full-rank
+designs the float32-scale QR threshold rejected valid directions and sent the solve through
+a truncated SVD. On structurally underdetermined smoke designs, independently rounded
+float32 edge differences also broke exact within-prompt cycle identities and introduced
+spurious singular directions. These effects could leave the head-space gradient above its
+gate even after the configured optimizer budget.
 
-The fix computes rank in the frozen float64 solve precision and scales exact QR/SVD
-coordinates by `sqrt(num_edges)`, so their empirical Gram is identity. The coordinate map
-preserves every represented logit, objective, target, and minimum-norm head. LBFGS stopping
-is checked against the original head-space gradient gate.
+The fix converts node features and rewards to the frozen float64 solve precision before
+forming edge differences, computes numerical rank in float64, and uses exact spectrally
+scaled QR/SVD coordinates. The coordinate map preserves every represented logit, objective,
+target, and minimum-norm head. The configured budget is counted in LBFGS optimizer
+iterations, while extra strong-Wolfe closure evaluations are not misclassified as optimizer
+iterations. Final convergence is checked against the original head-space gradient gate.
 
 ## Earliest affected component and recomputation closure
 
@@ -44,14 +48,17 @@ source component. Any mismatch fails closed.
 The corrected MLE solve was exercised against all three formal materialized artifacts while
 reusing the preserved Pro heads:
 
-| seed | Slurm job | MLE gradient norm | MLE closures | recomputed Pro residual |
+| seed | Slurm job | MLE gradient norm | MLE optimizer iterations | Pro gate |
 | --- | --- | ---: | ---: | ---: |
-| 20261001 | `1676049_0` | `1.1622365426300153e-08` | 11 | `9.876588627329863e-07` |
-| 20261002 | `1676044` | `1.0271026579455525e-08` | 14 | `9.867840781765656e-07` |
-| 20261003 | `1676049_1` | `5.985795165041087e-08` | 11 | `9.234327202291543e-07` |
+| 20261001 | `1676221_0` | `2.211120559101411e-08` | 9 | previously validated |
+| 20261002 | `1676221_1` | `7.668836213504435e-11` | 12 | previously validated |
+| 20261003 | `1676221_2` | `1.0995348142459582e-08` | 10 | previously validated |
 
 All three jobs completed with exit code `0:0`. These isolated diagnostics are evidence for
-the implementation fix, not formal reward outputs.
+the final implementation fix, not formal reward outputs. The same final path reached an MLE
+gradient norm of `3.73032962973098e-08` within the smoke configuration's 20-iteration
+budget. Pro residuals were independently validated in the prior real-artifact diagnostic
+and will be recomputed again by the formal retry's component validator.
 
 ## Scientific invariants
 

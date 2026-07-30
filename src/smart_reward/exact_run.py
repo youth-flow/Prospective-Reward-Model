@@ -39,8 +39,11 @@ from .exact import (
 from .runtime import producer_identity, sha256_file
 
 EXACT_COMPARISON_SCHEMA = "exact-delta-reward-comparison/v1"
+# Validation may run on a different L20 or on CPU. Preserve the source metric
+# only when independent float64 reproduction agrees to tight cross-device
+# roundoff; scientific solver gates remain unchanged and are checked separately.
 _REUSE_ABSOLUTE_TOLERANCE = 1.0e-10
-_REUSE_RELATIVE_TOLERANCE = 1.0e-9
+_REUSE_RELATIVE_TOLERANCE = 1.0e-7
 
 
 def _validate_sha256(value: object, *, name: str) -> str:

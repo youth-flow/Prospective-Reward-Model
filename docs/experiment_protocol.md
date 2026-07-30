@@ -31,7 +31,10 @@ features and LoRA-B policy scores remain in the integrity-checked safetensors ar
 The reward class is `r_phi(x,y) = z(x,y)^T phi`.
 
 MLE-RM minimizes exact-soft-label Bradley-Terry negative log likelihood on all train
-pairs with float64 LBFGS.
+pairs with float64 LBFGS. Node features and rewards are promoted to float64 before complete
+edge differences are formed, preserving exact within-prompt cycle rank. Exact QR/SVD
+coordinates change only conditioning; the serialized convergence gate remains the gradient
+norm in the original reward-head coordinates.
 
 Define `g(r) = E_x Cov_{y|x}(s,r)` and `g(r_phi) = G phi`. Pro-RM minimizes
 
