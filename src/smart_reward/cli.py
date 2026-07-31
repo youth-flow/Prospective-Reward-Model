@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .audit import audit_fisher_trpo_run
 from .config import TRPO_PROTOCOL, ConfigError, config_hash, load_config
 from .exact_phase import materialize_exact_delta
 from .exact_policy import export_exact_ngd_adapters
@@ -280,6 +281,17 @@ def _aggregate(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _audit(arguments: argparse.Namespace) -> int:
+    audit_fisher_trpo_run(
+        load_config(arguments.config),
+        arguments.run_root,
+        arguments.source_run_root,
+        arguments.output,
+    )
+    print("stage=integrity-audit status=complete", flush=True)
+    return 0
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", default="cuda")
@@ -396,6 +408,13 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--reward-results", nargs="+", required=True)
     aggregate.add_argument("--rollout-results", nargs="+", required=True)
     aggregate.set_defaults(handler=_aggregate)
+
+    audit = commands.add_parser("audit-fisher-trpo")
+    audit.add_argument("config")
+    audit.add_argument("run_root")
+    audit.add_argument("source_run_root")
+    audit.add_argument("output")
+    audit.set_defaults(handler=_audit)
     return parser
 
 

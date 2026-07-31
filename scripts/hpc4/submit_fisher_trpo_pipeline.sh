@@ -90,6 +90,7 @@ calibration_aggregate_job="$(
 rollout_job="$(submit_stage rollout "${calibration_aggregate_job}")"
 rollout_aggregate_job="$(submit_stage rollout-aggregate "${rollout_job}")"
 aggregate_job="$(submit_stage aggregate "${rollout_aggregate_job}")"
+audit_job="$(submit_stage audit "${aggregate_job}")"
 
 printf 'submission_manifest=%s\n' "${manifest}"
-printf 'terminal_job_id=%s\n' "${aggregate_job}"
+printf 'terminal_job_id=%s\n' "${audit_job}"

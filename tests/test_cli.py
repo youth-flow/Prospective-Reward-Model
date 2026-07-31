@@ -23,6 +23,7 @@ def test_cli_only_exposes_current_workflow() -> None:
         "run-stage",
         "policy-names",
         "aggregate",
+        "audit-fisher-trpo",
     }
 
 

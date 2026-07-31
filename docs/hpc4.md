@@ -151,6 +151,7 @@ The new confirmatory protocol uses `configs/fisher_trpo_smoke.yaml` and
 materialize -> fisher-crossfit -> fisher-select -> reward -> adapters
 -> kl-calibration -> kl-calibration-aggregate -> rollout
 -> rollout-aggregate -> aggregate
+-> integrity-audit
 ```
 
 `materialize` can import only the verified train/validation components from the

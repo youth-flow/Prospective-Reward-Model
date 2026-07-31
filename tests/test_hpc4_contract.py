@@ -59,6 +59,7 @@ def test_hpc4_pipeline_is_qos_aware_and_stage_ordered() -> None:
         "rollout",
         "rollout-aggregate",
         "aggregate",
+        "audit",
     ):
         assert stage in text
     worker = (ROOT / "scripts" / "hpc4" / "stage_gpu.sbatch").read_text(encoding="utf-8")
@@ -81,7 +82,7 @@ def test_submission_scripts_route_slurm_logs_outside_the_repository() -> None:
     pipeline = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
     assert '--output="${report_root}/' in smoke
     assert '--output="${hf_cache}/logs/' in staging
-    assert pipeline.count('--output="${run_root}/logs/') == 10
+    assert pipeline.count('--output="${run_root}/logs/') == 11
 
 
 def test_compute_jobs_verify_the_image_revision() -> None:

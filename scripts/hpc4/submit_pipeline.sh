@@ -13,7 +13,7 @@ hf_cache="$(realpath -e "$3")"
 run_root="$(realpath -m "$4")"
 stage="$5"
 case "${stage}" in
-  materialize|fisher-crossfit|fisher-select|reward|adapters|kl-calibration|kl-calibration-aggregate|rollout|rollout-aggregate|aggregate) ;;
+  materialize|fisher-crossfit|fisher-select|reward|adapters|kl-calibration|kl-calibration-aggregate|rollout|rollout-aggregate|aggregate|audit) ;;
   *) echo "invalid pipeline stage: ${stage}" >&2; exit 2 ;;
 esac
 [[ -z "$(git -C "${repo_root}" status --porcelain)" ]] || {
@@ -170,6 +170,14 @@ case "${stage}" in
       --time="${aggregate_time}" \
       --output="${run_root}/logs/aggregate-%j.out" \
       --export="${common_export}" "${repo_root}/scripts/hpc4/aggregate.sbatch")"
+    ;;
+  audit)
+    : "${PRORM_SOURCE_RUN_ROOT:?PRORM_SOURCE_RUN_ROOT is required for audit}"
+    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-integrity-audit --partition=amd \
+      --time="${aggregate_time}" \
+      --output="${run_root}/logs/audit-%j.out" \
+      --export="${common_export},PRORM_SOURCE_RUN_ROOT=${PRORM_SOURCE_RUN_ROOT}" \
+      "${repo_root}/scripts/hpc4/audit.sbatch")"
     ;;
 esac
 
