@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import smart_reward.cli as cli
 from smart_reward.cli import build_parser, main
 
 ROOT = Path(__file__).parents[1]
@@ -41,4 +42,43 @@ def test_policy_names_exposes_reference_and_nine_updates(capsys) -> None:
         f"{method}__beta_{beta}"
         for method in ("mle_rm", "pro_rm", "oracle")
         for beta in ("1", "2", "4")
+    }
+
+
+def test_run_stage_forwards_split_reuse_to_materialization(monkeypatch) -> None:
+    config = object()
+    captured = {}
+    monkeypatch.setattr(cli, "load_config", lambda _: config)
+
+    def fake_materialization(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(cli, "run_materialization_stage", fake_materialization)
+    assert (
+        main(
+            [
+                "run-stage",
+                "config.yaml",
+                "seed-root",
+                "--stage",
+                "materialize",
+                "--seed",
+                "20261001",
+                "--device",
+                "cpu",
+                "--reuse-splits-from",
+                "immutable-source",
+            ]
+        )
+        == 0
+    )
+    assert captured == {
+        "args": (config, "seed-root"),
+        "kwargs": {
+            "seed": 20261001,
+            "device": "cpu",
+            "local_files_only": True,
+            "reuse_splits_from": "immutable-source",
+        },
     }

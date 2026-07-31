@@ -197,6 +197,7 @@ def _run_stage(arguments: argparse.Namespace) -> int:
             **common,
             device=arguments.device,
             local_files_only=not arguments.allow_download,
+            reuse_splits_from=arguments.reuse_splits_from,
         )
     elif arguments.stage == "fisher-crossfit":
         run_fisher_crossfit_stage(
