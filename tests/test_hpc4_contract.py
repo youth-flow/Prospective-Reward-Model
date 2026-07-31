@@ -47,6 +47,7 @@ def test_hpc4_pipeline_is_qos_aware_and_stage_ordered() -> None:
     assert "MaxSubmit" not in text
     assert "afterok:" not in text
     assert "PRORM_ROLLOUT_WORKERS" in text
+    assert 'common_export+=",PRORM_SOURCE_RUN_ROOT=${source_run_root}"' in text
     assert '--gpus-per-node="${gpus_per_job}"' in text
     for stage in (
         "materialize",

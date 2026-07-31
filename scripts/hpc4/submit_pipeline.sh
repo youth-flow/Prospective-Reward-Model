@@ -67,6 +67,14 @@ inventory="${hf_cache}/inventories/${config_hash}.json"
 [[ -f "${inventory}" ]] || { echo "missing staged inventory: ${inventory}" >&2; exit 2; }
 inventory_sha="$(sha256sum "${inventory}" | cut -d' ' -f1)"
 common_export="ALL,PRORM_REPO_ROOT=${repo_root},PRORM_CONFIG=${config},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${image_sha},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY_SHA256=${inventory_sha},PRORM_GIT_COMMIT=${git_commit},PRORM_RUN_ROOT=${run_root}"
+if [[ -n "${PRORM_SOURCE_RUN_ROOT:-}" ]]; then
+  source_run_root="$(realpath -e "${PRORM_SOURCE_RUN_ROOT}")"
+  case "${source_run_root}" in
+    /project/sigroup/*) ;;
+    *) echo "source run root must be under /project/sigroup" >&2; exit 2 ;;
+  esac
+  common_export+=",PRORM_SOURCE_RUN_ROOT=${source_run_root}"
+fi
 gpu_job_limit=2
 if (( seed_count == 1 )); then
   seed_array="0"
@@ -168,7 +176,7 @@ case "${stage}" in
     job_id="$(sbatch --parsable --job-name=prorm-integrity-audit --partition=amd \
       --time="${aggregate_time}" \
       --output="${run_root}/logs/audit-%j.out" \
-      --export="${common_export},PRORM_SOURCE_RUN_ROOT=${PRORM_SOURCE_RUN_ROOT}" \
+      --export="${common_export}" \
       "${repo_root}/scripts/hpc4/audit.sbatch")"
     ;;
 esac
