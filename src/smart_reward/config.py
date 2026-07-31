@@ -635,8 +635,11 @@ def _validate_trpo_config(config: Mapping[str, object]) -> dict[str, Any]:
     )
     if calibration["split"] != "validation":
         raise ConfigError("policy_update.calibration.split must be validation")
-    if calibration["estimator"] != "updated_policy_forward_kl":
-        raise ConfigError("policy_update.calibration.estimator must be updated_policy_forward_kl")
+    if calibration["estimator"] != "rao_blackwellized_updated_policy_forward_kl":
+        raise ConfigError(
+            "policy_update.calibration.estimator must be "
+            "rao_blackwellized_updated_policy_forward_kl"
+        )
     _integer(calibration["max_attempts"], "policy_update.calibration.max_attempts", 1)
     interval = [
         _number(

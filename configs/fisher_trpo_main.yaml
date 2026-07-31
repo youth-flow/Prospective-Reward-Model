@@ -91,7 +91,7 @@ policy_update:
   quadratic_scaling_fisher: raw_undamped
   calibration:
     split: validation
-    estimator: updated_policy_forward_kl
+    estimator: rao_blackwellized_updated_policy_forward_kl
     max_attempts: 4
     point_relative_interval: [0.8, 1.2]
     confidence_level: 0.95

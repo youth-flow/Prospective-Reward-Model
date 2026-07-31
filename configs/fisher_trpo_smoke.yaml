@@ -76,11 +76,14 @@ policy_update:
   quadratic_scaling_fisher: raw_undamped
   calibration:
     split: validation
-    estimator: updated_policy_forward_kl
+    estimator: rao_blackwellized_updated_policy_forward_kl
     max_attempts: 4
-    point_relative_interval: [0.8, 1.2]
+    # Four validation prompts cannot support the confirmatory CI gate.  This
+    # relaxed smoke-only gate tests calibration control flow; the formal config
+    # retains the preregistered [0.8, 1.2] point and 1.5x CI-upper gates.
+    point_relative_interval: [0.5, 2.0]
     confidence_level: 0.95
-    upper_confidence_multiplier: 1.5
+    upper_confidence_multiplier: 4.0
     responses_per_prompt: 2
     confidence_interval: normal_prompt_clustered
     search: deterministic_quadratic_ratio

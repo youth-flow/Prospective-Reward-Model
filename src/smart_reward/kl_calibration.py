@@ -17,7 +17,11 @@ import torch
 
 from .artifacts import exact_delta_artifact_metadata_sha256
 from .config import TRPO_PROTOCOL, config_hash, validate_config
-from .hf import generate_exact_candidates, score_exact_candidates
+from .hf import (
+    exact_candidate_logits,
+    generate_exact_candidates,
+    sequence_forward_kl,
+)
 from .prompts import load_prompt_jsonl
 from .runtime import (
     fork_torch_seed,
@@ -230,14 +234,20 @@ def _prompt_forward_kl(
                 prompt_attention_mask=inputs["attention_mask"],
                 generation_kwargs=generation_kwargs,
             )
-        updated_log_prob = score_exact_candidates(model, candidates)
+        updated_logits = exact_candidate_logits(model, candidates)
         with model.disable_adapter():
-            reference_log_prob = score_exact_candidates(model, candidates)
-        ratios = (updated_log_prob - reference_log_prob).to(dtype=torch.float64)
-        if ratios.numel() != len(batch) * responses:
+            reference_logits = exact_candidate_logits(model, candidates)
+        trajectory_kl = sequence_forward_kl(
+            updated_logits,
+            reference_logits,
+            candidates.response_mask,
+        ).to(dtype=torch.float64)
+        del updated_logits, reference_logits
+        if trajectory_kl.numel() != len(batch) * responses:
             raise RuntimeError("KL calibration generated an unexpected response count")
         result.extend(
-            float(value) for value in ratios.reshape(len(batch), responses).mean(dim=1).tolist()
+            float(value)
+            for value in trajectory_kl.reshape(len(batch), responses).mean(dim=1).tolist()
         )
     return result
 
@@ -287,6 +297,10 @@ def _policy_component_path(root: Path, policy_name: str) -> Path:
     return root / ".checkpoints" / f"{policy_name}.json"
 
 
+def _policy_failure_path(root: Path, policy_name: str) -> Path:
+    return root / ".failures" / f"{policy_name}.json"
+
+
 def _quarantine_component(root: Path, policy_name: str) -> None:
     target = root / policy_name
     receipt = _policy_component_path(root, policy_name)
@@ -330,6 +344,7 @@ def calibrate_trpo_adapter_policy(
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / ".checkpoints").mkdir(exist_ok=True)
     receipt_path = _policy_component_path(output_root, policy_name)
+    failure_path = _policy_failure_path(output_root, policy_name)
     target = output_root / policy_name
     if receipt_path.is_file() and target.is_dir():
         with receipt_path.open("r", encoding="utf-8") as stream:
@@ -414,6 +429,30 @@ def calibrate_trpo_adapter_policy(
                     "summary": summary,
                 }
             )
+            diagnostic = {
+                "schema": COMPONENT_SCHEMA,
+                "protocol": TRPO_PROTOCOL,
+                "status": "running",
+                "accepted": False,
+                "config_sha256": config_hash(normalized),
+                "artifact_metadata_sha256": artifact_identity,
+                "initial_adapter_metadata_sha256": sha256_file(initial_root / "metadata.json"),
+                "seed": seed,
+                "policy_name": policy_name,
+                "reward_source": record["reward_source"],
+                "kl_target": kl_target,
+                "attempts": attempts,
+                "producer": producer_identity(),
+            }
+            _atomic_json(failure_path, diagnostic)
+            print(
+                f"kl-calibration policy={policy_name} attempt={attempt + 1} "
+                f"scale={scale:.9g} mean={summary['mean_forward_kl']:.9g} "
+                f"ci_upper={summary['confidence_interval'][1]:.9g} "
+                f"point_pass={summary['point_gate_passed']} "
+                f"upper_pass={summary['upper_confidence_gate_passed']}",
+                flush=True,
+            )
             if summary["accepted"]:
                 accepted = True
                 break
@@ -429,6 +468,8 @@ def calibrate_trpo_adapter_policy(
         if target_device.type == "cuda":
             torch.cuda.empty_cache()
     if not accepted:
+        diagnostic["status"] = "failed"
+        _atomic_json(failure_path, diagnostic)
         raise RuntimeError(
             f"KL calibration failed closed after {len(attempts)} attempts: {policy_name}"
         )
@@ -455,6 +496,7 @@ def calibrate_trpo_adapter_policy(
         "producer": producer_identity(),
     }
     _atomic_json(receipt_path, receipt)
+    failure_path.unlink(missing_ok=True)
     return receipt
 
 

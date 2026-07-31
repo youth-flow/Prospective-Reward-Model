@@ -519,18 +519,16 @@ def _extract_model_logits(output: object) -> torch.Tensor:
     return logits
 
 
-def score_exact_candidates(
+def exact_candidate_logits(
     model: torch.nn.Module,
     candidates: ExactTokenCandidates,
 ) -> torch.Tensor:
-    """Compute response log probabilities from the exact generated token IDs.
+    """Return next-token logits for exact generated candidates.
 
-    No ``no_grad`` context is used because materialization differentiates these log
-    probabilities with respect to LoRA-B.  Candidates produced by
-    :func:`generate_exact_candidates` are tied to the same in-memory model
-    instance, preventing accidental score extraction under another policy.
+    The same identity and tangent guards used by :func:`score_exact_candidates`
+    apply.  Keeping this primitive public lets KL evaluation Rao-Blackwellize
+    sampled log ratios into exact categorical KL values at sampled prefixes.
     """
-
     if not isinstance(model, torch.nn.Module):
         raise TypeError("model must be a torch.nn.Module")
     if not isinstance(candidates, ExactTokenCandidates):
@@ -562,7 +560,70 @@ def score_exact_candidates(
         attention_mask=candidates.attention_mask,
         use_cache=False,
     )
-    logits = _extract_model_logits(output)
+    return _extract_model_logits(output)
+
+
+def sequence_forward_kl(
+    updated_logits: torch.Tensor,
+    reference_logits: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Sum exact updated-to-reference categorical KL over response positions.
+
+    Prefixes are sampled from the updated policy, while the next-token action is
+    integrated out exactly over the vocabulary.  Averaging these trajectory
+    values therefore estimates autoregressive forward KL with far lower variance
+    than sampled sequence log-ratios.
+    """
+
+    if (
+        not isinstance(updated_logits, torch.Tensor)
+        or not isinstance(reference_logits, torch.Tensor)
+        or updated_logits.ndim != 3
+        or reference_logits.shape != updated_logits.shape
+    ):
+        raise ValueError("updated and reference logits must share shape (batch, sequence, vocab)")
+    if (
+        not isinstance(response_mask, torch.Tensor)
+        or response_mask.shape != updated_logits.shape[:2]
+        or response_mask.device != updated_logits.device
+        or reference_logits.device != updated_logits.device
+    ):
+        raise ValueError("response_mask and logits must share batch, sequence, and device")
+    if not bool(((response_mask == 0) | (response_mask == 1)).all()):
+        raise ValueError("response_mask must be binary")
+    if not bool(torch.isfinite(updated_logits).all()) or not bool(
+        torch.isfinite(reference_logits).all()
+    ):
+        raise ValueError("KL logits must be finite")
+
+    updated_log_prob = updated_logits[:, :-1].log_softmax(dim=-1)
+    reference_log_prob = reference_logits[:, :-1].log_softmax(dim=-1)
+    token_kl = (updated_log_prob.exp() * (updated_log_prob - reference_log_prob)).sum(dim=-1)
+    selected = token_kl * response_mask[:, 1:].to(dtype=token_kl.dtype)
+    result = selected.sum(dim=1)
+    # Floating-point vocabulary reductions can produce a tiny negative residual
+    # at an exactly equal distribution.  Reject material negatives and normalize
+    # only roundoff-sized values to zero.
+    tolerance = 64.0 * torch.finfo(result.dtype).eps
+    if bool((result < -tolerance).any()):
+        raise RuntimeError("categorical forward KL became materially negative")
+    return result.clamp_min(0.0)
+
+
+def score_exact_candidates(
+    model: torch.nn.Module,
+    candidates: ExactTokenCandidates,
+) -> torch.Tensor:
+    """Compute response log probabilities from the exact generated token IDs.
+
+    No ``no_grad`` context is used because materialization differentiates these log
+    probabilities with respect to LoRA-B.  Candidates produced by
+    :func:`generate_exact_candidates` are tied to the same in-memory model
+    instance, preventing accidental score extraction under another policy.
+    """
+
+    logits = exact_candidate_logits(model, candidates)
     return sequence_log_probs(logits, candidates.input_ids, candidates.response_mask)
 
 
@@ -932,10 +993,12 @@ __all__ = [
     "build_exact_token_candidates",
     "build_oracle_chat",
     "configure_fixed_a_lora",
+    "exact_candidate_logits",
     "extract_scalar_oracle_logits",
     "generate_exact_candidates",
     "pool_final_response_hidden_state",
     "score_exact_candidates",
     "score_oracle_chats",
+    "sequence_forward_kl",
     "validate_exact_generation_kwargs",
 ]

@@ -12,6 +12,7 @@ from smart_reward.hf import (
     generate_exact_candidates,
     pool_final_response_hidden_state,
     score_exact_candidates,
+    sequence_forward_kl,
     validate_exact_generation_kwargs,
 )
 
@@ -75,6 +76,24 @@ def test_policy_fingerprint_tracks_same_tensors_across_trainability_changes() ->
         model.weight.add_(1.0)
     with pytest.raises(ValueError, match="changed between generation and scoring"):
         score_exact_candidates(model, candidates)
+
+
+def test_sequence_forward_kl_integrates_next_token_actions_exactly() -> None:
+    updated = torch.tensor([[[2.0, 0.0], [0.0, 2.0], [9.0, -9.0]]])
+    reference = torch.zeros_like(updated)
+    response_mask = torch.tensor([[0, 1, 1]])
+
+    result = sequence_forward_kl(updated, reference, response_mask)
+    updated_log_prob = updated[:, :2].log_softmax(dim=-1)
+    reference_log_prob = reference[:, :2].log_softmax(dim=-1)
+    expected = (
+        (updated_log_prob.exp() * (updated_log_prob - reference_log_prob)).sum(dim=-1).sum(dim=-1)
+    )
+    assert torch.allclose(result, expected)
+    assert torch.equal(
+        sequence_forward_kl(reference, reference, response_mask),
+        torch.zeros(1),
+    )
 
 
 def test_reward_feature_pooling_selects_final_response_token() -> None:

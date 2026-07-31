@@ -97,8 +97,11 @@ prorm aggregate configs/main.yaml runs/aggregate.json \
 Reward fitting is computed on the frozen reference-policy candidate pool. Local regret
 and tabular utility apply the train-fitted directions to the frozen test candidate pool;
 they are exact conditional on that finite pool, not population-exact.
-Actual reward, forward KL, and regularized utility are Monte Carlo estimates from fresh
-test rollouts. Validation is diagnostic only; test data never selects a model or beta.
+Actual reward and regularized utility are Monte Carlo estimates from fresh test
+rollouts. Fisher-TRPO forward KL uses sampled updated-policy prefixes but integrates
+the next-token action exactly over the vocabulary (a Rao-Blackwellized chain-rule
+estimate); legacy exact-delta runs retain sampled sequence log-ratios. Validation is
+diagnostic only; test data never selects a model or beta.
 
 See [`docs/experiment_protocol.md`](docs/experiment_protocol.md),
 [`docs/theory.md`](docs/theory.md), and

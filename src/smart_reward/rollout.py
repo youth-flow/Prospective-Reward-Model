@@ -18,7 +18,13 @@ from .checkpoints import validate_stage_receipt, write_stage_receipt
 from .config import PROTOCOL, TRPO_PROTOCOL, config_hash, validate_config
 from .evaluation import summarize_rollouts, summarize_trpo_rollouts
 from .exact_policy import SCHEMA as ADAPTER_SCHEMA
-from .hf import generate_exact_candidates, score_exact_candidates, score_oracle_chats
+from .hf import (
+    exact_candidate_logits,
+    generate_exact_candidates,
+    score_exact_candidates,
+    score_oracle_chats,
+    sequence_forward_kl,
+)
 from .kl_calibration import validate_calibrated_trpo_adapters
 from .prompts import PromptRecord, load_prompt_jsonl
 from .runtime import (
@@ -216,6 +222,7 @@ def _generate_policy_batch(
     generation_seed: int,
     device: torch.device,
     reference: bool,
+    rao_blackwellized_kl: bool,
     oracle_center: float,
     oracle_scale: float,
     policy_config: Mapping[str, Any],
@@ -241,8 +248,17 @@ def _generate_policy_batch(
                     prompt_attention_mask=inputs["attention_mask"],
                     generation_kwargs=call_kwargs,
                 )
-                updated_log_prob = score_exact_candidates(model, candidates)
-            reference_log_prob = updated_log_prob
+                if not rao_blackwellized_kl:
+                    updated_log_prob = score_exact_candidates(model, candidates)
+            if rao_blackwellized_kl:
+                kl_values = torch.zeros(
+                    candidates.input_ids.shape[0],
+                    dtype=torch.float64,
+                    device=candidates.input_ids.device,
+                )
+            else:
+                reference_log_prob = updated_log_prob
+                kl_values = (updated_log_prob - reference_log_prob).to(dtype=torch.float64)
         else:
             candidates = generate_exact_candidates(
                 model,
@@ -250,9 +266,21 @@ def _generate_policy_batch(
                 prompt_attention_mask=inputs["attention_mask"],
                 generation_kwargs=call_kwargs,
             )
-            updated_log_prob = score_exact_candidates(model, candidates)
-            with model.disable_adapter():
-                reference_log_prob = score_exact_candidates(model, candidates)
+            if rao_blackwellized_kl:
+                updated_logits = exact_candidate_logits(model, candidates)
+                with model.disable_adapter():
+                    reference_logits = exact_candidate_logits(model, candidates)
+                kl_values = sequence_forward_kl(
+                    updated_logits,
+                    reference_logits,
+                    candidates.response_mask,
+                ).to(dtype=torch.float64)
+                del updated_logits, reference_logits
+            else:
+                updated_log_prob = score_exact_candidates(model, candidates)
+                with model.disable_adapter():
+                    reference_log_prob = score_exact_candidates(model, candidates)
+                kl_values = (updated_log_prob - reference_log_prob).to(dtype=torch.float64)
     expected = len(prompts) * responses
     if candidates.input_ids.shape[0] != expected:
         raise RuntimeError("batched generation returned an unexpected candidate count")
@@ -272,7 +300,8 @@ def _generate_policy_batch(
         device=device,
     ).to(dtype=torch.float64)
     rewards = (raw_rewards - oracle_center) / oracle_scale
-    ratios = (updated_log_prob - reference_log_prob).detach().to(dtype=torch.float64)
+    kl_values = kl_values.detach()
+    kl_field = "forward_kl" if rao_blackwellized_kl else "forward_log_ratio"
     rows: list[dict[str, Any]] = []
     for prompt_index, prompt in enumerate(prompts):
         for response_index in range(responses):
@@ -284,7 +313,7 @@ def _generate_policy_batch(
                     "prompt": prompt_values[prompt_index],
                     "response": response_texts[flat_index],
                     "oracle_reward": float(rewards[flat_index].item()),
-                    "forward_log_ratio": float(ratios[flat_index].item()),
+                    kl_field: float(kl_values[flat_index].item()),
                 }
             )
     return rows
@@ -499,6 +528,7 @@ def evaluate_single_policy_rollout(
                     generation_seed=generation_seed,
                     device=device_value,
                     reference=policy_name == "pi0",
+                    rao_blackwellized_kl=normalized["protocol"] == TRPO_PROTOCOL,
                     oracle_center=float(transform["b"]),
                     oracle_scale=float(transform["tau"]),
                     policy_config=normalized["policy"],
@@ -592,14 +622,18 @@ def evaluate_single_policy_rollout(
 
 
 def _rows_to_samples(
-    rows: Sequence[Mapping[str, Any]], prompts: Sequence[PromptRecord], responses: int
+    rows: Sequence[Mapping[str, Any]],
+    prompts: Sequence[PromptRecord],
+    responses: int,
+    *,
+    kl_field: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     expected = [(prompt.prompt_id, index) for prompt in prompts for index in range(responses)]
     observed = [(str(row.get("prompt_id")), int(row.get("response_index", -1))) for row in rows]
     if observed != expected:
         raise ValueError("policy rollout rows are not in canonical prompt/response order")
     rewards = torch.tensor([float(row["oracle_reward"]) for row in rows], dtype=torch.float64)
-    ratios = torch.tensor([float(row["forward_log_ratio"]) for row in rows], dtype=torch.float64)
+    ratios = torch.tensor([float(row[kl_field]) for row in rows], dtype=torch.float64)
     return rewards.reshape(len(prompts), responses), ratios.reshape(len(prompts), responses)
 
 
@@ -630,7 +664,16 @@ def assemble_policy_rollouts(
             policy_name=name,
             seed=seed,
         )
-    samples = {name: _rows_to_samples(rows_by_name[name], prompts, responses) for name in names}
+    kl_field = "forward_kl" if normalized["protocol"] == TRPO_PROTOCOL else "forward_log_ratio"
+    samples = {
+        name: _rows_to_samples(
+            rows_by_name[name],
+            prompts,
+            responses,
+            kl_field=kl_field,
+        )
+        for name in names
+    }
     reference_rewards, _ = samples["pi0"]
     metrics: dict[str, Any] = {}
     if normalized["protocol"] == TRPO_PROTOCOL:

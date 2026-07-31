@@ -63,7 +63,10 @@ damping 只决定方向，trust-region 缩放使用未加 damping 的 raw Fisher
 ## 真实 KL 校准
 
 九个初始 adapter 分别在 validation prompts 上从更新后策略采样，每个 prompt 四个
-response；估计 `KL(updated || pi0)` 的统计单位是 prompt。接受条件同时为：
+response。对每条 sampled trajectory，不使用高方差的 sampled sequence log-ratio；
+而是在每个 sampled prefix 上对完整 next-token vocabulary 精确计算
+`KL(updated(.|prefix) || pi0(.|prefix))`，再沿 response token 求和。这是 forward-KL
+chain rule 的 Rao-Blackwellized 估计。最终统计单位是 prompt。接受条件同时为：
 
 - 点估计落在 `[0.8*kappa, 1.2*kappa]`；
 - prompt-clustered normal 95% CI 上端不超过 `1.5*kappa`。
@@ -71,6 +74,9 @@ response；估计 `KL(updated || pi0)` 的统计单位是 prompt。接受条件�
 最多四次确定性尝试。下一步 multiplier 使用局部二次关系
 `scale *= sqrt(kappa / observed_KL)`，单次变化最多四倍；所有尝试共享确定性随机流。
 不读取 test 做缩放。四次均失败则该 policy component fail closed。
+每次尝试的 scale、prompt-level KL、均值和 CI 都写入诊断文件；失败诊断不计为完成
+receipt。smoke 因仅有四个 validation prompts，使用显式标注的宽松工程门槛测试控制
+流；正式配置仍使用上述预注册门槛。
 
 ## 阶段与恢复
 
