@@ -45,7 +45,7 @@ def test_hpc4_pipeline_is_qos_aware_and_stage_ordered() -> None:
     text = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
     assert "gpu_job_limit=2" in text
     assert "MaxSubmit" not in text
-    assert 'dependency_args=(--dependency="afterok:${PRORM_SBATCH_DEPENDENCY}")' in text
+    assert "afterok:" not in text
     assert "PRORM_ROLLOUT_WORKERS" in text
     assert '--gpus-per-node="${gpus_per_job}"' in text
     for stage in (
@@ -67,6 +67,12 @@ def test_hpc4_pipeline_is_qos_aware_and_stage_ordered() -> None:
     assert "rollout_task += PRORM_ROLLOUT_WORKERS" in worker
     assert "run_rollout_slot" in worker
     assert "run_calibration_slot" in worker
+    controller = (ROOT / "scripts" / "hpc4" / "submit_fisher_trpo_pipeline.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "all_seeds_have" in controller
+    assert "submission-stages.tsv" in controller
+    assert "afterok:" not in controller
     assert not (ROOT / "scripts" / "hpc4" / "controlled.sbatch").exists()
 
 

@@ -161,7 +161,7 @@ The reward stage copies and independently validates the legacy MLE head, while
 Pro-RM and every downstream direction are recomputed.
 
 After the new image, HF inventory, GPU gate, and Fisher-TRPO smoke have passed,
-the dependency-ordered formal DAG can be submitted with:
+advance the formal run one verified stage at a time with:
 
 ```bash
 bash scripts/hpc4/submit_fisher_trpo_pipeline.sh \
@@ -172,9 +172,12 @@ bash scripts/hpc4/submit_fisher_trpo_pipeline.sh \
   "$PRORM_PROJECT_ROOT/archives/<immutable-e01359d-archive>/run"
 ```
 
-The wrapper records every Slurm ID and dependency in
-`submission-dag.tsv`. GPU stages exclude `gpu19`; removing that exclusion
-requires a separate successful GPU gate.
+Run the same command again only after the printed job is terminal
+`COMPLETED` with `ExitCode=0:0`. The controller detects the next missing
+receipt, resumes incomplete calibration/rollout components, and records each
+submission in `submission-stages.tsv`. This staged design respects HPC4's
+submitted-GPU-job QOS limit. GPU stages exclude `gpu19`; removing that
+exclusion requires a separate successful GPU gate.
 
 ## Archive and transfer
 

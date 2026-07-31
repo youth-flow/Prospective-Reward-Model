@@ -25,14 +25,6 @@ case "${image}" in /project/sigroup/*) ;; *) echo "image must be under /project/
 case "${hf_cache}" in /project/sigroup/*) ;; *) echo "HF cache must be under /project/sigroup" >&2; exit 2 ;; esac
 case "${run_root}" in "/scratch/${USER}/"*) ;; *) echo "run root must be under /scratch/${USER}" >&2; exit 2 ;; esac
 mkdir -p "${run_root}/logs"
-dependency_args=()
-if [[ -n "${PRORM_SBATCH_DEPENDENCY:-}" ]]; then
-  [[ "${PRORM_SBATCH_DEPENDENCY}" =~ ^[0-9]+([:,][0-9]+)*$ ]] || {
-    echo "PRORM_SBATCH_DEPENDENCY must contain only Slurm job IDs" >&2
-    exit 2
-  }
-  dependency_args=(--dependency="afterok:${PRORM_SBATCH_DEPENDENCY}")
-fi
 
 git_commit="$(git -C "${repo_root}" rev-parse HEAD)"
 image_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
@@ -84,7 +76,7 @@ fi
 
 case "${stage}" in
   materialize)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-materialize --partition=gpu-l20 \
+    job_id="$(sbatch --parsable --job-name=prorm-materialize --partition=gpu-l20 \
       --exclude=gpu19 \
       --time="${materialization_time}" --array="${seed_array}" \
       --output="${run_root}/logs/materialize-%A_%a.out" \
@@ -92,20 +84,20 @@ case "${stage}" in
       "${repo_root}/scripts/hpc4/stage_gpu.sbatch")"
     ;;
   fisher-crossfit)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-fisher-crossfit --partition=amd \
+    job_id="$(sbatch --parsable --job-name=prorm-fisher-crossfit --partition=amd \
       --time="${crossfit_time}" --array="0-$((seed_count - 1))" \
       --output="${run_root}/logs/fisher-crossfit-%A_%a.out" \
       --export="${common_export},PRORM_STAGE=fisher-crossfit" \
       "${repo_root}/scripts/hpc4/stage_cpu.sbatch")"
     ;;
   fisher-select)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-fisher-select --partition=amd \
+    job_id="$(sbatch --parsable --job-name=prorm-fisher-select --partition=amd \
       --time="${crossfit_time}" \
       --output="${run_root}/logs/fisher-select-%j.out" \
       --export="${common_export}" "${repo_root}/scripts/hpc4/fisher_select.sbatch")"
     ;;
   reward)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-reward --partition=gpu-l20 \
+    job_id="$(sbatch --parsable --job-name=prorm-reward --partition=gpu-l20 \
       --exclude=gpu19 \
       --time="${reward_time}" --array="${seed_array}" \
       --output="${run_root}/logs/reward-%A_%a.out" \
@@ -113,7 +105,7 @@ case "${stage}" in
       "${repo_root}/scripts/hpc4/stage_gpu.sbatch")"
     ;;
   adapters)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-adapters --partition=gpu-l20 \
+    job_id="$(sbatch --parsable --job-name=prorm-adapters --partition=gpu-l20 \
       --exclude=gpu19 \
       --time="${adapter_time}" --array="${seed_array}" \
       --output="${run_root}/logs/adapters-%A_%a.out" \
@@ -128,7 +120,7 @@ case "${stage}" in
     (( calibration_jobs * calibration_gpus_per_job <= 8 )) \
       || { echo "calibration workers exceed the l20_qos GPU limit" >&2; exit 2; }
     if (( calibration_jobs == 1 )); then calibration_array="0"; else calibration_array="0-$((calibration_jobs - 1))"; fi
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-kl-calibration --partition=gpu-l20 \
+    job_id="$(sbatch --parsable --job-name=prorm-kl-calibration --partition=gpu-l20 \
       --exclude=gpu19 \
       --time="${calibration_time}" --array="${calibration_array}" \
       --gpus-per-node="${calibration_gpus_per_job}" \
@@ -137,7 +129,7 @@ case "${stage}" in
       "${repo_root}/scripts/hpc4/stage_gpu.sbatch")"
     ;;
   kl-calibration-aggregate)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-kl-calibration-aggregate --partition=amd \
+    job_id="$(sbatch --parsable --job-name=prorm-kl-calibration-aggregate --partition=amd \
       --time="${rollout_aggregate_time}" --array="0-$((seed_count - 1))" \
       --output="${run_root}/logs/kl-calibration-aggregate-%A_%a.out" \
       --export="${common_export},PRORM_STAGE=kl-calibration-aggregate" \
@@ -151,7 +143,7 @@ case "${stage}" in
     (( rollout_jobs * gpus_per_job <= 8 )) \
       || { echo "rollout workers exceed the l20_qos GPU limit" >&2; exit 2; }
     if (( rollout_jobs == 1 )); then rollout_array="0"; else rollout_array="0-$((rollout_jobs - 1))"; fi
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-rollout --partition=gpu-l20 \
+    job_id="$(sbatch --parsable --job-name=prorm-rollout --partition=gpu-l20 \
       --exclude=gpu19 \
       --time="${rollout_time}" --array="${rollout_array}" \
       --gpus-per-node="${gpus_per_job}" \
@@ -160,20 +152,20 @@ case "${stage}" in
       "${repo_root}/scripts/hpc4/stage_gpu.sbatch")"
     ;;
   rollout-aggregate)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-rollout-aggregate --partition=amd \
+    job_id="$(sbatch --parsable --job-name=prorm-rollout-aggregate --partition=amd \
       --time="${rollout_aggregate_time}" --array="0-$((seed_count - 1))" \
       --output="${run_root}/logs/rollout-aggregate-%A_%a.out" \
       --export="${common_export},PRORM_STAGE=rollout-aggregate" "${repo_root}/scripts/hpc4/stage_cpu.sbatch")"
     ;;
   aggregate)
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-three-seed-aggregate --partition=amd \
+    job_id="$(sbatch --parsable --job-name=prorm-three-seed-aggregate --partition=amd \
       --time="${aggregate_time}" \
       --output="${run_root}/logs/aggregate-%j.out" \
       --export="${common_export}" "${repo_root}/scripts/hpc4/aggregate.sbatch")"
     ;;
   audit)
     : "${PRORM_SOURCE_RUN_ROOT:?PRORM_SOURCE_RUN_ROOT is required for audit}"
-    job_id="$(sbatch --parsable "${dependency_args[@]}" --job-name=prorm-integrity-audit --partition=amd \
+    job_id="$(sbatch --parsable --job-name=prorm-integrity-audit --partition=amd \
       --time="${aggregate_time}" \
       --output="${run_root}/logs/audit-%j.out" \
       --export="${common_export},PRORM_SOURCE_RUN_ROOT=${PRORM_SOURCE_RUN_ROOT}" \
