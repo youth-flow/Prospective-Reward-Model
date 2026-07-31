@@ -21,9 +21,13 @@ source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
 verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
 source "${PRORM_REPO_ROOT}/scripts/hpc4/runtime.sh"
 
+bind_paths="${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_HF_CACHE}:${PRORM_HF_CACHE},${PRORM_RUN_ROOT}:${PRORM_RUN_ROOT}"
+if [[ -n "${PRORM_SOURCE_RUN_ROOT:-}" ]]; then
+  bind_paths+=",${PRORM_SOURCE_RUN_ROOT}:${PRORM_SOURCE_RUN_ROOT}"
+fi
 container_prefix=(
   prorm_apptainer_exec --cleanenv --nv
-  --bind "${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_HF_CACHE}:${PRORM_HF_CACHE},${PRORM_RUN_ROOT}:${PRORM_RUN_ROOT}"
+  --bind "${bind_paths}"
   --pwd "${PRORM_REPO_ROOT}"
   --env "PYTHONPATH=${PRORM_REPO_ROOT}/src"
   --env "HF_HOME=${PRORM_HF_CACHE}"
