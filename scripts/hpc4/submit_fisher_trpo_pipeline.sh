@@ -121,7 +121,7 @@ fi
 
 output="$(
   PRORM_SOURCE_RUN_ROOT="${source_run_root}" \
-    "${repo_root}/scripts/hpc4/submit_pipeline.sh" \
+    bash "${repo_root}/scripts/hpc4/submit_pipeline.sh" \
     "${config}" "${image}" "${hf_cache}" "${run_root}" "${next_stage}"
 )"
 job_id="$(awk -F= '$1 == "job_id" {print $2}' <<< "${output}")"
