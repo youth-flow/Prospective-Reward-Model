@@ -164,9 +164,9 @@ def prepare_multipref_prompts(
             )
             for split in _SPLIT_ORDER
         )
-        for (_, previous_end, previous_split), (next_start, _, next_split) in zip(
-            intervals, intervals[1:], strict=False
-        ):
+        for interval_index in range(len(intervals) - 1):
+            _, previous_end, previous_split = intervals[interval_index]
+            next_start, _, next_split = intervals[interval_index + 1]
             if previous_end > next_start:
                 raise ValueError(f"split intervals overlap: {previous_split!r} and {next_split!r}")
 

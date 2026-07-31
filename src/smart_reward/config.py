@@ -501,9 +501,9 @@ def _validate_trpo_config(config: Mapping[str, object]) -> dict[str, Any]:
         )
         for name in ("train", "validation", "test")
     )
-    for (_, previous_end, previous_name), (next_start, _, next_name) in zip(
-        intervals, intervals[1:], strict=False
-    ):
+    for interval_index in range(len(intervals) - 1):
+        _, previous_end, previous_name = intervals[interval_index]
+        next_start, _, next_name = intervals[interval_index + 1]
         if previous_end > next_start:
             raise ConfigError(f"run.split_offsets overlap: {previous_name!r} and {next_name!r}")
     if split_offsets["train"] != 0:
