@@ -58,7 +58,47 @@ PY
 )
 
 task="${SLURM_ARRAY_TASK_ID}"
-if [[ "${PRORM_STAGE}" = "rollout-worker" ]]; then
+if [[ "${PRORM_STAGE}" = "kl-calibration-worker" ]]; then
+  : "${PRORM_CALIBRATION_WORKERS:?}"
+  : "${PRORM_CALIBRATION_GPUS_PER_JOB:?}"
+  mapfile -t policies < <(
+    run_container python -m smart_reward.cli policy-names "${PRORM_CONFIG}" | tail -n +2
+  )
+  IFS=',' read -r -a visible_gpus <<< "${CUDA_VISIBLE_DEVICES:?}"
+  (( ${#visible_gpus[@]} == PRORM_CALIBRATION_GPUS_PER_JOB )) || {
+    echo "allocated GPU visibility does not match PRORM_CALIBRATION_GPUS_PER_JOB" >&2
+    exit 2
+  }
+  total_tasks=$(( ${#seeds[@]} * ${#policies[@]} ))
+
+  run_calibration_slot() {
+    local global_worker="$1"
+    local device="$2"
+    local calibration_task seed_index policy_index seed
+    for ((calibration_task = global_worker; calibration_task < total_tasks; calibration_task += PRORM_CALIBRATION_WORKERS)); do
+      seed_index=$((calibration_task / ${#policies[@]}))
+      policy_index=$((calibration_task % ${#policies[@]}))
+      seed="${seeds[seed_index]}"
+      run_container_on_gpu "${device}" python -m smart_reward.cli run-stage \
+        "${PRORM_CONFIG}" "${PRORM_RUN_ROOT}/seed-${seed}" \
+        --stage kl-calibration-policy --seed "${seed}" --device cuda \
+        --policy-name "${policies[policy_index]}"
+    done
+  }
+
+  pids=()
+  for ((local_worker = 0; local_worker < PRORM_CALIBRATION_GPUS_PER_JOB; local_worker++)); do
+    global_worker=$((task * PRORM_CALIBRATION_GPUS_PER_JOB + local_worker))
+    (( global_worker < PRORM_CALIBRATION_WORKERS )) || continue
+    run_calibration_slot "${global_worker}" "${visible_gpus[local_worker]}" &
+    pids+=("$!")
+  done
+  failed=0
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || failed=1
+  done
+  exit "${failed}"
+elif [[ "${PRORM_STAGE}" = "rollout-worker" ]]; then
   : "${PRORM_ROLLOUT_WORKERS:?}"
   : "${PRORM_ROLLOUT_GPUS_PER_JOB:?}"
   mapfile -t policies < <(run_container python -m smart_reward.cli policy-names "${PRORM_CONFIG}")
@@ -100,7 +140,25 @@ else
   (( task >= 0 && task < ${#seeds[@]} )) || { echo "invalid seed index" >&2; exit 2; }
   seed="${seeds[task]}"
   seed_root="${PRORM_RUN_ROOT}/seed-${seed}"
+  extra_args=()
+  if [[ "${PRORM_STAGE}" = "materialize" && -n "${PRORM_SOURCE_RUN_ROOT:-}" ]]; then
+    extra_args+=(--reuse-splits-from "${PRORM_SOURCE_RUN_ROOT}/seed-${seed}/artifact")
+  fi
+  if [[ "${PRORM_STAGE}" = "reward" && -n "${PRORM_SOURCE_RUN_ROOT:-}" ]]; then
+    mkdir -p "${seed_root}/reward_provenance"
+    source_reward="${PRORM_SOURCE_RUN_ROOT}/seed-${seed}/reward_result.json"
+    target_reward="${seed_root}/reward_provenance/mle-source.json"
+    if [[ -f "${target_reward}" ]]; then
+      cmp -s "${source_reward}" "${target_reward}" || {
+        echo "existing MLE source differs from the requested formal source" >&2
+        exit 2
+      }
+    else
+      cp --preserve=mode,timestamps "${source_reward}" "${target_reward}"
+    fi
+  fi
   run_container python -m smart_reward.cli run-stage \
     "${PRORM_CONFIG}" "${seed_root}" \
-    --stage "${PRORM_STAGE}" --seed "${seed}" --device cuda
+    --stage "${PRORM_STAGE}" --seed "${seed}" --device cuda \
+    "${extra_args[@]}"
 fi

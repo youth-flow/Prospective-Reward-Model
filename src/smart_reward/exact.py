@@ -452,6 +452,49 @@ def fit_mle_reward(
     )
 
 
+@torch.no_grad()
+def validate_mle_reward_fit(
+    train: ExactSplitData,
+    weight: torch.Tensor,
+    config: MLETrainingConfig | None = None,
+    *,
+    source_iterations: int,
+) -> RewardFitResult:
+    """Recompute the MLE scientific convergence gate without rerunning LBFGS."""
+
+    effective = MLETrainingConfig() if config is None else config
+    if not isinstance(effective, MLETrainingConfig):
+        raise TypeError("config must be MLETrainingConfig")
+    if (
+        not isinstance(weight, torch.Tensor)
+        or weight.shape != (train.reward_dimension,)
+        or not bool(torch.isfinite(weight).all())
+    ):
+        raise ValueError("weight must be a finite reward-head vector")
+    _positive_integer("source_iterations", source_iterations)
+    design, target_margins = _edge_design(train)
+    design = design.to(dtype=torch.float64)
+    targets = torch.sigmoid(target_margins.to(dtype=torch.float64))
+    candidate = weight.detach().to(device=design.device, dtype=torch.float64)
+    objective, gradient = _mle_objective_and_gradient(design, targets, candidate)
+    gradient_norm = float(torch.linalg.vector_norm(gradient).item())
+    result = RewardFitResult(
+        method="MLE-RM",
+        weight=candidate,
+        objective=float(objective.item()),
+        gradient_norm=gradient_norm,
+        converged=gradient_norm <= effective.gradient_tolerance,
+        iterations=source_iterations,
+        head_sha256=_head_sha256(candidate),
+    )
+    if not result.converged:
+        raise RuntimeError(
+            "reused MLE-RM head did not pass recomputed gradient gate: "
+            f"gradient_norm={gradient_norm:.3e}"
+        )
+    return result
+
+
 def _require_converged(name: str, result: PCGResult) -> torch.Tensor:
     if not result.converged:
         raise RuntimeError(
@@ -748,4 +791,5 @@ __all__ = [
     "pairwise_differences",
     "policy_reward_moment",
     "validate_pro_reward_fit",
+    "validate_mle_reward_fit",
 ]

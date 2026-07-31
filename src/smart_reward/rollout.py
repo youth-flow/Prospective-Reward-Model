@@ -15,10 +15,11 @@ import torch
 
 from .artifacts import exact_delta_artifact_metadata_sha256
 from .checkpoints import validate_stage_receipt, write_stage_receipt
-from .config import PROTOCOL, config_hash, validate_config
-from .evaluation import summarize_rollouts
+from .config import PROTOCOL, TRPO_PROTOCOL, config_hash, validate_config
+from .evaluation import summarize_rollouts, summarize_trpo_rollouts
 from .exact_policy import SCHEMA as ADAPTER_SCHEMA
 from .hf import generate_exact_candidates, score_exact_candidates, score_oracle_chats
+from .kl_calibration import validate_calibrated_trpo_adapters
 from .prompts import PromptRecord, load_prompt_jsonl
 from .runtime import (
     decode_response,
@@ -31,6 +32,7 @@ from .runtime import (
     sha256_file,
 )
 from .seeding import SeedBundle, derive_seed
+from .trpo_policy import adapter_name as _trpo_adapter_name
 
 SCHEMA = "prorm-policy-utility/v2"
 POLICY_SCHEMA = "prorm-single-policy-rollout/v1"
@@ -47,6 +49,15 @@ def _adapter_name(method: str, beta: float) -> str:
 
 def policy_instance_names(config: Mapping[str, object]) -> list[str]:
     normalized = validate_config(config)
+    if normalized["protocol"] == TRPO_PROTOCOL:
+        return [
+            "pi0",
+            *[
+                _trpo_adapter_name(method, float(target))
+                for method in ("mle_rm", "pro_rm", "oracle")
+                for target in normalized["policy_update"]["kl_targets"]
+            ],
+        ]
     return [
         "pi0",
         *[
@@ -102,16 +113,23 @@ def _load_adapter_metadata(
     config: Mapping[str, Any], adapter_dir: str | os.PathLike[str], *, seed: int
 ) -> tuple[Path, dict[str, Any], list[str]]:
     adapters_root = Path(adapter_dir)
-    metadata = _read_json(adapters_root / "metadata.json")
-    if metadata.get("schema") != ADAPTER_SCHEMA:
-        raise ValueError("unsupported adapter metadata")
+    if config["protocol"] == TRPO_PROTOCOL:
+        metadata = validate_calibrated_trpo_adapters(
+            config,
+            adapters_root,
+            seed=seed,
+        )
+    else:
+        metadata = _read_json(adapters_root / "metadata.json")
+        if metadata.get("schema") != ADAPTER_SCHEMA:
+            raise ValueError("unsupported adapter metadata")
     if metadata.get("config_sha256") != config_hash(config):
         raise ValueError("adapter config mismatch")
     if metadata.get("seed") != seed:
         raise ValueError("adapter seed mismatch")
     names = policy_instance_names(config)[1:]
     if set(metadata.get("adapters", {})) != set(names):
-        raise ValueError("adapter inventory does not match the configured beta grid")
+        raise ValueError("adapter inventory does not match the configured policy grid")
     return adapters_root, metadata, names
 
 
@@ -276,8 +294,16 @@ def _policy_descriptor(
     policy_name: str, adapter_metadata: Mapping[str, Any]
 ) -> dict[str, str | float | None]:
     if policy_name == "pi0":
+        if adapter_metadata.get("protocol") == TRPO_PROTOCOL:
+            return {"policy_instance": "pi0", "reward_source": "pi0", "kl_target": None}
         return {"policy_instance": "pi0", "reward_source": "pi0", "beta": None}
     record = adapter_metadata["adapters"][policy_name]
+    if adapter_metadata.get("protocol") == TRPO_PROTOCOL:
+        return {
+            "policy_instance": policy_name,
+            "reward_source": str(record["reward_source"]),
+            "kl_target": float(record["kl_target"]),
+        }
     return {
         "policy_instance": policy_name,
         "reward_source": str(record["reward_source"]),
@@ -317,7 +343,7 @@ def validate_single_policy_rollout(
     metadata = _read_json(metadata_path)
     expected_metadata = {
         "schema": POLICY_SCHEMA,
-        "protocol": PROTOCOL,
+        "protocol": normalized["protocol"],
         "config_sha256": config_hash(normalized),
         "seed": seed,
         "artifact_metadata_sha256": artifact_identity,
@@ -365,7 +391,10 @@ def evaluate_single_policy_rollout(
     local_files_only: bool = True,
 ) -> dict[str, Any]:
     normalized = validate_config(config)
-    if normalized["protocol"] != PROTOCOL or seed not in normalized["run"]["seeds"]:
+    if (
+        normalized["protocol"] not in {PROTOCOL, TRPO_PROTOCOL}
+        or seed not in normalized["run"]["seeds"]
+    ):
         raise ValueError("protocol or seed mismatch")
     if policy_name not in policy_instance_names(normalized):
         raise ValueError(f"unknown policy instance: {policy_name}")
@@ -479,7 +508,11 @@ def evaluate_single_policy_rollout(
                         **row,
                         "policy": descriptor["reward_source"],
                         "policy_instance": descriptor["policy_instance"],
-                        "beta": descriptor["beta"],
+                        **(
+                            {"kl_target": descriptor["kl_target"]}
+                            if "kl_target" in descriptor
+                            else {"beta": descriptor["beta"]}
+                        ),
                     }
                     for row in batch_rows
                 )
@@ -511,7 +544,7 @@ def evaluate_single_policy_rollout(
         all_rows.extend(shard["rows"])
     metadata = {
         "schema": POLICY_SCHEMA,
-        "protocol": PROTOCOL,
+        "protocol": normalized["protocol"],
         "config_sha256": config_hash(normalized),
         "seed": seed,
         "artifact_metadata_sha256": artifact_identity,
@@ -599,29 +632,48 @@ def assemble_policy_rollouts(
         )
     samples = {name: _rows_to_samples(rows_by_name[name], prompts, responses) for name in names}
     reference_rewards, _ = samples["pi0"]
-    beta_grid = [float(value) for value in normalized["policy_update"]["beta_grid"]]
     metrics: dict[str, Any] = {}
-    for beta in beta_grid:
-        oracle_reward, oracle_ratio = samples[_adapter_name("oracle", beta)]
-        beta_metrics = {
-            method: summarize_rollouts(
-                *samples[_adapter_name(method, beta)],
+    if normalized["protocol"] == TRPO_PROTOCOL:
+        for target_raw in normalized["policy_update"]["kl_targets"]:
+            target_value = float(target_raw)
+            target_metrics = {
+                method: summarize_trpo_rollouts(
+                    *samples[_trpo_adapter_name(method, target_value)],
+                    kl_target=target_value,
+                    reference_oracle_rewards=reference_rewards,
+                )
+                for method in ("mle_rm", "pro_rm", "oracle")
+            }
+            target_metrics["pi0"] = summarize_trpo_rollouts(
+                reference_rewards,
+                torch.zeros_like(reference_rewards),
+                kl_target=target_value,
+                reference_oracle_rewards=reference_rewards,
+            )
+            metrics[str(target_value)] = target_metrics
+    else:
+        beta_grid = [float(value) for value in normalized["policy_update"]["beta_grid"]]
+        for beta in beta_grid:
+            oracle_reward, oracle_ratio = samples[_adapter_name("oracle", beta)]
+            beta_metrics = {
+                method: summarize_rollouts(
+                    *samples[_adapter_name(method, beta)],
+                    beta=beta,
+                    reference_oracle_rewards=reference_rewards,
+                    oracle_ngd_oracle_rewards=oracle_reward,
+                    oracle_ngd_forward_log_ratios=oracle_ratio,
+                )
+                for method in ("mle_rm", "pro_rm", "oracle")
+            }
+            beta_metrics["pi0"] = summarize_rollouts(
+                reference_rewards,
+                torch.zeros_like(reference_rewards),
                 beta=beta,
                 reference_oracle_rewards=reference_rewards,
                 oracle_ngd_oracle_rewards=oracle_reward,
                 oracle_ngd_forward_log_ratios=oracle_ratio,
             )
-            for method in ("mle_rm", "pro_rm", "oracle")
-        }
-        beta_metrics["pi0"] = summarize_rollouts(
-            reference_rewards,
-            torch.zeros_like(reference_rewards),
-            beta=beta,
-            reference_oracle_rewards=reference_rewards,
-            oracle_ngd_oracle_rewards=oracle_reward,
-            oracle_ngd_forward_log_ratios=oracle_ratio,
-        )
-        metrics[str(beta)] = beta_metrics
+            metrics[str(beta)] = beta_metrics
     artifact_identity = exact_delta_artifact_metadata_sha256(
         artifact_root,
         expected_config_hash=config_hash(normalized),
@@ -630,7 +682,7 @@ def assemble_policy_rollouts(
     adapter_identity = sha256_file(adapters_root / "metadata.json")
     payload = {
         "schema": SCHEMA,
-        "protocol": PROTOCOL,
+        "protocol": normalized["protocol"],
         "config_sha256": config_hash(normalized),
         "seed": seed,
         "artifact_metadata_sha256": artifact_identity,

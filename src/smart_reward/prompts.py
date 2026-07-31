@@ -96,6 +96,7 @@ def prepare_multipref_prompts(
     split_sizes: Mapping[str, int],
     seed: int,
     text_filter: Callable[[str], bool] | None = None,
+    split_offsets: Mapping[str, int] | None = None,
 ) -> list[PromptRecord]:
     """Deduplicate MultiPref rows and split prompts deterministically.
 
@@ -140,16 +141,44 @@ def prepare_multipref_prompts(
             prompt_id: text for prompt_id, text in prompt_text.items() if text_filter(text)
         }
 
-    required = sum(normalized_sizes.values())
+    if split_offsets is None:
+        normalized_offsets: dict[Split, int] = {}
+        running_offset = 0
+        for split in _SPLIT_ORDER:
+            normalized_offsets[split] = running_offset
+            running_offset += normalized_sizes[split]
+    else:
+        if set(split_offsets) != set(_SPLIT_ORDER):
+            raise ValueError(f"split_offsets must contain exactly {_SPLIT_ORDER}")
+        normalized_offsets = {}
+        for split in _SPLIT_ORDER:
+            offset = split_offsets[split]
+            if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+                raise ValueError(f"split offset for {split!r} must be a non-negative integer")
+            normalized_offsets[split] = offset
+        intervals = sorted(
+            (
+                normalized_offsets[split],
+                normalized_offsets[split] + normalized_sizes[split],
+                split,
+            )
+            for split in _SPLIT_ORDER
+        )
+        for (_, previous_end, previous_split), (next_start, _, next_split) in zip(
+            intervals, intervals[1:], strict=False
+        ):
+            if previous_end > next_start:
+                raise ValueError(f"split intervals overlap: {previous_split!r} and {next_split!r}")
+
+    required = max(normalized_offsets[split] + normalized_sizes[split] for split in _SPLIT_ORDER)
     if len(prompt_text) < required:
         raise ValueError(f"need {required} unique prompts, found only {len(prompt_text)}")
     prompt_ids = sorted(prompt_text)
     random.Random(seed).shuffle(prompt_ids)
-    prompt_ids = prompt_ids[:required]
 
     records: list[PromptRecord] = []
-    offset = 0
     for split in _SPLIT_ORDER:
+        offset = normalized_offsets[split]
         for prompt_id in prompt_ids[offset : offset + normalized_sizes[split]]:
             records.append(
                 PromptRecord(
@@ -158,7 +187,6 @@ def prepare_multipref_prompts(
                     split=split,
                 )
             )
-        offset += normalized_sizes[split]
     return records
 
 
@@ -205,6 +233,7 @@ def load_multipref_prompts(
     revision: str,
     split_sizes: Mapping[str, int],
     seed: int,
+    split_offsets: Mapping[str, int] | None = None,
 ) -> list[PromptRecord]:
     """Load a pinned MultiPref revision and prepare deterministic prompts."""
 
@@ -215,7 +244,12 @@ def load_multipref_prompts(
             "datasets is required for prompt download; install prospective-reward-model[llm]"
         ) from error
     dataset = load_dataset(dataset_name, revision=revision, split="train")
-    return prepare_multipref_prompts(dataset, split_sizes=split_sizes, seed=seed)
+    return prepare_multipref_prompts(
+        dataset,
+        split_sizes=split_sizes,
+        seed=seed,
+        split_offsets=split_offsets,
+    )
 
 
 def save_prompt_jsonl(path: str | os.PathLike[str], records: Iterable[PromptRecord]) -> None:

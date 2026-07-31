@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .config import PROTOCOL, config_hash, validate_config
+from .config import TRPO_PROTOCOL, config_hash, validate_config
 from .runtime import producer_identity, sha256_file
 
 
@@ -63,7 +63,10 @@ def aggregate_results(
     if sorted(rewards) != sorted(expected_seeds) or sorted(rollouts) != sorted(expected_seeds):
         raise ValueError("reward and rollout inputs must cover every configured seed exactly once")
     for payload in (*rewards.values(), *rollouts.values()):
-        if payload.get("config_sha256") != digest or payload.get("protocol") != PROTOCOL:
+        if (
+            payload.get("config_sha256") != digest
+            or payload.get("protocol") != normalized["protocol"]
+        ):
             raise ValueError("aggregate input protocol/config mismatch")
         if payload.get("producer") != producer_identity():
             raise ValueError("aggregate input producer identity mismatch")
@@ -89,8 +92,13 @@ def aggregate_results(
     rollout: dict[str, Any] = {}
     local_paired: dict[str, Any] = {}
     rollout_paired: dict[str, Any] = {}
-    for beta in normalized["policy_update"]["beta_grid"]:
-        key = str(float(beta))
+    grid = (
+        normalized["policy_update"]["kl_targets"]
+        if normalized["protocol"] == TRPO_PROTOCOL
+        else normalized["policy_update"]["beta_grid"]
+    )
+    for value in grid:
+        key = str(float(value))
         local[key] = {
             method: {
                 metric: _summary(
@@ -129,9 +137,13 @@ def aggregate_results(
             )
             for metric in normalized["evaluation"]["rollout"]["metrics"]
         }
-    return {
-        "schema": "prorm-three-seed-aggregate/v1",
-        "protocol": PROTOCOL,
+    result = {
+        "schema": (
+            "prorm-three-seed-aggregate/v2"
+            if normalized["protocol"] == TRPO_PROTOCOL
+            else "prorm-three-seed-aggregate/v1"
+        ),
+        "protocol": normalized["protocol"],
         "config_sha256": digest,
         "seeds": expected_seeds,
         "reward_fit": reward_metrics,
@@ -151,6 +163,14 @@ def aggregate_results(
             },
         },
     }
+    if normalized["protocol"] == TRPO_PROTOCOL:
+        primary_key = str(float(normalized["policy_update"]["primary_kl_target"]))
+        result["primary_estimand"] = {
+            "name": "fresh_rollout_reward_improvement_pro_minus_mle",
+            "kl_target": float(normalized["policy_update"]["primary_kl_target"]),
+            "summary": rollout_paired[primary_key]["reward_improvement"],
+        }
+    return result
 
 
 __all__ = ["aggregate_results"]

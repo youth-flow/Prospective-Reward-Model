@@ -8,13 +8,17 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .config import ConfigError, config_hash, load_config
+from .config import TRPO_PROTOCOL, ConfigError, config_hash, load_config
 from .exact_phase import materialize_exact_delta
 from .exact_policy import export_exact_ngd_adapters
 from .exact_run import run_exact_reward_comparison
+from .fisher_crossfit import run_fisher_crossfit, select_fisher_regularization
 from .pipeline import (
     import_materialization_stage,
     run_adapter_stage,
+    run_fisher_crossfit_stage,
+    run_kl_calibration_aggregate_stage,
+    run_kl_calibration_policy_stage,
     run_materialization_stage,
     run_policy_rollout_stage,
     run_reward_stage,
@@ -22,6 +26,8 @@ from .pipeline import (
 )
 from .rollout import evaluate_policy_rollouts, policy_instance_names
 from .statistics import aggregate_results
+from .trpo_policy import export_trpo_adapters
+from .trpo_run import run_trpo_reward_comparison
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -47,6 +53,7 @@ def _materialize(arguments: argparse.Namespace) -> int:
         artifact_dir=arguments.artifact_dir,
         device=arguments.device,
         local_files_only=not arguments.allow_download,
+        reuse_splits_from=arguments.reuse_splits_from,
     )
     return 0
 
@@ -63,20 +70,58 @@ def _import_materialization(arguments: argparse.Namespace) -> int:
 
 
 def _train_rewards(arguments: argparse.Namespace) -> int:
-    run_exact_reward_comparison(
+    config = load_config(arguments.config)
+    if config["protocol"] == TRPO_PROTOCOL:
+        if arguments.fisher_selection is None:
+            raise ValueError("--fisher-selection is required by the Fisher-TRPO protocol")
+        run_trpo_reward_comparison(
+            config,
+            arguments.artifact_dir,
+            arguments.fisher_selection,
+            arguments.output,
+            seed=arguments.seed,
+            device=arguments.device,
+            reuse_mle_from=arguments.reuse_mle_from,
+        )
+    else:
+        run_exact_reward_comparison(
+            config,
+            arguments.artifact_dir,
+            arguments.output,
+            seed=arguments.seed,
+            device=arguments.device,
+            reuse_pro_from=arguments.reuse_pro_from,
+        )
+    return 0
+
+
+def _fisher_crossfit(arguments: argparse.Namespace) -> int:
+    run_fisher_crossfit(
         load_config(arguments.config),
         arguments.artifact_dir,
         arguments.output,
         seed=arguments.seed,
         device=arguments.device,
-        reuse_pro_from=arguments.reuse_pro_from,
+    )
+    return 0
+
+
+def _select_fisher(arguments: argparse.Namespace) -> int:
+    select_fisher_regularization(
+        load_config(arguments.config),
+        arguments.crossfit_results,
+        arguments.output,
     )
     return 0
 
 
 def _export_policies(arguments: argparse.Namespace) -> int:
-    export_exact_ngd_adapters(
-        load_config(arguments.config),
+    config = load_config(arguments.config)
+    exporter = (
+        export_trpo_adapters if config["protocol"] == TRPO_PROTOCOL else export_exact_ngd_adapters
+    )
+    exporter(
+        config,
         arguments.artifact_dir,
         arguments.reward_result,
         arguments.output_dir,
@@ -102,6 +147,10 @@ def _evaluate_rollouts(arguments: argparse.Namespace) -> int:
 
 def _run_seed(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
+    if config["protocol"] == TRPO_PROTOCOL:
+        raise ValueError(
+            "Fisher-TRPO requires the cross-seed staged workflow; run-seed is disabled"
+        )
     root = Path(arguments.output_dir)
     run_materialization_stage(
         config,
@@ -131,6 +180,7 @@ def _run_seed(arguments: argparse.Namespace) -> int:
             seed=arguments.seed,
             device=arguments.device,
             local_files_only=not arguments.allow_download,
+            reuse_splits_from=arguments.reuse_splits_from,
         )
     run_rollout_aggregate_stage(config, root, seed=arguments.seed)
     return 0
@@ -147,12 +197,21 @@ def _run_stage(arguments: argparse.Namespace) -> int:
             device=arguments.device,
             local_files_only=not arguments.allow_download,
         )
+    elif arguments.stage == "fisher-crossfit":
+        run_fisher_crossfit_stage(
+            config,
+            arguments.seed_root,
+            **common,
+            device=arguments.device,
+        )
     elif arguments.stage == "reward":
         run_reward_stage(
             config,
             arguments.seed_root,
             **common,
             device=arguments.device,
+            fisher_selection=arguments.fisher_selection,
+            reuse_mle_from=arguments.reuse_mle_from,
         )
     elif arguments.stage == "adapters":
         run_adapter_stage(
@@ -161,6 +220,23 @@ def _run_stage(arguments: argparse.Namespace) -> int:
             **common,
             device=arguments.device,
             local_files_only=not arguments.allow_download,
+        )
+    elif arguments.stage == "kl-calibration-policy":
+        if arguments.policy_name is None or arguments.policy_name == "pi0":
+            raise ValueError("--policy-name must name an updated policy for kl-calibration-policy")
+        run_kl_calibration_policy_stage(
+            config,
+            arguments.seed_root,
+            **common,
+            policy_name=arguments.policy_name,
+            device=arguments.device,
+            local_files_only=not arguments.allow_download,
+        )
+    elif arguments.stage == "kl-calibration-aggregate":
+        run_kl_calibration_aggregate_stage(
+            config,
+            arguments.seed_root,
+            **common,
         )
     elif arguments.stage == "rollout-policy":
         if arguments.policy_name is None:
@@ -213,7 +289,10 @@ def _add_execution_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prorm",
-        description="Exact-delta MLE-RM/Pro-RM training and common-beta NGD evaluation.",
+        description=(
+            "Exact-delta ProRM experiments with legacy common-beta NGD and "
+            "Fisher-corrected matched-KL TRPO protocols."
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -226,6 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
     materialize.add_argument("artifact_dir")
     _add_execution_options(materialize)
     materialize.set_defaults(handler=_materialize)
+    materialize.add_argument("--reuse-splits-from")
 
     materialize_import = commands.add_parser("import-materialization")
     materialize_import.add_argument("config")
@@ -242,7 +322,23 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--seed", type=int, required=True)
     train.add_argument("--device", default="cuda")
     train.add_argument("--reuse-pro-from")
+    train.add_argument("--reuse-mle-from")
+    train.add_argument("--fisher-selection")
     train.set_defaults(handler=_train_rewards)
+
+    crossfit = commands.add_parser("fisher-crossfit")
+    crossfit.add_argument("config")
+    crossfit.add_argument("artifact_dir")
+    crossfit.add_argument("output")
+    crossfit.add_argument("--seed", type=int, required=True)
+    crossfit.add_argument("--device", default="cpu")
+    crossfit.set_defaults(handler=_fisher_crossfit)
+
+    select_fisher = commands.add_parser("select-fisher")
+    select_fisher.add_argument("config")
+    select_fisher.add_argument("output")
+    select_fisher.add_argument("--crossfit-results", nargs="+", required=True)
+    select_fisher.set_defaults(handler=_select_fisher)
 
     policies = commands.add_parser("export-policies")
     policies.add_argument("config")
@@ -272,9 +368,21 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument(
         "--stage",
         required=True,
-        choices=("materialize", "reward", "adapters", "rollout-policy", "rollout-aggregate"),
+        choices=(
+            "materialize",
+            "fisher-crossfit",
+            "reward",
+            "adapters",
+            "kl-calibration-policy",
+            "kl-calibration-aggregate",
+            "rollout-policy",
+            "rollout-aggregate",
+        ),
     )
     stage.add_argument("--policy-name")
+    stage.add_argument("--fisher-selection")
+    stage.add_argument("--reuse-mle-from")
+    stage.add_argument("--reuse-splits-from")
     _add_execution_options(stage)
     stage.set_defaults(handler=_run_stage)
 

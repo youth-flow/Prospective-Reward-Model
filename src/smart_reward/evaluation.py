@@ -16,6 +16,7 @@ from .exact import (
 )
 from .linear import DampedEmpiricalFisher
 from .pcg import pcg
+from .policy_update import scale_direction_to_quadratic_kl
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,18 @@ class LocalPolicyMetrics:
     local_target_utility: float
     tabular_optimal_utility: float
     tabular_regret: float
+
+    def to_dict(self) -> dict[str, float]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class TrustRegionLocalMetrics:
+    fisher_cosine: float
+    local_reward_improvement: float
+    quadratic_forward_kl: float
+    finite_pool_reward_improvement: float
+    finite_pool_forward_kl: float
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -217,6 +230,71 @@ def evaluate_reference_policy(
     return evaluate_local_policy(split, zeros, beta=beta, settings=settings)
 
 
+@torch.no_grad()
+def evaluate_trpo_local_policy(
+    split: ExactSplitData,
+    update: torch.Tensor,
+    *,
+    kl_target: float,
+    settings: GeometrySettings,
+) -> TrustRegionLocalMetrics:
+    """Evaluate a fixed train-scaled update on a held-out candidate pool."""
+
+    target = float(kl_target)
+    if not math.isfinite(target) or target <= 0.0:
+        raise ValueError("kl_target must be finite and positive")
+    if (
+        not isinstance(update, torch.Tensor)
+        or update.shape != (split.policy_dimension,)
+        or not bool(torch.isfinite(update).all())
+    ):
+        raise ValueError("update must be a finite policy-tangent vector")
+    fisher, _, _ = _geometry(split, settings)
+    predicted = update.to(device=split.policy_scores.device, dtype=torch.float64)
+    oracle_direction = solve_natural_direction(split, split.true_rewards, settings)
+    oracle_update, _, _ = scale_direction_to_quadratic_kl(
+        oracle_direction,
+        fisher.matvec,
+        kl_target=target,
+    )
+    rewards = split.true_rewards.to(dtype=torch.float64)
+    scores = split.policy_scores.to(dtype=torch.float64)
+    moment = policy_reward_moment(scores, rewards)
+    logits = torch.einsum("pmd,d->pm", scores, predicted)
+    probabilities = torch.softmax(logits, dim=1)
+    reference_reward = rewards.mean(dim=1)
+    updated_reward = (probabilities * rewards).sum(dim=1)
+    log_reference = -math.log(split.num_candidates)
+    finite_kl = (probabilities * (torch.log(probabilities) - log_reference)).sum(dim=1)
+    return TrustRegionLocalMetrics(
+        fisher_cosine=_fisher_cosine(predicted, oracle_update, fisher),
+        local_reward_improvement=float(torch.dot(moment, predicted).item()),
+        quadratic_forward_kl=0.5 * float(_quadratic(predicted, fisher).item()),
+        finite_pool_reward_improvement=float((updated_reward - reference_reward).mean().item()),
+        finite_pool_forward_kl=float(finite_kl.mean().item()),
+    )
+
+
+@torch.no_grad()
+def evaluate_trpo_reference_policy(
+    split: ExactSplitData,
+    *,
+    kl_target: float,
+    settings: GeometrySettings,
+) -> TrustRegionLocalMetrics:
+    zeros = torch.zeros(
+        split.policy_dimension,
+        device=split.policy_scores.device,
+        dtype=torch.float64,
+    )
+    return evaluate_trpo_local_policy(
+        split,
+        zeros,
+        kl_target=kl_target,
+        settings=settings,
+    )
+
+
 def summarize_rollouts(
     oracle_rewards: torch.Tensor,
     forward_log_ratios: torch.Tensor,
@@ -263,12 +341,49 @@ def summarize_rollouts(
     }
 
 
+def summarize_trpo_rollouts(
+    oracle_rewards: torch.Tensor,
+    forward_log_ratios: torch.Tensor,
+    *,
+    kl_target: float,
+    reference_oracle_rewards: torch.Tensor,
+) -> dict[str, Any]:
+    """Aggregate matched-KL rollout metrics by prompt."""
+
+    tensors = (oracle_rewards, forward_log_ratios, reference_oracle_rewards)
+    if any(not isinstance(value, torch.Tensor) or value.ndim != 2 for value in tensors):
+        raise TypeError("rollout inputs must have shape (prompts, responses)")
+    if any(value.shape != oracle_rewards.shape for value in tensors[1:]):
+        raise ValueError("all rollout inputs must have identical shapes")
+    if any(not bool(torch.isfinite(value).all()) for value in tensors):
+        raise ValueError("rollout inputs must be finite")
+    target = float(kl_target)
+    if not math.isfinite(target) or target <= 0.0:
+        raise ValueError("kl_target must be finite and positive")
+    reward_by_prompt = oracle_rewards.mean(dim=1)
+    kl_by_prompt = forward_log_ratios.mean(dim=1)
+    reference_by_prompt = reference_oracle_rewards.mean(dim=1)
+    return {
+        "oracle_reward": float(reward_by_prompt.mean().item()),
+        "reward_improvement": float((reward_by_prompt - reference_by_prompt).mean().item()),
+        "forward_kl": float(kl_by_prompt.mean().item()),
+        "kl_target_error": float(kl_by_prompt.mean().item() - target),
+        "sampling_unit": "prompt",
+        "num_prompts": oracle_rewards.shape[0],
+        "responses_per_prompt": oracle_rewards.shape[1],
+    }
+
+
 __all__ = [
     "GeometrySettings",
     "LocalPolicyMetrics",
+    "TrustRegionLocalMetrics",
     "evaluate_local_policy",
     "evaluate_reference_policy",
+    "evaluate_trpo_local_policy",
+    "evaluate_trpo_reference_policy",
     "solve_natural_direction",
     "summarize_rollouts",
+    "summarize_trpo_rollouts",
     "validate_natural_direction",
 ]

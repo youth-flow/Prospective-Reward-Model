@@ -17,11 +17,17 @@ from .checkpoints import (
     write_provenance_bridge,
     write_stage_receipt,
 )
-from .config import config_hash, validate_config
+from .config import TRPO_PROTOCOL, config_hash, validate_config
 from .exact_phase import materialize_exact_delta
 from .exact_policy import SCHEMA as ADAPTER_SCHEMA
 from .exact_policy import export_exact_ngd_adapters, validate_adapter_metadata
 from .exact_run import load_exact_reward_comparison, run_exact_reward_comparison
+from .fisher_crossfit import load_fisher_crossfit, run_fisher_crossfit
+from .kl_calibration import (
+    assemble_calibrated_trpo_adapters,
+    calibrate_trpo_adapter_policy,
+    validate_calibrated_trpo_adapters,
+)
 from .rollout import (
     assemble_policy_rollouts,
     evaluate_single_policy_rollout,
@@ -29,6 +35,8 @@ from .rollout import (
     validate_single_policy_rollout,
 )
 from .runtime import producer_identity, sha256_file
+from .trpo_policy import export_trpo_adapters, validate_trpo_adapter_metadata
+from .trpo_run import load_trpo_reward_comparison, run_trpo_reward_comparison
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -84,6 +92,31 @@ def _artifact_outputs(
     return outputs
 
 
+def _native_materialization_inputs(artifact: Path) -> dict[str, str]:
+    metadata = _read_json(artifact / "metadata.json")
+    reuse = metadata.get("evidence", {}).get("split_component_reuse")
+    if reuse is None:
+        return {}
+    if (
+        not isinstance(reuse, dict)
+        or reuse.get("schema") != "prorm-split-component-reuse/v1"
+        or reuse.get("splits") != ["train", "validation"]
+    ):
+        raise ValueError("split-component reuse evidence is malformed")
+    fields = {
+        "source_artifact_metadata": "source_artifact_metadata_sha256",
+        "source_artifact_tensors": "source_artifact_tensors_sha256",
+        "source_prompts": "source_prompts_sha256",
+        "source_candidates": "source_candidates_sha256",
+    }
+    if "source_materialize_receipt_sha256" in reuse:
+        fields["source_materialize_receipt"] = "source_materialize_receipt_sha256"
+    result = {name: reuse[field] for name, field in fields.items()}
+    if any(not isinstance(value, str) or len(value) != 64 for value in result.values()):
+        raise ValueError("split-component reuse digests are malformed")
+    return result
+
+
 def _ensure_receipt(
     path: Path,
     config: Mapping[str, object],
@@ -120,6 +153,7 @@ def run_materialization_stage(
     seed: int,
     device: str = "cuda",
     local_files_only: bool = True,
+    reuse_splits_from: str | os.PathLike[str] | None = None,
 ) -> dict[str, str]:
     normalized = validate_config(config)
     root = Path(seed_root)
@@ -132,6 +166,7 @@ def run_materialization_stage(
             artifact_dir=artifact,
             device=device,
             local_files_only=local_files_only,
+            reuse_splits_from=reuse_splits_from,
         )
     outputs = _artifact_outputs(
         normalized,
@@ -144,7 +179,7 @@ def run_materialization_stage(
         normalized,
         stage="materialize",
         seed=seed,
-        inputs={},
+        inputs=_native_materialization_inputs(artifact),
         outputs=outputs,
     )
     work = artifact.parent / f".{artifact.name}.materialize-work"
@@ -172,7 +207,7 @@ def _validated_materialization(
             config,
             stage="materialize",
             seed=seed,
-            inputs={},
+            inputs=_native_materialization_inputs(artifact),
             outputs=outputs,
         )
         return outputs
@@ -304,6 +339,49 @@ def _materialization_inputs(outputs: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
+def run_fisher_crossfit_stage(
+    config: Mapping[str, object],
+    seed_root: str | os.PathLike[str],
+    *,
+    seed: int,
+    device: str = "cpu",
+) -> dict[str, Any]:
+    """Run one seed's train-only Fisher cross-fit as a resumable stage."""
+
+    normalized = validate_config(config)
+    root = Path(seed_root)
+    artifact_outputs = _validated_materialization(normalized, root, seed=seed)
+    result_path = root / "fisher_crossfit.json"
+    if not result_path.exists():
+        print("stage=fisher-crossfit status=running", flush=True)
+        run_fisher_crossfit(
+            normalized,
+            root / "artifact",
+            result_path,
+            seed=seed,
+            device=device,
+        )
+    result = load_fisher_crossfit(
+        result_path,
+        expected_config_sha256=config_hash(normalized),
+        expected_seed=seed,
+        expected_artifact_metadata_sha256=artifact_outputs["artifact_metadata"],
+    )
+    if result.get("producer") != producer_identity():
+        raise ValueError("Fisher cross-fit producer identity mismatch")
+    outputs = {"fisher_crossfit": sha256_file(result_path)}
+    _ensure_receipt(
+        _receipt(root, "fisher-crossfit"),
+        normalized,
+        stage="fisher-crossfit",
+        seed=seed,
+        inputs=_materialization_inputs(artifact_outputs),
+        outputs=outputs,
+    )
+    print("stage=fisher-crossfit status=complete", flush=True)
+    return result
+
+
 def _reward_inputs(
     materialization: Mapping[str, str],
     result: Mapping[str, Any],
@@ -339,36 +417,76 @@ def run_reward_stage(
     *,
     seed: int,
     device: str = "cuda",
+    fisher_selection: str | os.PathLike[str] | None = None,
+    reuse_mle_from: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     normalized = validate_config(config)
     root = Path(seed_root)
     artifact_outputs = _validated_materialization(normalized, root, seed=seed)
     result_path = root / "reward_result.json"
+    is_trpo = normalized["protocol"] == TRPO_PROTOCOL
+    selection_path = (
+        Path(fisher_selection)
+        if fisher_selection is not None
+        else root.parent / "fisher_selection.json"
+    )
+    mle_source_path = (
+        Path(reuse_mle_from)
+        if reuse_mle_from is not None
+        else root / "reward_provenance" / "mle-source.json"
+    )
     if not result_path.exists():
         print("stage=reward status=running", flush=True)
-        pro_source = root / "reward_provenance" / "pro-source.json"
-        reuse_options: dict[str, Any] = {}
-        if pro_source.is_file():
-            reuse_options["reuse_pro_from"] = pro_source
-        run_exact_reward_comparison(
-            normalized,
-            root / "artifact",
+        if is_trpo:
+            reuse_options = {"reuse_mle_from": mle_source_path} if mle_source_path.is_file() else {}
+            run_trpo_reward_comparison(
+                normalized,
+                root / "artifact",
+                selection_path,
+                result_path,
+                seed=seed,
+                device=device,
+                **reuse_options,
+            )
+        else:
+            pro_source = root / "reward_provenance" / "pro-source.json"
+            reuse_options = {}
+            if pro_source.is_file():
+                reuse_options["reuse_pro_from"] = pro_source
+            run_exact_reward_comparison(
+                normalized,
+                root / "artifact",
+                result_path,
+                seed=seed,
+                device=device,
+                **reuse_options,
+            )
+    if is_trpo:
+        result = load_trpo_reward_comparison(
             result_path,
-            seed=seed,
-            device=device,
-            **reuse_options,
+            expected_config_sha256=config_hash(normalized),
+            expected_seed=seed,
         )
-    result = load_exact_reward_comparison(
-        result_path,
-        expected_config_hash=config_hash(normalized),
-        expected_seed=seed,
-    )
+    else:
+        result = load_exact_reward_comparison(
+            result_path,
+            expected_config_hash=config_hash(normalized),
+            expected_seed=seed,
+        )
     if result.get("producer") != producer_identity():
         raise ValueError("reward result producer identity mismatch")
     if result["artifact_metadata_sha256"] != artifact_outputs["artifact_metadata"]:
         raise ValueError("reward result artifact identity mismatch")
     outputs = {"reward_result": sha256_file(result_path)}
-    inputs = _reward_inputs(artifact_outputs, result, root)
+    if is_trpo:
+        inputs = {
+            **_materialization_inputs(artifact_outputs),
+            "fisher_selection": sha256_file(selection_path),
+        }
+        if result["fit_provenance"]["MLE-RM"]["mode"] == "validated_reuse":
+            inputs["mle_fit_source"] = sha256_file(mle_source_path)
+    else:
+        inputs = _reward_inputs(artifact_outputs, result, root)
     _ensure_receipt(
         _receipt(root, "reward"),
         normalized,
@@ -386,32 +504,59 @@ def _validated_reward(
 ) -> tuple[dict[str, Any], str]:
     artifact_outputs = _validated_materialization(config, root, seed=seed)
     path = root / "reward_result.json"
-    result = load_exact_reward_comparison(
-        path,
-        expected_config_hash=config_hash(config),
-        expected_seed=seed,
-    )
+    normalized = validate_config(config)
+    is_trpo = normalized["protocol"] == TRPO_PROTOCOL
+    if is_trpo:
+        result = load_trpo_reward_comparison(
+            path,
+            expected_config_sha256=config_hash(normalized),
+            expected_seed=seed,
+        )
+    else:
+        result = load_exact_reward_comparison(
+            path,
+            expected_config_hash=config_hash(normalized),
+            expected_seed=seed,
+        )
     if result.get("producer") != producer_identity():
         raise ValueError("reward result producer identity mismatch")
     identity = sha256_file(path)
+    if is_trpo:
+        selection_path = root.parent / "fisher_selection.json"
+        inputs = {
+            **_materialization_inputs(artifact_outputs),
+            "fisher_selection": sha256_file(selection_path),
+        }
+        provenance = result["fit_provenance"]["MLE-RM"]
+        if provenance["mode"] == "validated_reuse":
+            inputs["mle_fit_source"] = sha256_file(root / "reward_provenance" / "mle-source.json")
+    else:
+        inputs = _reward_inputs(artifact_outputs, result, root)
     validate_stage_receipt(
         _receipt(root, "reward"),
         config,
         stage="reward",
         seed=seed,
-        inputs=_reward_inputs(artifact_outputs, result, root),
+        inputs=inputs,
         outputs={"reward_result": identity},
     )
     return result, identity
 
 
-def _adapter_outputs(adapters: Path) -> dict[str, str]:
-    metadata = validate_adapter_metadata(
-        adapters,
-        expected_producer=producer_identity(),
-    )
-    if metadata.get("schema") != ADAPTER_SCHEMA:
-        raise ValueError("unsupported adapter metadata")
+def _adapter_outputs(config: Mapping[str, object], adapters: Path) -> dict[str, str]:
+    normalized = validate_config(config)
+    if normalized["protocol"] == TRPO_PROTOCOL:
+        metadata = validate_trpo_adapter_metadata(
+            adapters,
+            expected_producer=producer_identity(),
+        )
+    else:
+        metadata = validate_adapter_metadata(
+            adapters,
+            expected_producer=producer_identity(),
+        )
+        if metadata.get("schema") != ADAPTER_SCHEMA:
+            raise ValueError("unsupported adapter metadata")
     return {"adapter_metadata": sha256_file(adapters / "metadata.json")}
 
 
@@ -429,16 +574,27 @@ def run_adapter_stage(
     _, reward_identity = _validated_reward(normalized, root, seed=seed)
     adapters = root / "adapters"
     print("stage=adapters status=running", flush=True)
-    export_exact_ngd_adapters(
-        normalized,
-        root / "artifact",
-        root / "reward_result.json",
-        adapters,
-        seed=seed,
-        device=device,
-        local_files_only=local_files_only,
-    )
-    outputs = _adapter_outputs(adapters)
+    if normalized["protocol"] == TRPO_PROTOCOL:
+        export_trpo_adapters(
+            normalized,
+            root / "artifact",
+            root / "reward_result.json",
+            adapters,
+            seed=seed,
+            device=device,
+            local_files_only=local_files_only,
+        )
+    else:
+        export_exact_ngd_adapters(
+            normalized,
+            root / "artifact",
+            root / "reward_result.json",
+            adapters,
+            seed=seed,
+            device=device,
+            local_files_only=local_files_only,
+        )
+    outputs = _adapter_outputs(normalized, adapters)
     metadata = _read_json(adapters / "metadata.json")
     if metadata.get("artifact_metadata_sha256") != artifact_outputs["artifact_metadata"]:
         raise ValueError("adapter artifact identity mismatch")
@@ -462,7 +618,7 @@ def run_adapter_stage(
 def _validated_adapters(config: Mapping[str, object], root: Path, *, seed: int) -> dict[str, str]:
     artifact_outputs = _validated_materialization(config, root, seed=seed)
     _, reward_identity = _validated_reward(config, root, seed=seed)
-    outputs = _adapter_outputs(root / "adapters")
+    outputs = _adapter_outputs(config, root / "adapters")
     validate_stage_receipt(
         _receipt(root, "adapters"),
         config,
@@ -477,6 +633,100 @@ def _validated_adapters(config: Mapping[str, object], root: Path, *, seed: int) 
     return outputs
 
 
+def run_kl_calibration_policy_stage(
+    config: Mapping[str, object],
+    seed_root: str | os.PathLike[str],
+    *,
+    policy_name: str,
+    seed: int,
+    device: str = "cuda",
+    local_files_only: bool = True,
+) -> dict[str, Any]:
+    """Calibrate one independent TRPO adapter on validation prompts."""
+
+    normalized = validate_config(config)
+    if normalized["protocol"] != TRPO_PROTOCOL:
+        raise ValueError("KL calibration is only defined for Fisher-TRPO")
+    root = Path(seed_root)
+    _validated_adapters(normalized, root, seed=seed)
+    print(f"stage=kl-calibration policy={policy_name} status=running", flush=True)
+    result = calibrate_trpo_adapter_policy(
+        normalized,
+        root / "artifact",
+        root / "adapters",
+        root / "calibrated_adapters",
+        policy_name=policy_name,
+        seed=seed,
+        device=device,
+        local_files_only=local_files_only,
+    )
+    print(f"stage=kl-calibration policy={policy_name} status=complete", flush=True)
+    return result
+
+
+def run_kl_calibration_aggregate_stage(
+    config: Mapping[str, object],
+    seed_root: str | os.PathLike[str],
+    *,
+    seed: int,
+) -> dict[str, Any]:
+    """Assemble the nine accepted KL-calibration components."""
+
+    normalized = validate_config(config)
+    if normalized["protocol"] != TRPO_PROTOCOL:
+        raise ValueError("KL calibration is only defined for Fisher-TRPO")
+    root = Path(seed_root)
+    adapter_outputs = _validated_adapters(normalized, root, seed=seed)
+    metadata = assemble_calibrated_trpo_adapters(
+        normalized,
+        root / "adapters",
+        root / "calibrated_adapters",
+        seed=seed,
+    )
+    output = root / "calibrated_adapters" / "metadata.json"
+    outputs = {"calibrated_adapter_metadata": sha256_file(output)}
+    for name, record in metadata["adapters"].items():
+        outputs[f"calibration_{name}"] = record["component_receipt_sha256"]
+    _ensure_receipt(
+        _receipt(root, "kl-calibration"),
+        normalized,
+        stage="kl-calibration",
+        seed=seed,
+        inputs={"adapter_metadata": adapter_outputs["adapter_metadata"]},
+        outputs=outputs,
+    )
+    print("stage=kl-calibration-aggregate status=complete", flush=True)
+    return metadata
+
+
+def _validated_calibrated_adapters(
+    config: Mapping[str, object], root: Path, *, seed: int
+) -> dict[str, str]:
+    normalized = validate_config(config)
+    initial = _validated_adapters(normalized, root, seed=seed)
+    metadata = validate_calibrated_trpo_adapters(
+        normalized,
+        root / "calibrated_adapters",
+        seed=seed,
+    )
+    outputs = {
+        "calibrated_adapter_metadata": sha256_file(root / "calibrated_adapters" / "metadata.json"),
+        **{
+            f"calibration_{name}": record["component_receipt_sha256"]
+            for name, record in metadata["adapters"].items()
+        },
+    }
+    validate_stage_receipt(
+        _receipt(root, "kl-calibration"),
+        normalized,
+        stage="kl-calibration",
+        seed=seed,
+        inputs={"adapter_metadata": initial["adapter_metadata"]},
+        outputs=outputs,
+    )
+    return {"adapter_metadata": outputs["calibrated_adapter_metadata"]}
+
+
 def run_policy_rollout_stage(
     config: Mapping[str, object],
     seed_root: str | os.PathLike[str],
@@ -488,11 +738,16 @@ def run_policy_rollout_stage(
 ) -> dict[str, Any]:
     normalized = validate_config(config)
     root = Path(seed_root)
-    _validated_adapters(normalized, root, seed=seed)
+    if normalized["protocol"] == TRPO_PROTOCOL:
+        _validated_calibrated_adapters(normalized, root, seed=seed)
+        adapter_root = root / "calibrated_adapters"
+    else:
+        _validated_adapters(normalized, root, seed=seed)
+        adapter_root = root / "adapters"
     return evaluate_single_policy_rollout(
         normalized,
         root / "artifact",
-        root / "adapters",
+        adapter_root,
         root / "policy_rollout_parts" / policy_name,
         policy_name=policy_name,
         seed=seed,
@@ -506,7 +761,12 @@ def _rollout_aggregate_inputs(
 ) -> dict[str, str]:
     normalized = validate_config(config)
     artifact_outputs = _validated_materialization(normalized, root, seed=seed)
-    adapter_outputs = _validated_adapters(normalized, root, seed=seed)
+    if normalized["protocol"] == TRPO_PROTOCOL:
+        adapter_outputs = _validated_calibrated_adapters(normalized, root, seed=seed)
+        adapter_root = root / "calibrated_adapters"
+    else:
+        adapter_outputs = _validated_adapters(normalized, root, seed=seed)
+        adapter_root = root / "adapters"
     result = {
         "artifact_metadata": artifact_outputs["artifact_metadata"],
         "adapter_metadata": adapter_outputs["adapter_metadata"],
@@ -515,7 +775,7 @@ def _rollout_aggregate_inputs(
         validate_single_policy_rollout(
             normalized,
             root / "artifact",
-            root / "adapters",
+            adapter_root,
             root / "policy_rollout_parts" / name,
             policy_name=name,
             seed=seed,
@@ -532,13 +792,18 @@ def run_rollout_aggregate_stage(
     normalized = validate_config(config)
     root = Path(seed_root)
     inputs = _rollout_aggregate_inputs(normalized, root, seed=seed)
+    adapter_root = (
+        root / "calibrated_adapters"
+        if normalized["protocol"] == TRPO_PROTOCOL
+        else root / "adapters"
+    )
     target = root / "policy_utility"
     if not target.exists():
         print("stage=rollout-aggregate status=running", flush=True)
         payload = assemble_policy_rollouts(
             normalized,
             root / "artifact",
-            root / "adapters",
+            adapter_root,
             root / "policy_rollout_parts",
             target,
             seed=seed,
@@ -566,6 +831,9 @@ def run_rollout_aggregate_stage(
 __all__ = [
     "import_materialization_stage",
     "run_adapter_stage",
+    "run_fisher_crossfit_stage",
+    "run_kl_calibration_aggregate_stage",
+    "run_kl_calibration_policy_stage",
     "run_materialization_stage",
     "run_policy_rollout_stage",
     "run_reward_stage",

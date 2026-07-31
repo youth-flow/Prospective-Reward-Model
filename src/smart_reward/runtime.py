@@ -157,6 +157,7 @@ def load_prompts(
         split_sizes=run["split_sizes"],
         seed=int(run["prompt_split_seed"]),
         text_filter=text_filter,
+        split_offsets=run.get("split_offsets"),
     )
 
 

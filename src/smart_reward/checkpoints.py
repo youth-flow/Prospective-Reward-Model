@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .config import PROTOCOL, config_hash, validate_config
+from .config import config_hash, validate_config
 from .runtime import producer_identity
 
 SCHEMA = "prorm-stage-receipt/v1"
@@ -87,7 +87,7 @@ def _receipt_payload_with_producer(
         raise ValueError("seed must be configured")
     return {
         "schema": SCHEMA,
-        "protocol": PROTOCOL,
+        "protocol": normalized["protocol"],
         "stage": stage,
         "status": "complete",
         "config_sha256": config_hash(normalized),
@@ -210,7 +210,7 @@ def provenance_bridge_payload(
         raise ValueError("seed must be configured")
     return {
         "schema": PROVENANCE_SCHEMA,
-        "protocol": PROTOCOL,
+        "protocol": normalized["protocol"],
         "stage": stage,
         "status": "accepted",
         "config_sha256": config_hash(normalized),

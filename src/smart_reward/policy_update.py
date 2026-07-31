@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 
@@ -24,6 +24,44 @@ def unflatten_tangent_vector(
         vector[entry.offset : entry.offset + entry.numel].reshape(entry.shape)
         for entry in layout.entries
     )
+
+
+def scale_direction_to_quadratic_kl(
+    direction: torch.Tensor,
+    fisher_matvec: Callable[[torch.Tensor], torch.Tensor],
+    *,
+    kl_target: float,
+) -> tuple[torch.Tensor, float, float]:
+    """Scale a direction to ``0.5 * delta.T F delta == kl_target``.
+
+    ``F`` is the raw, undamped empirical Fisher.  Damping determines the
+    direction but is deliberately excluded from the trust-region constraint.
+    """
+
+    if not isinstance(direction, torch.Tensor) or direction.ndim != 1:
+        raise TypeError("direction must be one-dimensional")
+    if not direction.is_floating_point() or not bool(torch.isfinite(direction).all()):
+        raise ValueError("direction must be finite and floating point")
+    target = float(kl_target)
+    if not math.isfinite(target) or target <= 0.0:
+        raise ValueError("kl_target must be finite and positive")
+    fisher_direction = fisher_matvec(direction)
+    if (
+        not isinstance(fisher_direction, torch.Tensor)
+        or fisher_direction.shape != direction.shape
+        or not bool(torch.isfinite(fisher_direction).all())
+    ):
+        raise ValueError("fisher_matvec returned an invalid vector")
+    curvature = float(torch.dot(direction, fisher_direction).item())
+    if not math.isfinite(curvature) or curvature <= 0.0:
+        raise ValueError("direction must have positive finite raw-Fisher curvature")
+    scale = math.sqrt(2.0 * target / curvature)
+    update = direction * scale
+    realized = 0.5 * float(torch.dot(update, fisher_matvec(update)).item())
+    tolerance = max(1.0e-12, 1.0e-10 * target)
+    if not math.isfinite(realized) or abs(realized - target) > tolerance:
+        raise RuntimeError("quadratic KL scaling failed its numerical identity gate")
+    return update, scale, realized
 
 
 @torch.no_grad()
@@ -49,4 +87,8 @@ def set_tangent_update_(
         parameter.mul_(step)
 
 
-__all__ = ["set_tangent_update_", "unflatten_tangent_vector"]
+__all__ = [
+    "scale_direction_to_quadratic_kl",
+    "set_tangent_update_",
+    "unflatten_tangent_vector",
+]

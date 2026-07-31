@@ -16,9 +16,9 @@ from typing import Any
 
 import torch
 
-from .artifacts import save_exact_delta_artifact
-from .config import PROTOCOL, config_hash, validate_config
-from .data import NODE_SCHEMA, CandidateNode, save_jsonl
+from .artifacts import load_exact_delta_artifact, save_exact_delta_artifact
+from .config import PROTOCOL, TRPO_PROTOCOL, config_hash, validate_config
+from .data import NODE_SCHEMA, CandidateNode, load_jsonl, save_jsonl
 from .exact import ExactDeltaExperiment, ExactSplitData, pair_indices
 from .hf import (
     assert_noop_logits,
@@ -29,7 +29,7 @@ from .hf import (
     score_oracle_chats,
 )
 from .oracle import AffineOracleTransform, fit_affine_oracle_transform
-from .prompts import PromptRecord, save_prompt_jsonl
+from .prompts import PromptRecord, load_prompt_jsonl, save_prompt_jsonl
 from .runtime import (
     candidate_id,
     decode_response,
@@ -269,9 +269,12 @@ def assemble_exact_delta_experiment(
     raw_oracle_scores: torch.Tensor,
     *,
     oracle_scale_floor: float = 1.0e-6,
+    protocol: str = PROTOCOL,
 ) -> ExactDeltaAssembly:
     """Apply train-only affine calibration and build every exact pair edge."""
 
+    if protocol not in {PROTOCOL, TRPO_PROTOCOL}:
+        raise ValueError("assembly protocol is unsupported")
     records, num_candidates, policy_dimension = _validate_inputs(
         prompt_records,
         policy_scores,
@@ -337,7 +340,7 @@ def assemble_exact_delta_experiment(
     )
     evidence = {
         "schema": _ASSEMBLY_SCHEMA,
-        "protocol": PROTOCOL,
+        "protocol": protocol,
         "num_candidates": num_candidates,
         "edges_per_prompt": num_candidates * (num_candidates - 1) // 2,
         "edge_orientation": "lower_candidate_index_first",
@@ -382,13 +385,14 @@ def materialize_exact_delta(
     artifact_dir: str | os.PathLike[str],
     device: str | torch.device = "cuda",
     local_files_only: bool = True,
+    reuse_splits_from: str | os.PathLike[str] | None = None,
 ) -> ExactDeltaMaterialization:
     """Generate the configured candidates and persist the exact-delta node artifact."""
 
     validated_seed = validate_seed(seed)
     normalized = validate_config(config)
-    if normalized.get("protocol") != PROTOCOL:
-        raise ValueError(f"materialization requires protocol {PROTOCOL}")
+    if normalized.get("protocol") not in {PROTOCOL, TRPO_PROTOCOL}:
+        raise ValueError("materialization requires a supported exact-delta protocol")
     if validated_seed not in normalized["run"]["seeds"]:
         raise ValueError("seed must be one of the configured experiment seeds")
     destination = Path(artifact_dir)
@@ -475,6 +479,95 @@ def materialize_exact_delta(
     }
     layout_metadata = setup.layout.to_metadata()
     a_state_sha256 = setup.a_state_sha256
+    reused_prompt_count = 0
+    reused_policy_scores: torch.Tensor | None = None
+    reused_reward_features: torch.Tensor | None = None
+    reused_raw_oracle_scores: torch.Tensor | None = None
+    reused_payloads: list[dict[str, Any]] = []
+    split_reuse_evidence: dict[str, Any] | None = None
+    if reuse_splits_from is not None:
+        if normalized["protocol"] != TRPO_PROTOCOL:
+            raise ValueError("split-level materialization reuse is only valid for Fisher-TRPO")
+        source_root = Path(reuse_splits_from)
+        source_experiment = load_exact_delta_artifact(source_root)
+        source_metadata_path = source_root / "metadata.json"
+        source_metadata = _read_json(source_metadata_path)
+        source_evidence = source_metadata.get("evidence")
+        if not isinstance(source_evidence, dict):
+            raise ValueError("source materialization evidence is missing")
+        if (
+            source_evidence.get("policy_a_sha256") != a_state_sha256
+            or source_evidence.get("policy_layout") != layout_metadata
+            or source_evidence.get("revisions", {}).get("policy_model") != policy_config["revision"]
+            or source_evidence.get("revisions", {}).get("oracle_model")
+            != normalized["oracle"]["revision"]
+        ):
+            raise ValueError("source materialization model geometry does not match")
+        reusable_splits = ("train", "validation")
+        source_prompts = [
+            record
+            for record in load_prompt_jsonl(source_root / "prompts.jsonl")
+            if record.split in reusable_splits
+        ]
+        reused_prompt_count = sum(
+            int(normalized["run"]["split_sizes"][name]) for name in reusable_splits
+        )
+        if len(source_prompts) != reused_prompt_count:
+            raise ValueError("source train/validation prompt inventory has the wrong size")
+        if [record.to_dict() for record in source_prompts] != [
+            record.to_dict() for record in prompts[:reused_prompt_count]
+        ]:
+            raise ValueError("source train/validation prompts differ from the frozen selection")
+        reused_policy_scores = torch.cat(
+            (source_experiment.train.policy_scores, source_experiment.validation.policy_scores),
+            dim=0,
+        )
+        reused_reward_features = torch.cat(
+            (
+                source_experiment.train.reward_features,
+                source_experiment.validation.reward_features,
+            ),
+            dim=0,
+        )
+        source_candidates = [
+            record
+            for record in load_jsonl(source_root / "candidates.jsonl", CandidateNode)
+            if record.split in reusable_splits
+        ]
+        if len(source_candidates) != reused_prompt_count * num_candidates:
+            raise ValueError("source train/validation candidate inventory has the wrong size")
+        expected_candidate_ids = [
+            candidate_id(prompt.prompt_id, index)
+            for prompt in prompts[:reused_prompt_count]
+            for index in range(num_candidates)
+        ]
+        if [record.candidate_id for record in source_candidates] != expected_candidate_ids:
+            raise ValueError("source train/validation candidate ordering differs")
+        reused_raw_oracle_scores = torch.tensor(
+            [record.raw_oracle_score for record in source_candidates],
+            dtype=torch.float32,
+        ).reshape(reused_prompt_count, num_candidates)
+        reused_payloads = [
+            {
+                key: value
+                for key, value in record.to_dict().items()
+                if key not in {"raw_oracle_score", "oracle_reward", "schema_version"}
+            }
+            for record in source_candidates
+        ]
+        split_reuse_evidence = {
+            "schema": "prorm-split-component-reuse/v1",
+            "splits": list(reusable_splits),
+            "prompt_count": reused_prompt_count,
+            "source_artifact_metadata_sha256": sha256_file(source_metadata_path),
+            "source_artifact_tensors_sha256": sha256_file(source_root / "tensors.safetensors"),
+            "source_prompts_sha256": sha256_file(source_root / "prompts.jsonl"),
+            "source_candidates_sha256": sha256_file(source_root / "candidates.jsonl"),
+            "source_producer": source_evidence.get("producer"),
+        }
+        source_receipt = source_root.parent / "stage_receipts" / "materialize.json"
+        if source_receipt.is_file():
+            split_reuse_evidence["source_materialize_receipt_sha256"] = sha256_file(source_receipt)
     execution = normalized["execution"]
     prompt_batch_size = int(execution["materialization_prompt_batch_size"])
     checkpoint_prompts = int(execution["materialization_checkpoint_prompts"])
@@ -490,6 +583,7 @@ def materialize_exact_delta(
         "num_candidates": num_candidates,
         "prompt_batch_size": prompt_batch_size,
         "checkpoint_prompts": checkpoint_prompts,
+        "split_reuse": split_reuse_evidence,
     }
     work_manifest_path = work / "manifest.json"
     if work_manifest_path.exists():
@@ -520,6 +614,36 @@ def materialize_exact_delta(
                 flush=True,
             )
         else:
+            if checkpoint_stop <= reused_prompt_count:
+                assert reused_policy_scores is not None
+                assert reused_reward_features is not None
+                candidate_start = checkpoint_start * num_candidates
+                candidate_stop = checkpoint_stop * num_candidates
+                shard_scores = reused_policy_scores[checkpoint_start:checkpoint_stop]
+                shard_features = reused_reward_features[checkpoint_start:checkpoint_stop]
+                shard_payloads = reused_payloads[candidate_start:candidate_stop]
+                _save_candidate_shard(
+                    shard,
+                    manifest=work_manifest,
+                    start=checkpoint_start,
+                    stop=checkpoint_stop,
+                    prompt_ids=[record.prompt_id for record in checkpoint_records],
+                    policy_scores=shard_scores,
+                    reward_features=shard_features,
+                    payloads=shard_payloads,
+                )
+                print(
+                    f"materialize candidates={checkpoint_stop}/{len(prompts)} status=imported",
+                    flush=True,
+                )
+                policy_score_chunks.append(shard_scores)
+                reward_feature_chunks.append(shard_features)
+                candidate_payloads.extend(shard_payloads)
+                continue
+            if checkpoint_start < reused_prompt_count:
+                raise ValueError(
+                    "materialization checkpoint boundary crosses the reusable split boundary"
+                )
             score_batches: list[torch.Tensor] = []
             feature_batches: list[torch.Tensor] = []
             shard_payloads = []
@@ -663,12 +787,17 @@ def materialize_exact_delta(
         num_labels=1,
     )
     oracle_model.to(target_device).eval()
-    flat_prompts = [str(candidate["prompt"]) for candidate in candidate_payloads]
-    flat_responses = [str(candidate["response"]) for candidate in candidate_payloads]
+    reused_candidate_count = reused_prompt_count * num_candidates
+    flat_prompts = [
+        str(candidate["prompt"]) for candidate in candidate_payloads[reused_candidate_count:]
+    ]
+    flat_responses = [
+        str(candidate["response"]) for candidate in candidate_payloads[reused_candidate_count:]
+    ]
     raw_batches: list[torch.Tensor] = []
     oracle_batch_size = int(oracle_config["batch_size"])
-    for start in range(0, len(candidate_payloads), oracle_batch_size):
-        stop = min(start + oracle_batch_size, len(candidate_payloads))
+    for start in range(0, len(flat_prompts), oracle_batch_size):
+        stop = min(start + oracle_batch_size, len(flat_prompts))
         raw_batches.append(
             score_oracle_chats(
                 oracle_model,
@@ -678,12 +807,20 @@ def materialize_exact_delta(
                 device=target_device,
             ).to(device="cpu", dtype=torch.float32)
         )
-        if stop == len(candidate_payloads) or stop % (oracle_batch_size * 64) == 0:
+        if stop == len(flat_prompts) or stop % (oracle_batch_size * 64) == 0:
             print(
-                f"materialize oracle_scores={stop}/{len(candidate_payloads)}",
+                f"materialize oracle_scores={stop}/{len(flat_prompts)}",
                 flush=True,
             )
-    raw_oracle_scores = torch.cat(raw_batches).reshape(len(prompts), num_candidates)
+    new_raw_oracle_scores = torch.cat(raw_batches).reshape(
+        len(prompts) - reused_prompt_count,
+        num_candidates,
+    )
+    raw_oracle_scores = (
+        new_raw_oracle_scores
+        if reused_raw_oracle_scores is None
+        else torch.cat((reused_raw_oracle_scores, new_raw_oracle_scores), dim=0)
+    )
     del oracle_model, oracle_tokenizer, raw_batches
     gc.collect()
     if target_device.type == "cuda":
@@ -695,6 +832,7 @@ def materialize_exact_delta(
         reward_features,
         raw_oracle_scores,
         oracle_scale_floor=float(oracle_config["robust_scale_floor"]),
+        protocol=normalized["protocol"],
     )
     standardized_rewards = assembly.oracle_transform(raw_oracle_scores)
     candidate_nodes = [
@@ -743,6 +881,7 @@ def materialize_exact_delta(
         },
         "local_files_only": local_files_only,
         "producer": producer_identity(),
+        "split_component_reuse": split_reuse_evidence,
     }
     assembly = ExactDeltaAssembly(
         experiment=assembly.experiment,

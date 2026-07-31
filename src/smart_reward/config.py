@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 PROTOCOL = "prorm_exact_delta_v1"
+TRPO_PROTOCOL = "prorm_fisher_trpo_v1"
 _REVISION = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 _WALLTIME = re.compile(r"([0-9]+):([0-5][0-9]):([0-5][0-9])")
 
@@ -107,7 +108,7 @@ def _model(value: object, path: str) -> Mapping[str, object]:
     return result
 
 
-def validate_config(config: Mapping[str, object]) -> dict[str, Any]:
+def _validate_legacy_config(config: Mapping[str, object]) -> dict[str, Any]:
     """Return a detached validated configuration with no implicit defaults."""
 
     root = _map(
@@ -449,6 +450,393 @@ def validate_config(config: Mapping[str, object]) -> dict[str, Any]:
     return copy.deepcopy(dict(root))
 
 
+def _validate_trpo_config(config: Mapping[str, object]) -> dict[str, Any]:
+    """Validate the Fisher-corrected, matched-KL TRPO protocol.
+
+    The legacy validator remains the single source of truth for unchanged
+    model, data, reward, and execution fields.  A synthetic legacy view is
+    validated first, then every v2-only field is checked without defaults.
+    """
+
+    root = _map(
+        config,
+        "config",
+        {
+            "protocol",
+            "run",
+            "data",
+            "policy",
+            "oracle",
+            "reward_model",
+            "geometry",
+            "policy_update",
+            "evaluation",
+            "execution",
+        },
+    )
+    if _string(root["protocol"], "protocol") != TRPO_PROTOCOL:
+        raise ConfigError(f"protocol must equal {TRPO_PROTOCOL!r}")
+
+    run = _map(
+        root["run"],
+        "run",
+        {
+            "name",
+            "seeds",
+            "prompt_split_seed",
+            "num_prompts",
+            "split_sizes",
+            "split_offsets",
+        },
+    )
+    splits = _map(run["split_sizes"], "run.split_sizes", {"train", "validation", "test"})
+    offsets = _map(run["split_offsets"], "run.split_offsets", {"train", "validation", "test"})
+    split_sizes = {name: _integer(splits[name], f"run.split_sizes.{name}", 1) for name in splits}
+    split_offsets = {name: _integer(offsets[name], f"run.split_offsets.{name}") for name in offsets}
+    intervals = sorted(
+        (
+            split_offsets[name],
+            split_offsets[name] + split_sizes[name],
+            name,
+        )
+        for name in ("train", "validation", "test")
+    )
+    for (_, previous_end, previous_name), (next_start, _, next_name) in zip(
+        intervals, intervals[1:], strict=False
+    ):
+        if previous_end > next_start:
+            raise ConfigError(f"run.split_offsets overlap: {previous_name!r} and {next_name!r}")
+    if split_offsets["train"] != 0:
+        raise ConfigError("run.split_offsets.train must be zero")
+    if split_offsets["validation"] != split_sizes["train"]:
+        raise ConfigError("validation must immediately follow the frozen train split")
+    if split_offsets["test"] != int(run["num_prompts"]):
+        raise ConfigError(
+            "fresh test must start immediately after the complete legacy prompt inventory"
+        )
+
+    geometry = _map(
+        root["geometry"],
+        "geometry",
+        {
+            "fisher_estimator",
+            "damping_selection",
+            "solve_dtype",
+            "cg_tolerance",
+            "cg_max_iterations",
+            "residual_recompute_interval",
+        },
+    )
+    selection = _map(
+        geometry["damping_selection"],
+        "geometry.damping_selection",
+        {
+            "method",
+            "folds",
+            "relative_candidates",
+            "selection_metric",
+            "eligibility",
+            "tie_break",
+            "shared_across",
+        },
+    )
+    if selection["method"] != "train_prompt_crossfit":
+        raise ConfigError("geometry.damping_selection.method must be train_prompt_crossfit")
+    _integer(selection["folds"], "geometry.damping_selection.folds", 2)
+    candidates = [
+        _number(
+            item,
+            f"geometry.damping_selection.relative_candidates[{index}]",
+            positive=True,
+        )
+        for index, item in enumerate(
+            _sequence(
+                selection["relative_candidates"],
+                "geometry.damping_selection.relative_candidates",
+            )
+        )
+    ]
+    if len(candidates) != len(set(candidates)) or candidates != sorted(candidates):
+        raise ConfigError(
+            "geometry.damping_selection.relative_candidates must be unique and increasing"
+        )
+    if selection["selection_metric"] != "heldout_oracle_reward_improvement":
+        raise ConfigError(
+            "geometry.damping_selection.selection_metric must be heldout_oracle_reward_improvement"
+        )
+    if selection["eligibility"] != "positive_mean_each_seed":
+        raise ConfigError("geometry.damping_selection.eligibility must be positive_mean_each_seed")
+    if selection["tie_break"] != "largest_in_best_one_standard_error_set":
+        raise ConfigError(
+            "geometry.damping_selection.tie_break must be largest_in_best_one_standard_error_set"
+        )
+    if _unique_strings(
+        selection["shared_across"],
+        "geometry.damping_selection.shared_across",
+    ) != ["seeds", "reward_sources"]:
+        raise ConfigError(
+            "geometry.damping_selection.shared_across must be [seeds, reward_sources]"
+        )
+
+    update = _map(
+        root["policy_update"],
+        "policy_update",
+        {
+            "method",
+            "reward_sources",
+            "kl_targets",
+            "primary_kl_target",
+            "kl_orientation",
+            "quadratic_scaling_fisher",
+            "calibration",
+            "save_adapters",
+        },
+    )
+    if update["method"] != "one_step_damped_trpo_lora_b":
+        raise ConfigError("policy_update.method must be one_step_damped_trpo_lora_b")
+    if _unique_strings(update["reward_sources"], "policy_update.reward_sources") != [
+        "mle_rm",
+        "pro_rm",
+        "oracle",
+    ]:
+        raise ConfigError("policy_update.reward_sources must be [mle_rm, pro_rm, oracle]")
+    targets = [
+        _number(item, f"policy_update.kl_targets[{index}]", positive=True)
+        for index, item in enumerate(_sequence(update["kl_targets"], "policy_update.kl_targets"))
+    ]
+    if len(targets) != len(set(targets)) or targets != sorted(targets):
+        raise ConfigError("policy_update.kl_targets must be unique and increasing")
+    primary = _number(
+        update["primary_kl_target"],
+        "policy_update.primary_kl_target",
+        positive=True,
+    )
+    if primary not in targets:
+        raise ConfigError("policy_update.primary_kl_target must occur in kl_targets")
+    if update["kl_orientation"] != "updated_to_reference":
+        raise ConfigError("policy_update.kl_orientation must be updated_to_reference")
+    if update["quadratic_scaling_fisher"] != "raw_undamped":
+        raise ConfigError("policy_update.quadratic_scaling_fisher must be raw_undamped")
+    calibration = _map(
+        update["calibration"],
+        "policy_update.calibration",
+        {
+            "split",
+            "estimator",
+            "max_attempts",
+            "point_relative_interval",
+            "confidence_level",
+            "upper_confidence_multiplier",
+            "responses_per_prompt",
+            "confidence_interval",
+            "search",
+            "max_scale_change_per_attempt",
+        },
+    )
+    if calibration["split"] != "validation":
+        raise ConfigError("policy_update.calibration.split must be validation")
+    if calibration["estimator"] != "updated_policy_forward_kl":
+        raise ConfigError("policy_update.calibration.estimator must be updated_policy_forward_kl")
+    _integer(calibration["max_attempts"], "policy_update.calibration.max_attempts", 1)
+    interval = [
+        _number(
+            item,
+            f"policy_update.calibration.point_relative_interval[{index}]",
+            positive=True,
+        )
+        for index, item in enumerate(
+            _sequence(
+                calibration["point_relative_interval"],
+                "policy_update.calibration.point_relative_interval",
+            )
+        )
+    ]
+    if len(interval) != 2 or not interval[0] < 1.0 < interval[1]:
+        raise ConfigError("policy_update.calibration.point_relative_interval must straddle one")
+    confidence = _number(
+        calibration["confidence_level"],
+        "policy_update.calibration.confidence_level",
+        positive=True,
+    )
+    if confidence >= 1.0:
+        raise ConfigError("policy_update.calibration.confidence_level must be < 1")
+    if (
+        _number(
+            calibration["upper_confidence_multiplier"],
+            "policy_update.calibration.upper_confidence_multiplier",
+            positive=True,
+        )
+        <= interval[1]
+    ):
+        raise ConfigError(
+            "policy_update.calibration.upper_confidence_multiplier must exceed "
+            "the point interval upper bound"
+        )
+    _integer(
+        calibration["responses_per_prompt"],
+        "policy_update.calibration.responses_per_prompt",
+        2,
+    )
+    if calibration["confidence_interval"] != "normal_prompt_clustered":
+        raise ConfigError(
+            "policy_update.calibration.confidence_interval must be normal_prompt_clustered"
+        )
+    if calibration["search"] != "deterministic_quadratic_ratio":
+        raise ConfigError("policy_update.calibration.search must be deterministic_quadratic_ratio")
+    if (
+        _number(
+            calibration["max_scale_change_per_attempt"],
+            "policy_update.calibration.max_scale_change_per_attempt",
+            positive=True,
+        )
+        <= 1.0
+    ):
+        raise ConfigError("policy_update.calibration.max_scale_change_per_attempt must exceed one")
+    _bool(update["save_adapters"], "policy_update.save_adapters")
+
+    evaluation = _map(
+        root["evaluation"],
+        "evaluation",
+        {"validation_usage", "reward_fit_metrics", "local_policy_metrics", "rollout"},
+    )
+    if evaluation["validation_usage"] != "crossfit_and_kl_calibration_only":
+        raise ConfigError("evaluation.validation_usage must be crossfit_and_kl_calibration_only")
+    expected_local = [
+        "fisher_cosine",
+        "local_reward_improvement",
+        "quadratic_forward_kl",
+        "finite_pool_reward_improvement",
+        "finite_pool_forward_kl",
+    ]
+    if (
+        _unique_strings(evaluation["local_policy_metrics"], "evaluation.local_policy_metrics")
+        != expected_local
+    ):
+        raise ConfigError(f"evaluation.local_policy_metrics must equal {expected_local!r}")
+    rollout = _map(
+        evaluation["rollout"],
+        "evaluation.rollout",
+        {"prompts", "responses_per_prompt", "metrics"},
+    )
+    if _integer(rollout["prompts"], "evaluation.rollout.prompts", 1) > split_sizes["test"]:
+        raise ConfigError("evaluation.rollout.prompts cannot exceed test split size")
+    _integer(rollout["responses_per_prompt"], "evaluation.rollout.responses_per_prompt", 1)
+    expected_rollout = [
+        "oracle_reward",
+        "reward_improvement",
+        "forward_kl",
+        "kl_target_error",
+    ]
+    if _unique_strings(rollout["metrics"], "evaluation.rollout.metrics") != expected_rollout:
+        raise ConfigError(f"evaluation.rollout.metrics must equal {expected_rollout!r}")
+
+    execution = _map(
+        root["execution"],
+        "execution",
+        {
+            "materialization_prompt_batch_size",
+            "materialization_checkpoint_prompts",
+            "crossfit_walltime",
+            "reward_walltime",
+            "adapter_walltime",
+            "kl_calibration_walltime",
+            "rollout_prompt_batch_size",
+            "rollout_checkpoint_prompts",
+            "rollout_max_parallel_policies",
+            "calibration_max_parallel_policies",
+            "materialization_walltime",
+            "rollout_walltime",
+            "rollout_aggregate_walltime",
+            "three_seed_aggregate_walltime",
+        },
+    )
+    _walltime(execution["crossfit_walltime"], "execution.crossfit_walltime")
+    _walltime(
+        execution["kl_calibration_walltime"],
+        "execution.kl_calibration_walltime",
+    )
+    if (
+        _integer(
+            execution["calibration_max_parallel_policies"],
+            "execution.calibration_max_parallel_policies",
+            1,
+        )
+        > 8
+    ):
+        raise ConfigError("execution.calibration_max_parallel_policies cannot exceed 8")
+    if (split_sizes["train"] + split_sizes["validation"]) % int(
+        execution["materialization_checkpoint_prompts"]
+    ):
+        raise ConfigError(
+            "materialization checkpoints must align with the train/validation reuse boundary"
+        )
+
+    legacy = copy.deepcopy(dict(root))
+    legacy["protocol"] = PROTOCOL
+    legacy["run"] = {key: value for key, value in legacy["run"].items() if key != "split_offsets"}
+    legacy["geometry"] = {
+        "fisher_estimator": geometry["fisher_estimator"],
+        "damping_relative_to_mean_diagonal": 1.0,
+        "solve_dtype": geometry["solve_dtype"],
+        "cg_tolerance": geometry["cg_tolerance"],
+        "cg_max_iterations": geometry["cg_max_iterations"],
+        "residual_recompute_interval": geometry["residual_recompute_interval"],
+    }
+    legacy["policy_update"] = {
+        "method": "one_step_damped_ngd_lora_b",
+        "reward_sources": list(update["reward_sources"]),
+        "beta_grid": [1.0, 2.0, 4.0],
+        "kl_orientation": update["kl_orientation"],
+        "save_adapters": update["save_adapters"],
+    }
+    legacy["evaluation"] = {
+        "validation_usage": "diagnostics_only",
+        "reward_fit_metrics": list(evaluation["reward_fit_metrics"]),
+        "local_policy_metrics": [
+            "local_regret",
+            "fisher_cosine",
+            "local_target_utility",
+            "tabular_optimal_utility",
+            "tabular_regret",
+        ],
+        "rollout": {
+            "prompts": rollout["prompts"],
+            "responses_per_prompt": rollout["responses_per_prompt"],
+            "metrics": [
+                "oracle_reward",
+                "reward_improvement",
+                "forward_kl",
+                "regularized_utility",
+                "utility_improvement",
+                "oracle_ngd_regret",
+            ],
+        },
+    }
+    legacy["execution"] = {
+        key: value
+        for key, value in execution.items()
+        if key
+        not in {
+            "crossfit_walltime",
+            "kl_calibration_walltime",
+            "calibration_max_parallel_policies",
+        }
+    }
+    _validate_legacy_config(legacy)
+    return copy.deepcopy(dict(root))
+
+
+def validate_config(config: Mapping[str, object]) -> dict[str, Any]:
+    """Return a detached, closed-schema configuration for a supported protocol."""
+
+    protocol = config.get("protocol") if isinstance(config, Mapping) else None
+    if protocol == PROTOCOL:
+        return _validate_legacy_config(config)
+    if protocol == TRPO_PROTOCOL:
+        return _validate_trpo_config(config)
+    raise ConfigError(f"unsupported protocol: {protocol!r}")
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     try:
         yaml = importlib.import_module("yaml")
@@ -467,4 +855,11 @@ def config_hash(config: Mapping[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-__all__ = ["PROTOCOL", "ConfigError", "config_hash", "load_config", "validate_config"]
+__all__ = [
+    "PROTOCOL",
+    "TRPO_PROTOCOL",
+    "ConfigError",
+    "config_hash",
+    "load_config",
+    "validate_config",
+]

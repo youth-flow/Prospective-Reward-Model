@@ -45,13 +45,17 @@ def test_hpc4_pipeline_is_qos_aware_and_stage_ordered() -> None:
     text = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
     assert "gpu_job_limit=2" in text
     assert "MaxSubmit" not in text
-    assert "afterok:" not in text
+    assert 'dependency_args=(--dependency="afterok:${PRORM_SBATCH_DEPENDENCY}")' in text
     assert "PRORM_ROLLOUT_WORKERS" in text
     assert '--gpus-per-node="${gpus_per_job}"' in text
     for stage in (
         "materialize",
+        "fisher-crossfit",
+        "fisher-select",
         "reward",
         "adapters",
+        "kl-calibration",
+        "kl-calibration-aggregate",
         "rollout",
         "rollout-aggregate",
         "aggregate",
@@ -61,6 +65,7 @@ def test_hpc4_pipeline_is_qos_aware_and_stage_ordered() -> None:
     assert 'if [[ "${PRORM_STAGE}" = "rollout-worker" ]]' in worker
     assert "rollout_task += PRORM_ROLLOUT_WORKERS" in worker
     assert "run_rollout_slot" in worker
+    assert "run_calibration_slot" in worker
     assert not (ROOT / "scripts" / "hpc4" / "controlled.sbatch").exists()
 
 
@@ -76,7 +81,7 @@ def test_submission_scripts_route_slurm_logs_outside_the_repository() -> None:
     pipeline = (ROOT / "scripts" / "hpc4" / "submit_pipeline.sh").read_text(encoding="utf-8")
     assert '--output="${report_root}/' in smoke
     assert '--output="${hf_cache}/logs/' in staging
-    assert pipeline.count('--output="${run_root}/logs/') == 6
+    assert pipeline.count('--output="${run_root}/logs/') == 10
 
 
 def test_compute_jobs_verify_the_image_revision() -> None:

@@ -1,0 +1,131 @@
+protocol: prorm_fisher_trpo_v1
+
+run:
+  name: fisher-corrected-trpo
+  seeds: [20261001, 20261002, 20261003]
+  prompt_split_seed: 20261000
+  num_prompts: 4096
+  split_sizes: {train: 3072, validation: 512, test: 512}
+  # The legacy test occupied [3584, 4096).  The confirmatory test is the next
+  # 512 eligible prompt IDs in the same deterministic shuffled population.
+  split_offsets: {train: 0, validation: 3072, test: 4096}
+
+data:
+  prompt_dataset: allenai/multipref
+  prompt_revision: 12910233a0238a997ebe425656e9dfed7b0ff031
+  num_candidates: 6
+  edge_construction: all_unordered_pairs
+  prompt_overlength: exclude_before_sampling
+
+policy:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+  dtype: float32
+  max_prompt_tokens: 512
+  max_response_tokens: 256
+  sampling:
+    do_sample: true
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 0
+    min_new_tokens: 0
+    repetition_penalty: 1.0
+  lora_rank: 4
+  lora_alpha: 4
+  lora_dropout: 0.0
+  lora_layers: [27]
+  lora_modules: [q_proj, v_proj]
+  trainable_tangent_parameters: lora_B_only
+
+oracle:
+  model: Skywork/Skywork-Reward-V2-Llama-3.2-3B
+  revision: beafe5f2e6a275ce8c556f68f2d82de7fefbc3d8
+  dtype: float32
+  transform: train_median_scaled_mad_affine
+  robust_scale_floor: 1.0e-6
+  batch_size: 16
+
+reward_model:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+  dtype: float32
+  parameterization: frozen_backbone_linear_head
+  feature_pooling: last_response_token
+  linear_head_bias: false
+  mle:
+    objective: exact_soft_btl_nll
+    optimizer: lbfgs
+    max_iterations: 200
+    history_size: 20
+    gradient_tolerance: 1.0e-7
+    change_tolerance: 1.0e-12
+    microbatch_size: 256
+  pro:
+    objective: fisher_weighted_reward_moment_error
+    solver: nested_matrix_free_cg
+    max_iterations: 1536
+    tolerance: 1.0e-6
+    residual_recompute_interval: 20
+
+geometry:
+  fisher_estimator: raw_second_moment
+  damping_selection:
+    method: train_prompt_crossfit
+    folds: 5
+    relative_candidates: [0.1, 1.0, 10.0]
+    selection_metric: heldout_oracle_reward_improvement
+    eligibility: positive_mean_each_seed
+    tie_break: largest_in_best_one_standard_error_set
+    shared_across: [seeds, reward_sources]
+  solve_dtype: float64
+  cg_tolerance: 1.0e-5
+  cg_max_iterations: 7168
+  residual_recompute_interval: 20
+
+policy_update:
+  method: one_step_damped_trpo_lora_b
+  reward_sources: [mle_rm, pro_rm, oracle]
+  kl_targets: [3.0e-4, 1.0e-3, 3.0e-3]
+  primary_kl_target: 1.0e-3
+  kl_orientation: updated_to_reference
+  quadratic_scaling_fisher: raw_undamped
+  calibration:
+    split: validation
+    estimator: updated_policy_forward_kl
+    max_attempts: 4
+    point_relative_interval: [0.8, 1.2]
+    confidence_level: 0.95
+    upper_confidence_multiplier: 1.5
+    responses_per_prompt: 4
+    confidence_interval: normal_prompt_clustered
+    search: deterministic_quadratic_ratio
+    max_scale_change_per_attempt: 4.0
+  save_adapters: true
+
+evaluation:
+  validation_usage: crossfit_and_kl_calibration_only
+  reward_fit_metrics:
+    [pair_kl, soft_btl_nll, probability_mse, pairwise_accuracy, centered_reward_nmse]
+  local_policy_metrics:
+    [fisher_cosine, local_reward_improvement, quadratic_forward_kl,
+     finite_pool_reward_improvement, finite_pool_forward_kl]
+  rollout:
+    prompts: 512
+    responses_per_prompt: 4
+    metrics: [oracle_reward, reward_improvement, forward_kl, kl_target_error]
+
+execution:
+  materialization_prompt_batch_size: 1
+  materialization_checkpoint_prompts: 16
+  crossfit_walltime: "01:00:00"
+  reward_walltime: "12:00:00"
+  adapter_walltime: "04:00:00"
+  kl_calibration_walltime: "12:00:00"
+  rollout_prompt_batch_size: 2
+  rollout_checkpoint_prompts: 16
+  rollout_max_parallel_policies: 6
+  calibration_max_parallel_policies: 6
+  materialization_walltime: "24:00:00"
+  rollout_walltime: "12:00:00"
+  rollout_aggregate_walltime: "02:00:00"
+  three_seed_aggregate_walltime: "01:00:00"

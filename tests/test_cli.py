@@ -14,6 +14,8 @@ def test_cli_only_exposes_current_workflow() -> None:
         "config-check",
         "import-materialization",
         "materialize",
+        "fisher-crossfit",
+        "select-fisher",
         "train-rewards",
         "export-policies",
         "evaluate-rollouts",

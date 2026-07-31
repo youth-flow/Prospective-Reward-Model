@@ -142,6 +142,39 @@ two Slurm jobs with three L20 GPUs each; every GPU worker processes a disjoint s
 seed-policy tasks and resumes at policy/prompt checkpoints. Aggregation is submitted only after
 all upstream workers succeed.
 
+## Fisher-corrected TRPO run
+
+The new confirmatory protocol uses `configs/fisher_trpo_smoke.yaml` and
+`configs/fisher_trpo_main.yaml`. Its stage order is:
+
+```text
+materialize -> fisher-crossfit -> fisher-select -> reward -> adapters
+-> kl-calibration -> kl-calibration-aggregate -> rollout
+-> rollout-aggregate -> aggregate
+```
+
+`materialize` can import only the verified train/validation components from the
+immutable legacy archive; it always generates the fresh test. Set
+`PRORM_SOURCE_RUN_ROOT` to that archive when submitting individual stages.
+The reward stage copies and independently validates the legacy MLE head, while
+Pro-RM and every downstream direction are recomputed.
+
+After the new image, HF inventory, GPU gate, and Fisher-TRPO smoke have passed,
+the dependency-ordered formal DAG can be submitted with:
+
+```bash
+bash scripts/hpc4/submit_fisher_trpo_pipeline.sh \
+  configs/fisher_trpo_main.yaml \
+  "$PRORM_IMAGE" \
+  "$PRORM_PROJECT_ROOT/hf-cache" \
+  "$PRORM_SCRATCH_ROOT/runs/fisher-trpo-main" \
+  "$PRORM_PROJECT_ROOT/archives/<immutable-e01359d-archive>/run"
+```
+
+The wrapper records every Slurm ID and dependency in
+`submission-dag.tsv`. GPU stages exclude `gpu19`; removing that exclusion
+requires a separate successful GPU gate.
+
 ## Archive and transfer
 
 After verifying `aggregate.json` and all three seed receipts:
