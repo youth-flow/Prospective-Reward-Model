@@ -185,9 +185,7 @@ def test_slurm_production_requires_all_three_identities(monkeypatch) -> None:
 
 
 def test_direct_aggregate_passes_complete_producer_identity() -> None:
-    text = (ROOT / "scripts" / "hpc4" / "direct_aggregate.sbatch").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / "scripts" / "hpc4" / "direct_aggregate.sbatch").read_text(encoding="utf-8")
     for name in (
         "PRORM_GIT_COMMIT",
         "PRORM_IMAGE_SHA256",
