@@ -25,7 +25,7 @@ import json
 import sys
 with open(sys.argv[1], "r", encoding="utf-8") as stream:
     value = json.load(stream)
-assert value["schema"] == "prorm-fisher-corrected-ngd-integrity-audit/v3"
+assert value["schema"] == "prorm-fisher-corrected-ngd-integrity-audit/v4"
 assert value["status"] == "passed"
 PY
 

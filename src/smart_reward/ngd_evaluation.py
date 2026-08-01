@@ -27,11 +27,11 @@ from .pcg import pcg
 from .runtime import producer_identity, sha256_file, validate_seed
 from .trpo_run import load_trpo_reward_comparison
 
-PROTOCOL = "prorm_fisher_corrected_common_beta_ngd_v3"
-SEED_SCHEMA = "prorm-fisher-corrected-ngd-evaluation/v3"
-AGGREGATE_SCHEMA = "prorm-fisher-corrected-ngd-aggregate/v3"
-AUDIT_SCHEMA = "prorm-fisher-corrected-ngd-integrity-audit/v3"
-BETAS = (0.1, 0.5, 1.0, 2.0, 4.0)
+PROTOCOL = "prorm_fisher_corrected_common_beta_ngd_v4"
+SEED_SCHEMA = "prorm-fisher-corrected-ngd-evaluation/v4"
+AGGREGATE_SCHEMA = "prorm-fisher-corrected-ngd-aggregate/v4"
+AUDIT_SCHEMA = "prorm-fisher-corrected-ngd-integrity-audit/v4"
+BETAS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0, 2.0, 4.0)
 POLICIES = ("pi0", "mle", "pro", "oracle", "tabular")
 _DIRECTION_KEYS = {"mle": "mle_rm", "pro": "pro_rm", "oracle": "oracle"}
 
