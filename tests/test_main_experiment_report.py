@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.reporting.build_ngd_main_report import build_latex, build_summary
+from smart_reward.main_experiment_report import build_latex, build_summary
 
 ROOT = Path(__file__).parents[1]
 RESULT = ROOT / "results" / "main_experiment_v1"
