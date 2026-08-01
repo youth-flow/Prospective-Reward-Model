@@ -14,6 +14,11 @@ from .exact_phase import materialize_exact_delta
 from .exact_policy import export_exact_ngd_adapters
 from .exact_run import run_exact_reward_comparison
 from .fisher_crossfit import run_fisher_crossfit, select_fisher_regularization
+from .ngd_evaluation import (
+    aggregate_ngd_evaluations,
+    audit_ngd_run,
+    run_ngd_evaluation,
+)
 from .pipeline import (
     import_materialization_stage,
     run_adapter_stage,
@@ -293,6 +298,40 @@ def _audit(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _evaluate_ngd(arguments: argparse.Namespace) -> int:
+    run_ngd_evaluation(
+        load_config(arguments.config),
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.output,
+        seed=arguments.seed,
+        device=arguments.device,
+    )
+    print("stage=ngd-evaluation status=complete", flush=True)
+    return 0
+
+
+def _aggregate_ngd(arguments: argparse.Namespace) -> int:
+    aggregate_ngd_evaluations(
+        load_config(arguments.config),
+        arguments.results,
+        arguments.output,
+    )
+    print("stage=ngd-aggregate status=complete", flush=True)
+    return 0
+
+
+def _audit_ngd(arguments: argparse.Namespace) -> int:
+    audit_ngd_run(
+        load_config(arguments.config),
+        arguments.run_root,
+        arguments.source_run_root,
+        arguments.output,
+    )
+    print("stage=ngd-audit status=complete", flush=True)
+    return 0
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", default="cuda")
@@ -416,6 +455,28 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("source_run_root")
     audit.add_argument("output")
     audit.set_defaults(handler=_audit)
+
+    ngd = commands.add_parser("evaluate-ngd")
+    ngd.add_argument("config")
+    ngd.add_argument("artifact_dir")
+    ngd.add_argument("reward_result")
+    ngd.add_argument("output")
+    ngd.add_argument("--seed", type=int, required=True)
+    ngd.add_argument("--device", default="cpu")
+    ngd.set_defaults(handler=_evaluate_ngd)
+
+    ngd_aggregate = commands.add_parser("aggregate-ngd")
+    ngd_aggregate.add_argument("config")
+    ngd_aggregate.add_argument("output")
+    ngd_aggregate.add_argument("--results", nargs="+", required=True)
+    ngd_aggregate.set_defaults(handler=_aggregate_ngd)
+
+    ngd_audit = commands.add_parser("audit-ngd")
+    ngd_audit.add_argument("config")
+    ngd_audit.add_argument("run_root")
+    ngd_audit.add_argument("source_run_root")
+    ngd_audit.add_argument("output")
+    ngd_audit.set_defaults(handler=_audit_ngd)
     return parser
 
 

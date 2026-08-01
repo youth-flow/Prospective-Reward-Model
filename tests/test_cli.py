@@ -25,6 +25,9 @@ def test_cli_only_exposes_current_workflow() -> None:
         "policy-names",
         "aggregate",
         "audit-fisher-trpo",
+        "evaluate-ngd",
+        "aggregate-ngd",
+        "audit-ngd",
     }
 
 
