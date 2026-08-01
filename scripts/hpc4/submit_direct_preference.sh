@@ -43,7 +43,11 @@ fi
 
 git_commit="$(git -C "${repo_root}" rev-parse HEAD)"
 image_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
-mapfile -t identity < <(PYTHONPATH="${repo_root}/src" python3 - "${extension_config}" <<'PY'
+source "${repo_root}/scripts/hpc4/runtime.sh"
+mapfile -t identity < <(prorm_apptainer_exec --cleanenv \
+  --bind "${repo_root}:${repo_root}" --pwd "${repo_root}" \
+  --env "PYTHONPATH=${repo_root}/src" "${image}" \
+  python - "${extension_config}" <<'PY'
 import sys
 from smart_reward.direct_preference import load_direct_preference_config, resolve_source_config
 config = load_direct_preference_config(sys.argv[1])

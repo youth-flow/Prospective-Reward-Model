@@ -657,7 +657,7 @@ def train_direct_preference(
             loss, diagnostics = auxdpo_loss(
                 implicit,
                 true_batch,
-                delta_raw.index_select(0, index_cpu),
+                delta_raw.index_select(0, index_cpu.to(target_device)),
                 score_batch,
                 nullspace_weight=float(extension["auxdpo"]["nullspace_weight"]),
                 amplitude_weight=float(extension["auxdpo"]["amplitude_weight"]),
