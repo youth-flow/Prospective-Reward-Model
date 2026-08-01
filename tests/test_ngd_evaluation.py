@@ -11,7 +11,12 @@ from smart_reward.artifacts import (
     save_exact_delta_artifact,
 )
 from smart_reward.config import TRPO_PROTOCOL, config_hash, load_config
-from smart_reward.exact import ExactDeltaExperiment, ExactSplitData
+from smart_reward.exact import (
+    ExactDeltaExperiment,
+    ExactSplitData,
+    empirical_fisher_score_rows,
+    policy_reward_moment,
+)
 from smart_reward.ngd_evaluation import (
     BETAS,
     POLICIES,
@@ -142,3 +147,22 @@ def test_seed_evaluator_validates_and_bridges_fisher_trpo_ancestors(tmp_path: Pa
     assert set(result["reward"]) == {"mle", "pro"}
     assert set(result["policy"]) == {str(beta) for beta in BETAS}
     assert result["provenance_bridge"]["source_config_sha256"] == digest
+    train_rows = empirical_fisher_score_rows(train.policy_scores, "raw_second_moment")
+    raw_fisher = train_rows.mT @ train_rows / train_rows.shape[0]
+    damping = torch.diagonal(raw_fisher).mean()
+    fisher = raw_fisher + damping * torch.eye(train.policy_dimension, dtype=torch.float64)
+    weight = torch.tensor([0.1, -0.2, 0.3], dtype=torch.float64)
+    predicted_moment = policy_reward_moment(
+        test.policy_scores, test.reward_features @ weight
+    )
+    oracle_moment = policy_reward_moment(test.policy_scores, test.true_rewards)
+    error = predicted_moment - oracle_moment
+    expected = float(torch.dot(error, torch.linalg.solve(fisher, error)).item() / 2.0)
+    mle = result["reward"]["mle"]
+    assert mle["approximate_regret"]["1.0"] == pytest.approx(expected, rel=1.0e-9)
+    assert mle["exact_regret"]["1.0"] == pytest.approx(
+        result["policy"]["1.0"]["policies"]["mle"]["delta_J"]
+    )
+    assert mle["approximation_gap"]["1.0"] == pytest.approx(
+        mle["exact_regret"]["1.0"] - mle["approximate_regret"]["1.0"]
+    )

@@ -15,16 +15,22 @@ import torch
 
 from .artifacts import exact_delta_artifact_metadata_sha256, load_exact_delta_artifact
 from .config import TRPO_PROTOCOL, config_hash, validate_config
-from .evaluation import GeometrySettings, solve_natural_direction
-from .exact import ExactSplitData, empirical_fisher_score_rows, evaluate_reward_head
+from .evaluation import GeometrySettings
+from .exact import (
+    ExactSplitData,
+    empirical_fisher_score_rows,
+    evaluate_reward_head,
+    policy_reward_moment,
+)
 from .linear import DampedEmpiricalFisher
+from .pcg import pcg
 from .runtime import producer_identity, sha256_file, validate_seed
 from .trpo_run import load_trpo_reward_comparison
 
-PROTOCOL = "prorm_fisher_corrected_common_beta_ngd_v1"
-SEED_SCHEMA = "prorm-fisher-corrected-ngd-evaluation/v1"
-AGGREGATE_SCHEMA = "prorm-fisher-corrected-ngd-aggregate/v1"
-AUDIT_SCHEMA = "prorm-fisher-corrected-ngd-integrity-audit/v1"
+PROTOCOL = "prorm_fisher_corrected_common_beta_ngd_v2"
+SEED_SCHEMA = "prorm-fisher-corrected-ngd-evaluation/v2"
+AGGREGATE_SCHEMA = "prorm-fisher-corrected-ngd-aggregate/v2"
+AUDIT_SCHEMA = "prorm-fisher-corrected-ngd-integrity-audit/v2"
 BETAS = (1.0, 2.0, 4.0)
 POLICIES = ("pi0", "mle", "pro", "oracle", "tabular")
 _DIRECTION_KEYS = {"mle": "mle_rm", "pro": "pro_rm", "oracle": "oracle"}
@@ -223,6 +229,12 @@ def run_ngd_evaluation(
         expected_config_hash=source_config_sha256,
         expected_seed=seed,
     )
+    train = ExactSplitData(
+        prompt_ids=experiment.train.prompt_ids,
+        policy_scores=experiment.train.policy_scores.to(target_device),
+        reward_features=experiment.train.reward_features.to(target_device),
+        true_rewards=experiment.train.true_rewards.to(target_device),
+    )
     test = ExactSplitData(
         prompt_ids=experiment.test.prompt_ids,
         policy_scores=experiment.test.policy_scores.to(target_device),
@@ -241,37 +253,68 @@ def run_ngd_evaluation(
     }
 
     settings = _geometry_settings(normalized, relative_damping)
-    oracle_test_direction = solve_natural_direction(test, test.true_rewards, settings)
     rows = empirical_fisher_score_rows(
-        test.policy_scores.to(dtype=torch.float64), settings.fisher_estimator
+        train.policy_scores.to(dtype=torch.float64), settings.fisher_estimator
     )
     raw_fisher = DampedEmpiricalFisher(rows, damping=0.0)
     damping = relative_damping * float(raw_fisher.diagonal().mean().item())
     damped_fisher = DampedEmpiricalFisher(rows, damping=damping)
 
+    policy_metrics = {
+        str(beta): evaluate_candidate_pool(test, directions, beta=beta) for beta in BETAS
+    }
+    oracle_test_moment = policy_reward_moment(
+        test.policy_scores.to(dtype=torch.float64),
+        test.true_rewards.to(dtype=torch.float64),
+    )
     reward_metrics: dict[str, dict[str, Any]] = {}
-    for label, source_method, direction_key in (
-        ("mle", "MLE-RM", "mle_rm"),
-        ("pro", "Pro-RM", "pro_rm"),
+    for label, source_method in (
+        ("mle", "MLE-RM"),
+        ("pro", "Pro-RM"),
     ):
         method = source["methods"][source_method]
         weight = torch.tensor(method["head_weight"], dtype=torch.float64, device=target_device)
         evaluation = evaluate_reward_head(test, weight)
-        difference = directions[direction_key] - oracle_test_direction
-        quadratic = float(torch.dot(difference, damped_fisher.matvec(difference)).item())
+        predicted_test_rewards = test.reward_features.to(dtype=torch.float64) @ weight
+        predicted_test_moment = policy_reward_moment(
+            test.policy_scores.to(dtype=torch.float64), predicted_test_rewards
+        )
+        moment_error = predicted_test_moment - oracle_test_moment
+        solve = pcg(
+            damped_fisher.matvec,
+            moment_error,
+            inverse_diagonal=damped_fisher.pcg_inverse_diagonal(),
+            max_iterations=settings.cg_max_iterations,
+            tolerance=settings.cg_tolerance,
+            residual_recompute_interval=settings.residual_recompute_interval,
+        )
+        if not solve.converged:
+            raise RuntimeError(
+                f"{label} test moment-error Fisher solve did not converge: "
+                f"iterations={solve.iterations}, residual={solve.relative_residual:.3e}"
+            )
+        quadratic = float(torch.dot(moment_error, solve.solution).item())
         if quadratic < -1.0e-10:
-            raise RuntimeError("damped Fisher produced a negative quadratic form")
+            raise RuntimeError("inverse-Fisher moment error produced a negative quadratic form")
+        approximate_regret = {
+            str(beta): max(0.0, quadratic) / (2.0 * beta) for beta in BETAS
+        }
+        exact_regret = {
+            str(beta): float(policy_metrics[str(beta)]["policies"][label]["delta_J"])
+            for beta in BETAS
+        }
         reward_metrics[label] = {
             "NLL": evaluation.soft_btl_nll,
             "MSE": _centered_reward_mse(test, weight),
-            "approximate_regret": {
-                str(beta): max(0.0, quadratic) / (2.0 * beta) for beta in BETAS
+            "approximate_regret": approximate_regret,
+            "exact_regret": exact_regret,
+            "approximation_gap": {
+                str(beta): exact_regret[str(beta)] - approximate_regret[str(beta)]
+                for beta in BETAS
             },
+            "moment_error_inverse_fisher_quadratic": max(0.0, quadratic),
+            "moment_error_pcg_relative_residual": solve.relative_residual,
         }
-
-    policy_metrics = {
-        str(beta): evaluate_candidate_pool(test, directions, beta=beta) for beta in BETAS
-    }
     payload: dict[str, Any] = {
         "schema": SEED_SCHEMA,
         "protocol": PROTOCOL,
@@ -282,14 +325,20 @@ def run_ngd_evaluation(
         "fisher": {
             "estimator": settings.fisher_estimator,
             "selected_relative_damping": relative_damping,
-            "absolute_test_damping": damping,
-            "selection": "train_prompt_crossfit_reused_from_source",
+            "absolute_train_damping": damping,
+            "geometry_split": "train",
+            "selection": "train_prompt_crossfit_reused_from_source_and_frozen",
         },
         "reward": reward_metrics,
         "policy": policy_metrics,
         "definitions": {
             "reward_MSE": "mean_{p,i}(((rhat_pi-mean_i rhat_pi)-(r*_pi-mean_i r*_pi))^2)",
-            "approximate_regret": "(d_m-d*_test)^T F_lambda,test (d_m-d*_test)/(2 beta)",
+            "approximate_regret": (
+                "(A_rhat,test-A_r*,test)^T F_lambda,train^-1 "
+                "(A_rhat,test-A_r*,test)/(2 beta)"
+            ),
+            "exact_regret": "J_tabular-J_m",
+            "approximation_gap": "exact_regret-approximate_regret",
             "R": "mean_p sum_i pi(i|x_p) r*_pi",
             "K": "mean_p KL(pi(.|x_p) || pi0(.|x_p))",
             "J": "R-beta*K",
@@ -311,7 +360,8 @@ def run_ngd_evaluation(
                 "beta_free_natural_directions",
             ],
             "recomputed_scope": [
-                "test_oracle_direction",
+                "test_reward_moments",
+                "train_fisher_inverse_moment_error",
                 "reward_evaluation",
                 "five_policy_candidate_pool_evaluation",
             ],
@@ -441,11 +491,20 @@ def audit_ngd_run(
             raise ValueError(f"reward metric coverage mismatch for seed {seed}")
         for method in ("mle", "pro"):
             reward = result["reward"][method]
-            scalars = [reward.get("NLL"), reward.get("MSE")]
-            regrets = reward.get("approximate_regret", {})
-            if set(regrets) != {str(beta) for beta in BETAS}:
-                raise ValueError(f"approximate-regret coverage mismatch for seed {seed}")
-            scalars.extend(regrets.values())
+            scalars = [
+                reward.get("NLL"),
+                reward.get("MSE"),
+                reward.get("moment_error_inverse_fisher_quadratic"),
+                reward.get("moment_error_pcg_relative_residual"),
+            ]
+            approximate = reward.get("approximate_regret", {})
+            exact = reward.get("exact_regret", {})
+            gaps = reward.get("approximation_gap", {})
+            beta_keys = {str(beta) for beta in BETAS}
+            if set(approximate) != beta_keys or set(exact) != beta_keys or set(gaps) != beta_keys:
+                raise ValueError(f"regret metric coverage mismatch for seed {seed}")
+            scalars.extend(approximate.values())
+            scalars.extend(exact.values())
             if any(
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
@@ -454,6 +513,14 @@ def audit_ngd_run(
                 for value in scalars
             ):
                 raise ValueError(f"invalid reward metric for seed {seed}")
+            for beta in BETAS:
+                key = str(beta)
+                policy_exact = result["policy"][key]["policies"][method]["delta_J"]
+                if abs(float(exact[key]) - float(policy_exact)) > 1.0e-12:
+                    raise ValueError(f"exact-regret linkage failed for seed {seed}")
+                expected_gap = float(exact[key]) - float(approximate[key])
+                if abs(float(gaps[key]) - expected_gap) > 1.0e-12:
+                    raise ValueError(f"approximation-gap identity failed for seed {seed}")
         policy = result.get("policy", {})
         if set(policy) != {str(beta) for beta in BETAS}:
             raise ValueError(f"policy beta coverage mismatch for seed {seed}")
