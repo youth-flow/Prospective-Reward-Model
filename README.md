@@ -95,23 +95,10 @@ See [theory](docs/theory.md), the
 [codebase guide](docs/codebase_guide.md) for the broader derivation and provenance
 history. Main Experiment v1 itself uses common-beta NGD, not TRPO scaling.
 
-## Rebuild the compact result bundle
-
-~~~bash
-python scripts/reporting/build_ngd_main_report.py \
-  --aggregate results/main_experiment_v1/evidence/aggregate.json \
-  --audit results/main_experiment_v1/evidence/integrity-audit.json \
-  --seed-result results/main_experiment_v1/evidence/seed-20261001-evaluation.json \
-  --seed-result results/main_experiment_v1/evidence/seed-20261002-evaluation.json \
-  --seed-result results/main_experiment_v1/evidence/seed-20261003-evaluation.json \
-  --summary results/main_experiment_v1/summary.json \
-  --latex reports/main_experiment_v1/ProRM_main_results.tex
-~~~
-
 ## Development
 
 ~~~bash
 python -m pytest
-python -m ruff check src tests scripts/reporting
-python -m ruff format --check src tests scripts/reporting
+python -m ruff check .
+python -m ruff format --check .
 ~~~

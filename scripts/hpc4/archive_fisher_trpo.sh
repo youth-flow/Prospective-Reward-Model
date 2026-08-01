@@ -59,7 +59,7 @@ cmp --silent "${source_manifest}" "${manifest}" || {
 }
 (
   cd "${staging}"
-  sed 's#  \\./#  run/#' SHA256SUMS
+  sed 's#  \./#  run/#' SHA256SUMS
   sha256sum integrity-audit.json
 ) > "${staging}/SHA256SUMS.final"
 mv -- "${staging}/SHA256SUMS.final" "${manifest}"
