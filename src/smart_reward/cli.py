@@ -10,6 +10,13 @@ from pathlib import Path
 
 from .audit import audit_fisher_trpo_run
 from .config import TRPO_PROTOCOL, ConfigError, config_hash, load_config
+from .direct_preference import (
+    aggregate_direct_preference,
+    audit_direct_preference,
+    compute_reference_logps,
+    evaluate_direct_preference_seed,
+    train_direct_preference,
+)
 from .exact_phase import materialize_exact_delta
 from .exact_policy import export_exact_ngd_adapters
 from .exact_run import run_exact_reward_comparison
@@ -332,6 +339,68 @@ def _audit_ngd(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _cache_direct_reference(arguments: argparse.Namespace) -> int:
+    compute_reference_logps(
+        arguments.extension_config,
+        arguments.artifact_dir,
+        arguments.output_dir,
+        seed=arguments.seed,
+        device=arguments.device,
+    )
+    print("stage=direct-reference status=complete", flush=True)
+    return 0
+
+
+def _train_direct(arguments: argparse.Namespace) -> int:
+    train_direct_preference(
+        arguments.extension_config,
+        arguments.artifact_dir,
+        arguments.reference_dir,
+        arguments.output_dir,
+        seed=arguments.seed,
+        beta=arguments.beta,
+        method=arguments.method,
+        device=arguments.device,
+    )
+    print("stage=direct-train status=complete", flush=True)
+    return 0
+
+
+def _evaluate_direct(arguments: argparse.Namespace) -> int:
+    evaluate_direct_preference_seed(
+        arguments.extension_config,
+        arguments.artifact_dir,
+        arguments.source_reward_result,
+        arguments.reference_dir,
+        arguments.fits_dir,
+        arguments.baseline_evaluation,
+        arguments.output,
+        seed=arguments.seed,
+    )
+    print("stage=direct-evaluation status=complete", flush=True)
+    return 0
+
+
+def _aggregate_direct(arguments: argparse.Namespace) -> int:
+    aggregate_direct_preference(
+        arguments.extension_config,
+        arguments.results,
+        arguments.output,
+    )
+    print("stage=direct-aggregate status=complete", flush=True)
+    return 0
+
+
+def _audit_direct(arguments: argparse.Namespace) -> int:
+    audit_direct_preference(
+        arguments.extension_config,
+        arguments.run_root,
+        arguments.output,
+    )
+    print("stage=direct-audit status=complete", flush=True)
+    return 0
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", default="cuda")
@@ -477,6 +546,48 @@ def build_parser() -> argparse.ArgumentParser:
     ngd_audit.add_argument("source_run_root")
     ngd_audit.add_argument("output")
     ngd_audit.set_defaults(handler=_audit_ngd)
+
+    direct_reference = commands.add_parser("cache-direct-reference")
+    direct_reference.add_argument("extension_config")
+    direct_reference.add_argument("artifact_dir")
+    direct_reference.add_argument("output_dir")
+    direct_reference.add_argument("--seed", type=int, required=True)
+    direct_reference.add_argument("--device", default="cuda")
+    direct_reference.set_defaults(handler=_cache_direct_reference)
+
+    direct_train = commands.add_parser("train-direct-preference")
+    direct_train.add_argument("extension_config")
+    direct_train.add_argument("artifact_dir")
+    direct_train.add_argument("reference_dir")
+    direct_train.add_argument("output_dir")
+    direct_train.add_argument("--seed", type=int, required=True)
+    direct_train.add_argument("--beta", type=float, required=True)
+    direct_train.add_argument("--method", choices=("dpo", "auxdpo"), required=True)
+    direct_train.add_argument("--device", default="cuda")
+    direct_train.set_defaults(handler=_train_direct)
+
+    direct_evaluate = commands.add_parser("evaluate-direct-preference")
+    direct_evaluate.add_argument("extension_config")
+    direct_evaluate.add_argument("artifact_dir")
+    direct_evaluate.add_argument("source_reward_result")
+    direct_evaluate.add_argument("reference_dir")
+    direct_evaluate.add_argument("fits_dir")
+    direct_evaluate.add_argument("baseline_evaluation")
+    direct_evaluate.add_argument("output")
+    direct_evaluate.add_argument("--seed", type=int, required=True)
+    direct_evaluate.set_defaults(handler=_evaluate_direct)
+
+    direct_aggregate = commands.add_parser("aggregate-direct-preference")
+    direct_aggregate.add_argument("extension_config")
+    direct_aggregate.add_argument("output")
+    direct_aggregate.add_argument("--results", nargs="+", required=True)
+    direct_aggregate.set_defaults(handler=_aggregate_direct)
+
+    direct_audit = commands.add_parser("audit-direct-preference")
+    direct_audit.add_argument("extension_config")
+    direct_audit.add_argument("run_root")
+    direct_audit.add_argument("output")
+    direct_audit.set_defaults(handler=_audit_direct)
     return parser
 
 

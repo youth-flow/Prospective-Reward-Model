@@ -28,6 +28,11 @@ def test_cli_only_exposes_current_workflow() -> None:
         "evaluate-ngd",
         "aggregate-ngd",
         "audit-ngd",
+        "cache-direct-reference",
+        "train-direct-preference",
+        "evaluate-direct-preference",
+        "aggregate-direct-preference",
+        "audit-direct-preference",
     }
 
 

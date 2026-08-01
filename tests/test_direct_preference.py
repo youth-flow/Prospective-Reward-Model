@@ -1,0 +1,84 @@
+from pathlib import Path
+
+import pytest
+import torch
+
+from smart_reward.direct_preference import (
+    auxdpo_loss,
+    candidate_policy_metrics,
+    centered,
+    extension_hash,
+    load_direct_preference_config,
+    pair_indices,
+    resolve_source_config,
+    soft_preference_loss,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+EXTENSION = ROOT / "configs" / "dpo_auxdpo_main.yaml"
+SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_smoke.yaml"
+
+
+def test_formal_direct_preference_config_is_bound_to_source() -> None:
+    extension = load_direct_preference_config(EXTENSION)
+    source, source_config = resolve_source_config(EXTENSION, extension)
+    assert source.name == "fisher_trpo_main.yaml"
+    assert source_config["run"]["seeds"] == [20261001, 20261002, 20261003]
+    assert len(extension_hash(extension)) == 64
+
+
+def test_smoke_config_is_a_bounded_subset_of_the_formal_source() -> None:
+    extension = load_direct_preference_config(SMOKE_EXTENSION)
+    _, source_config = resolve_source_config(SMOKE_EXTENSION, extension)
+    assert extension["training"]["limit_prompts_per_split"] == 4
+    assert set(extension["experiment"]["seeds"]).issubset(source_config["run"]["seeds"])
+
+
+def test_soft_preference_loss_uses_every_unordered_edge() -> None:
+    oracle = torch.tensor([[1.0, 0.0, -1.0]], dtype=torch.float64)
+    pairs = pair_indices(3)
+    margins = oracle[:, pairs[0]] - oracle[:, pairs[1]]
+    targets = torch.sigmoid(margins)
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(margins, targets)
+    assert torch.equal(soft_preference_loss(oracle, oracle), expected)
+    assert pairs.tolist() == [[0, 0, 1], [1, 2, 2]]
+
+
+def test_auxiliary_delta_enters_reward_but_zero_moment_is_policy_invisible() -> None:
+    implicit = torch.zeros((1, 3), dtype=torch.float64, requires_grad=True)
+    oracle = torch.tensor([[1.0, -0.5, -0.5]], dtype=torch.float64)
+    # Candidate score rows sum to zero.  This delta is orthogonal to the score
+    # coordinate, so it changes the preference fit but has zero policy moment.
+    scores = torch.tensor([[[-1.0], [0.0], [1.0]]], dtype=torch.float64)
+    delta_raw = torch.tensor([[0.4, -0.8, 0.4]], dtype=torch.float64, requires_grad=True)
+    loss, diagnostics = auxdpo_loss(
+        implicit,
+        oracle,
+        delta_raw,
+        scores,
+        nullspace_weight=1.0,
+        amplitude_weight=0.01,
+        delta_cap=1.0,
+    )
+    assert diagnostics["delta"].abs().max() > 0
+    assert diagnostics["nullspace_moment"].abs().item() == pytest.approx(0.0, abs=1e-15)
+    loss.backward()
+    assert implicit.grad is not None
+    assert delta_raw.grad is not None
+
+
+def test_candidate_policy_metrics_satisfy_gibbs_identities() -> None:
+    rewards = torch.tensor([[1.2, 0.1, -0.7], [0.3, 0.2, -0.2]], dtype=torch.float64)
+    beta = 0.2
+    # The tabular policy has log ratios equal to reward/beta up to a prompt constant.
+    metrics = candidate_policy_metrics(rewards / beta, rewards, beta=beta)
+    assert metrics["delta_J"] == pytest.approx(0.0, abs=1e-12)
+    assert metrics["beta_KL"] == pytest.approx(0.0, abs=1e-12)
+    assert max(metrics["identity_residuals"].values()) < 1e-12
+
+
+def test_centering_removes_only_prompt_constants() -> None:
+    values = torch.tensor([[3.0, 4.0, 5.0], [-2.0, 0.0, 2.0]])
+    shifted = values + torch.tensor([[91.0], [-17.0]])
+    assert torch.allclose(centered(values), centered(shifted))
+    assert torch.allclose(centered(values).mean(dim=1), torch.zeros(2))
