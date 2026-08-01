@@ -182,3 +182,16 @@ def test_slurm_production_requires_all_three_identities(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(ValueError, match="requires Git, image, and HF inventory"):
         producer_identity()
+
+
+def test_direct_aggregate_passes_complete_producer_identity() -> None:
+    text = (ROOT / "scripts" / "hpc4" / "direct_aggregate.sbatch").read_text(
+        encoding="utf-8"
+    )
+    for name in (
+        "PRORM_GIT_COMMIT",
+        "PRORM_IMAGE_SHA256",
+        "PRORM_HF_INVENTORY_SHA256",
+        "SLURM_JOB_ID",
+    ):
+        assert f'--env "{name}=${{{name}}}"' in text
