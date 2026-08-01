@@ -49,6 +49,12 @@ is a training-sample variable rather than a generalizing reward network, the for
 reward row is explicitly the policy-implied reward `beta log(pi/pi0)`; the augmented
 reward is limited to train diagnostics.
 
+Both methods use two matched policy-training epochs. This is a deliberate structured-data
+adaptation rather than a claim about the paper's one-epoch appendix setting: with
+zero-initialized prompt-candidate offsets and one visit per node, an offset is updated only
+after its sole policy gradient and AuxDPO degenerates exactly to DPO. The first matched pass
+learns the nuisance offsets; the second allows those learned offsets to influence the policy.
+
 ## Evaluation
 
 The induced frozen candidate-pool policy is the normalized sequence likelihood-ratio

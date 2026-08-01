@@ -43,20 +43,15 @@ fi
 
 git_commit="$(git -C "${repo_root}" rev-parse HEAD)"
 image_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
-source "${repo_root}/scripts/hpc4/runtime.sh"
-mapfile -t identity < <(prorm_apptainer_exec --cleanenv \
-  --bind "${repo_root}:${repo_root}" --pwd "${repo_root}" \
-  --env "PYTHONPATH=${repo_root}/src" "${image}" \
-  python - "${extension_config}" <<'PY'
-import sys
-from smart_reward.direct_preference import load_direct_preference_config, resolve_source_config
-config = load_direct_preference_config(sys.argv[1])
-_, source = resolve_source_config(sys.argv[1], config)
-print(config["source_config_sha256"])
-print(len(config["experiment"]["seeds"]))
-PY
-)
-inventory="${hf_cache}/inventories/${identity[0]}.json"
+source_config_sha256="$(sed -n 's/^source_config_sha256: //p' "${extension_config}")"
+[[ "${source_config_sha256}" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "extension source config SHA-256 is malformed" >&2
+  exit 2
+}
+seed_csv="$(sed -n 's/^  seeds: \[\(.*\)\]/\1/p' "${extension_config}" | head -n 1)"
+[[ -n "${seed_csv}" ]] || { echo "extension seed list is missing" >&2; exit 2; }
+seed_count="$(tr ',' '\n' <<< "${seed_csv}" | wc -l | tr -d ' ')"
+inventory="${hf_cache}/inventories/${source_config_sha256}.json"
 [[ -f "${inventory}" ]] || { echo "missing source-config HF inventory" >&2; exit 2; }
 inventory_sha="$(sha256sum "${inventory}" | cut -d' ' -f1)"
 common="ALL,PRORM_REPO_ROOT=${repo_root},PRORM_EXTENSION_CONFIG=${extension_config},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${image_sha},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY_SHA256=${inventory_sha},PRORM_GIT_COMMIT=${git_commit},PRORM_SOURCE_RUN_ROOT=${source_run},PRORM_BASELINE_RUN_ROOT=${baseline_run},PRORM_RUN_ROOT=${run_root}"
@@ -71,7 +66,7 @@ case "${stage}" in
     ;;
   evaluate)
     job="$(sbatch --parsable --job-name=prorm-direct-eval --partition=amd \
-      --time=04:00:00 --array="0-$((identity[1] - 1))" \
+      --time=04:00:00 --array="0-$((seed_count - 1))" \
       --output="${run_root}/logs/evaluate-%A_%a.out" --export="${common}" \
       "${repo_root}/scripts/hpc4/direct_evaluate.sbatch")"
     ;;

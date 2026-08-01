@@ -128,8 +128,8 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
     training = value["training"]
     if training.get("objective") != "response_token_log_policy_ratio":
         raise ValueError("direct preference training must use real sequence log probabilities")
-    if int(training.get("epochs", 0)) != 1:
-        raise ValueError("formal extension is frozen to one epoch")
+    if int(training.get("epochs", 0)) != 2:
+        raise ValueError("direct-preference extension is frozen to two epochs")
     if str(training.get("compute_dtype")) != "bfloat16":
         raise ValueError("formal extension compute dtype must be bfloat16")
     aux = value["auxdpo"]
@@ -590,7 +590,16 @@ def train_direct_preference(
         weight_decay=float(extension["training"]["weight_decay"]),
     )
     batch_size = int(extension["training"]["prompt_batch_size"])
-    total_batches = math.ceil(prompt_count / batch_size)
+    epochs = int(extension["training"]["epochs"])
+    condition_seed = int(seed * 1000 + round(beta * 100))
+    schedule: list[list[int]] = []
+    for epoch in range(epochs):
+        epoch_order = list(range(prompt_count))
+        random.Random(condition_seed + epoch).shuffle(epoch_order)
+        schedule.extend(
+            epoch_order[start : start + batch_size] for start in range(0, prompt_count, batch_size)
+        )
+    total_batches = len(schedule)
     if extension["training"].get("learning_rate_schedule") != "linear_to_zero":
         raise ValueError("direct-preference learning-rate schedule changed")
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -599,9 +608,6 @@ def train_direct_preference(
     )
     checkpoint_path = target / "checkpoint.pt"
     start_batch = 0
-    condition_seed = int(seed * 1000 + round(beta * 100))
-    order = list(range(prompt_count))
-    random.Random(condition_seed).shuffle(order)
     if checkpoint_path.exists():
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if checkpoint.get("identity") != [digest, seed, beta, method]:
@@ -614,8 +620,8 @@ def train_direct_preference(
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         start_batch = int(checkpoint["next_batch"])
-        if checkpoint["order"] != order:
-            raise ValueError("training checkpoint permutation mismatch")
+        if checkpoint["schedule"] != schedule:
+            raise ValueError("training checkpoint schedule mismatch")
     checkpoint_every = int(extension["training"]["checkpoint_prompt_batches"])
     reference_train = reference["train"].to(torch.float32)
     true_train = train.true_rewards[:prompt_count].to(torch.float32)
@@ -629,10 +635,9 @@ def train_direct_preference(
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to(target_device)
-    for batch_number, start in enumerate(range(0, len(order), batch_size)):
+    for batch_number, indices in enumerate(schedule):
         if batch_number < start_batch:
             continue
-        indices = order[start : start + batch_size]
         nodes = tuple(groups[index] for index in indices)
         updated = response_log_probabilities(
             setup.model,
@@ -680,11 +685,11 @@ def train_direct_preference(
         for key in ("preference_nll", "nullspace_penalty", "delta_amplitude"):
             running[key] += float(diagnostics[key].detach().item())
         next_batch = batch_number + 1
-        if next_batch % checkpoint_every == 0 or next_batch * batch_size >= len(order):
+        if next_batch % checkpoint_every == 0 or next_batch >= total_batches:
             checkpoint = {
                 "identity": [digest, seed, beta, method],
                 "next_batch": next_batch,
-                "order": order,
+                "schedule": schedule,
                 "adapter": {
                     name: parameter.detach().cpu()
                     for name, parameter in setup.named_tangent_parameters()
@@ -698,7 +703,7 @@ def train_direct_preference(
             _atomic_torch(checkpoint_path, checkpoint)
             print(
                 f"train seed={seed} beta={beta:g} method={method} "
-                f"batches={next_batch}/{math.ceil(len(order) / batch_size)} "
+                f"batches={next_batch}/{total_batches} "
                 f"loss={float(loss.item()):.8f}",
                 flush=True,
             )
@@ -756,9 +761,9 @@ def train_direct_preference(
         "reference_metadata_sha256": sha256_file(Path(reference_dir) / "metadata.json"),
         "training": {
             "objective": "exact_soft_BTL_over_response_token_log_policy_ratio",
-            "epochs": 1,
+            "epochs": epochs,
             "limit_prompts_per_split": prompt_limit,
-            "prompt_batches": math.ceil(len(order) / batch_size),
+            "prompt_batches": total_batches,
             "mean_online_metrics": {
                 key: value / max(processed, 1) for key, value in running.items()
             },

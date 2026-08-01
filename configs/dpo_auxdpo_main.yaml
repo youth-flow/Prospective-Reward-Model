@@ -13,7 +13,10 @@ experiment:
 
 training:
   objective: response_token_log_policy_ratio
-  epochs: 1
+  # Two passes are required for zero-initialized per-node auxiliary variables:
+  # pass one learns delta; pass two lets the learned delta affect the policy.
+  # DPO uses the same number of policy passes for a matched comparison.
+  epochs: 2
   prompt_batch_size: 1
   gradient_accumulation_steps: 1
   policy_optimizer: adamw
