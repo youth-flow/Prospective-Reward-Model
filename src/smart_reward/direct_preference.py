@@ -843,6 +843,12 @@ def evaluate_direct_preference_seed(
     *,
     seed: int,
 ) -> dict[str, Any]:
+    artifact_dir = Path(artifact_dir)
+    source_reward_result = Path(source_reward_result)
+    reference_dir = Path(reference_dir)
+    fits_dir = Path(fits_dir)
+    baseline_evaluation = Path(baseline_evaluation)
+    output = Path(output)
     extension = load_direct_preference_config(extension_path)
     _, source_config = resolve_source_config(extension_path, extension)
     digest = extension_hash(extension)
