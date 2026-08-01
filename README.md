@@ -1,116 +1,117 @@
 # Prospective Reward Model
 
-This repository implements one experiment only: compare exact-soft-label MLE-RM and
-Pro-RM under reward-class misspecification, then evaluate the one-step policies they
-induce in a fixed LoRA-B tangent.
+This repository contains the controlled ProRM experiment: learn a reward model for
+the one-step policy update it induces, rather than only for preference likelihood.
 
-## Main configuration
+## Main Experiment v1
 
-[`configs/main.yaml`](configs/main.yaml) is the formal experiment definition.
+The first complete main experiment is the **Fisher-corrected, common-beta, one-step
+NGD evaluation** with three formal seeds:
 
-- Seeds: `20261001`, `20261002`, `20261003`
-- Prompts: 4096 MultiPref prompts, split 3072/512/512
-- Reference policy: Qwen2.5-1.5B-Instruct
-- Candidates: 6 reference-policy responses per prompt, all 15 unordered pairs
-- Oracle: Skywork-Reward-V2-Llama-3.2-3B
-- Reward class: frozen Qwen response feature plus a bias-free 1536-dimensional head
-- Policy tangent: final-layer `q_proj`/`v_proj`, rank-4 LoRA, fixed A and trainable B
-- Learned rewards: MLE-RM and Pro-RM
-- Policy families: reference, MLE-NGD, Pro-NGD, and oracle-NGD
-- Common KL coefficients: `beta = [1, 2, 4]`
+- seeds: **20261001**, **20261002**, **20261003**;
+- report betas: **0.1**, **0.2**, **0.3**;
+- nominal condition: **beta = 0.2**;
+- policies: pi0, MLE-NGD, Pro-NGD, oracle-NGD, and the closed-form finite-pool
+  tabular optimum;
+- Fisher: train-node raw second moment with train-only five-fold cross-fit;
+- selected relative damping: **10**;
+- test use: frozen candidate-pool evaluation only.
 
-The oracle provides exact reward differences for this controlled experiment. The YAML,
-CLI, package, tests, and HPC4 scripts expose only the workflow shown below.
+The three-seed means satisfy
 
-## Workflow
+~~~text
+R: tabular > oracle > Pro > MLE > pi0
+J: tabular > Pro > oracle > MLE > pi0
+~~~
 
-```text
-MultiPref prompts
-  -> pi0 candidates on train/validation/test
-  -> Skywork scores + reward features + LoRA-B score vectors
-  -> exact node artifact and all pair edges
-  -> MLE-RM and Pro-RM
-  -> reward-fit and held-out local/tabular evaluation
-  -> three beta-free NGD directions
-  -> nine beta-scaled LoRA adapters
-  -> ten independently resumable fresh test rollouts
-  -> three-seed descriptive aggregate
-```
+Pro-NGD has higher regularized utility than both MLE-NGD and oracle-NGD in all
+3 betas x 3 seeds. At beta = 0.2, the mean gaps are
+J(Pro)-J(MLE) = 0.005098 and J(Pro)-J(oracle) = 0.000935.
 
-Validate the configuration:
+The reward-level result is deliberately reported as a limitation: ProRM has worse
+held-out NLL, centered reward MSE, and approximate regret than MLE-RM. The train
+profiled objective was optimized successfully, so the current diagnosis is
+reward-moment overfitting / insufficient held-out generalization, not a failed
+PCG solve or an invalid NGD update.
 
-```bash
-prorm config-check configs/main.yaml
-```
+The beta subset was chosen after inspecting a dense test sweep. Main Experiment v1
+is therefore complete and auditable **exploratory evidence**, not a new held-out
+confirmatory test. A future confirmation should freeze beta = 0.2 before opening a
+new test split.
 
-Run one seed end to end after the pinned Hugging Face assets have been staged:
+## Results and report
 
-```bash
-prorm run-seed configs/main.yaml runs/20261001 \
-  --seed 20261001 --device cuda
-```
+- [Machine-readable summary](results/main_experiment_v1/summary.json)
+- [Complete retained evidence](results/main_experiment_v1/README.md)
+- [Academic report source](reports/main_experiment_v1/ProRM_main_experiment_v1.tex)
+- [Report build instructions](reports/main_experiment_v1/README.md)
 
-The output contains:
+The retained evidence includes all three seed-level evaluation JSON files, the
+three-seed aggregate, integrity audit, and immutable archive manifest. The full
+server archive remains content-addressed and unchanged.
 
-```text
-runs/20261001/
-  artifact/
-    prompts.jsonl
-    candidates.jsonl  # prompt, response, raw oracle score, standardized r*
-    edges.jsonl
-    metadata.json
-    tensors.safetensors
-  reward_result.json
-  adapters/
-    metadata.json
-    mle_rm__beta_1/ ... oracle__beta_4/
-  policy_rollout_parts/
-    pi0/ ... oracle__beta_4/
-  policy_utility/
-    rollouts.jsonl
-    metrics.json
-  stage_receipts/
-    materialize.json
-    reward.json
-    adapters.json
-```
+## Scientific workflow
 
-Production runs use `scripts/hpc4/submit_pipeline.sh`. It submits one QOS-compliant Slurm
-stage at a time for materialization, reward fitting, adapter export, packed per-policy rollout,
-per-seed rollout assembly, and final aggregation. Every completed stage is hash-bound
-to the config, seed, Git commit, SIF, Hugging Face inventory, and upstream artifacts.
+~~~text
+validated material + reward heads + train Fisher
+  -> three frozen train directions (MLE / Pro / oracle)
+  -> common-beta NGD candidate-pool evaluation
+  -> five-policy metrics on frozen test candidates
+  -> three-seed aggregate
+  -> integrity audit
+  -> immutable HPC4 archive
+  -> local Git evidence bundle and report
+~~~
 
-Aggregate the three seeds:
+The dense sweep is retained in the raw evidence for audit and future analysis. The
+main report exposes only beta = {0.1, 0.2, 0.3}. Unaffected upstream artifacts are
+reused by immutable receipt and hash; a change only recomputes its earliest affected
+stage and scientific downstream closure.
 
-```bash
-prorm aggregate configs/main.yaml runs/aggregate.json \
-  --reward-results runs/20261001/reward_result.json \
-                   runs/20261002/reward_result.json \
-                   runs/20261003/reward_result.json \
-  --rollout-results runs/20261001/policy_utility/metrics.json \
-                    runs/20261002/policy_utility/metrics.json \
-                    runs/20261003/policy_utility/metrics.json
-```
+## Core definitions
 
-## Evaluation boundary
+For a frozen train direction:
 
-Reward fitting is computed on the frozen reference-policy candidate pool. Local regret
-and tabular utility apply the train-fitted directions to the frozen test candidate pool;
-they are exact conditional on that finite pool, not population-exact.
-Actual reward and regularized utility are Monte Carlo estimates from fresh test
-rollouts. Fisher-TRPO forward KL uses sampled updated-policy prefixes but integrates
-the next-token action exactly over the vocabulary (a Rao-Blackwellized chain-rule
-estimate); legacy exact-delta runs retain sampled sequence log-ratios. Validation is
-diagnostic only; test data never selects a model or beta.
+~~~text
+d_m = F_train,lambda^-1 g_m,
+delta_m(beta) = d_m / beta.
+~~~
 
-See [`docs/experiment_protocol.md`](docs/experiment_protocol.md),
-[`docs/theory.md`](docs/theory.md), and
-[`docs/codebase_guide.md`](docs/codebase_guide.md).
+On the six-candidate test pool:
+
+~~~text
+R(pi) = E_pi[r*]
+K(pi) = KL(pi || pi0)
+J(pi) = R(pi) - beta K(pi)
+DeltaJ(pi) = J(pi_tabular) - J(pi)
+betaKL(pi) = beta KL(pi || pi_tabular)
+~~~
+
+The implementation verifies the exact finite-pool identities
+J(pi_tabular) = J_close and DeltaJ = betaKL.
+
+See [theory](docs/theory.md), the
+[Fisher/TRPO ancestor protocol](docs/fisher_trpo_protocol.md), and the
+[codebase guide](docs/codebase_guide.md) for the broader derivation and provenance
+history. Main Experiment v1 itself uses common-beta NGD, not TRPO scaling.
+
+## Rebuild the compact result bundle
+
+~~~bash
+python scripts/reporting/build_ngd_main_report.py \
+  --aggregate results/main_experiment_v1/evidence/aggregate.json \
+  --audit results/main_experiment_v1/evidence/integrity-audit.json \
+  --seed-result results/main_experiment_v1/evidence/seed-20261001-evaluation.json \
+  --seed-result results/main_experiment_v1/evidence/seed-20261002-evaluation.json \
+  --seed-result results/main_experiment_v1/evidence/seed-20261003-evaluation.json \
+  --summary results/main_experiment_v1/summary.json \
+  --latex reports/main_experiment_v1/ProRM_main_results.tex
+~~~
 
 ## Development
 
-```bash
+~~~bash
 python -m pytest
-python -m ruff check src tests
-python -m ruff format --check src tests
-```
+python -m ruff check src tests scripts/reporting
+python -m ruff format --check src tests scripts/reporting
+~~~

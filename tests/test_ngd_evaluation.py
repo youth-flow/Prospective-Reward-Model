@@ -19,7 +19,9 @@ from smart_reward.exact import (
 )
 from smart_reward.ngd_evaluation import (
     BETAS,
+    MAIN_REPORT_BETAS,
     POLICIES,
+    PRIMARY_BETA,
     PROTOCOL,
     evaluate_candidate_pool,
     run_ngd_evaluation,
@@ -69,6 +71,12 @@ def test_beta_grid_is_frozen() -> None:
             {"mle_rm": zero, "pro_rm": zero, "oracle": zero},
             beta=3.0,
         )
+
+
+def test_main_report_beta_contract_is_frozen() -> None:
+    assert MAIN_REPORT_BETAS == (0.1, 0.2, 0.3)
+    assert PRIMARY_BETA == 0.2
+    assert set(MAIN_REPORT_BETAS).issubset(BETAS)
 
 
 def test_seed_evaluator_validates_and_bridges_fisher_trpo_ancestors(tmp_path: Path) -> None:
@@ -122,8 +130,7 @@ def test_seed_evaluator_validates_and_bridges_fisher_trpo_ancestors(tmp_path: Pa
                     "oracle": [2.0 * value for value in direction],
                 },
                 "policy_updates": {
-                    method: {"0.001": update_record}
-                    for method in ("mle_rm", "pro_rm", "oracle")
+                    method: {"0.001": update_record} for method in ("mle_rm", "pro_rm", "oracle")
                 },
                 "dimensions": {"policy_tangent": dimension},
                 "producer": {"git_commit": "0" * 40},
@@ -152,9 +159,7 @@ def test_seed_evaluator_validates_and_bridges_fisher_trpo_ancestors(tmp_path: Pa
     damping = torch.diagonal(raw_fisher).mean()
     fisher = raw_fisher + damping * torch.eye(train.policy_dimension, dtype=torch.float64)
     weight = torch.tensor([0.1, -0.2, 0.3], dtype=torch.float64)
-    predicted_moment = policy_reward_moment(
-        test.policy_scores, test.reward_features @ weight
-    )
+    predicted_moment = policy_reward_moment(test.policy_scores, test.reward_features @ weight)
     oracle_moment = policy_reward_moment(test.policy_scores, test.true_rewards)
     error = predicted_moment - oracle_moment
     expected = float(torch.dot(error, torch.linalg.solve(fisher, error)).item() / 2.0)

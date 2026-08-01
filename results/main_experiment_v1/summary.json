@@ -1,0 +1,456 @@
+{
+  "betas": [
+    0.1,
+    0.2,
+    0.3
+  ],
+  "evidence_class": "exploratory_post_hoc_beta_selection",
+  "identities": {
+    "J_tabular_equals_J_close": true,
+    "delta_J_equals_beta_KL": true,
+    "max_mean_absolute_residual": 1.295260195396016e-16
+  },
+  "interpretation": {
+    "policy": "Despite the reward-level generalization gap, Pro-NGD exceeds MLE-NGD in regularized test utility for every reported beta and every seed.",
+    "reward": "Pro-RM fits its train moment objective but generalizes worse than MLE-RM on held-out NLL, centered reward MSE, and approximate regret.",
+    "selection_caveat": "The beta subset was selected after inspecting the dense test sweep; it is descriptive Main Experiment v1 evidence, not a fresh confirmatory test."
+  },
+  "ordering_seed_counts": {
+    "0.1": {
+      "J": 2,
+      "R": 3
+    },
+    "0.2": {
+      "J": 3,
+      "R": 3
+    },
+    "0.3": {
+      "J": 3,
+      "R": 3
+    }
+  },
+  "policy": {
+    "0.1": {
+      "J_close": {
+        "mean": 0.5935095704453102,
+        "sample_sd": 0.023060488366796295
+      },
+      "policies": {
+        "mle": {
+          "J": {
+            "mean": 0.022222648895922088,
+            "sample_sd": 0.023937174390023637
+          },
+          "K": {
+            "mean": 0.09273745436044745,
+            "sample_sd": 0.023127179927148543
+          },
+          "R": {
+            "mean": 0.03149639433196683,
+            "sample_sd": 0.024754398196325814
+          },
+          "beta_KL": {
+            "mean": 0.571286921549388,
+            "sample_sd": 0.001110155926289086
+          },
+          "delta_J": {
+            "mean": 0.5712869215493881,
+            "sample_sd": 0.0011101559262889876
+          }
+        },
+        "oracle": {
+          "J": {
+            "mean": 0.028116273931953224,
+            "sample_sd": 0.016882829782514073
+          },
+          "K": {
+            "mean": 0.24598495765957215,
+            "sample_sd": 0.05030150097215441
+          },
+          "R": {
+            "mean": 0.052714769697910446,
+            "sample_sd": 0.019606186345093226
+          },
+          "beta_KL": {
+            "mean": 0.5653932965133569,
+            "sample_sd": 0.007079064563323494
+          },
+          "delta_J": {
+            "mean": 0.5653932965133569,
+            "sample_sd": 0.007079064563323465
+          }
+        },
+        "pi0": {
+          "J": {
+            "mean": -0.005947466012067675,
+            "sample_sd": 0.024932154750688506
+          },
+          "K": {
+            "mean": 0.0,
+            "sample_sd": 0.0
+          },
+          "R": {
+            "mean": -0.005947466012067675,
+            "sample_sd": 0.024932154750688506
+          },
+          "beta_KL": {
+            "mean": 0.5994570364573778,
+            "sample_sd": 0.005110596826435919
+          },
+          "delta_J": {
+            "mean": 0.5994570364573778,
+            "sample_sd": 0.005110596826435819
+          }
+        },
+        "pro": {
+          "J": {
+            "mean": 0.03029700364538704,
+            "sample_sd": 0.017216935725544284
+          },
+          "K": {
+            "mean": 0.21192297536165974,
+            "sample_sd": 0.05214418130026855
+          },
+          "R": {
+            "mean": 0.05148930118155302,
+            "sample_sd": 0.02003295419367865
+          },
+          "beta_KL": {
+            "mean": 0.563212566799923,
+            "sample_sd": 0.006749927729273862
+          },
+          "delta_J": {
+            "mean": 0.563212566799923,
+            "sample_sd": 0.006749927729273908
+          }
+        },
+        "tabular": {
+          "J": {
+            "mean": 0.59350957044531,
+            "sample_sd": 0.023060488366796233
+          },
+          "K": {
+            "mean": 1.349119896559501,
+            "sample_sd": 0.01158718928043419
+          },
+          "R": {
+            "mean": 0.7284215601012601,
+            "sample_sd": 0.021934704650877653
+          },
+          "beta_KL": {
+            "mean": 0.0,
+            "sample_sd": 0.0
+          },
+          "delta_J": {
+            "mean": 3.700743415417188e-17,
+            "sample_sd": 6.409875621278546e-17
+          }
+        }
+      }
+    },
+    "0.2": {
+      "J_close": {
+        "mean": 0.4776996221068201,
+        "sample_sd": 0.023708182766159297
+      },
+      "policies": {
+        "mle": {
+          "J": {
+            "mean": 0.008956687344825963,
+            "sample_sd": 0.024644631253294223
+          },
+          "K": {
+            "mean": 0.024840391022308617,
+            "sample_sd": 0.006720186876535815
+          },
+          "R": {
+            "mean": 0.013924765549287685,
+            "sample_sd": 0.024976264423300493
+          },
+          "beta_KL": {
+            "mean": 0.4687429347619941,
+            "sample_sd": 0.0025294935379987786
+          },
+          "delta_J": {
+            "mean": 0.4687429347619942,
+            "sample_sd": 0.002529493537998747
+          }
+        },
+        "oracle": {
+          "J": {
+            "mean": 0.013119778968236516,
+            "sample_sd": 0.021080871191547414
+          },
+          "K": {
+            "mean": 0.07330665161654487,
+            "sample_sd": 0.018049554234453292
+          },
+          "R": {
+            "mean": 0.02778110929154549,
+            "sample_sd": 0.022902328736985535
+          },
+          "beta_KL": {
+            "mean": 0.46457984313858364,
+            "sample_sd": 0.0034459645261081095
+          },
+          "delta_J": {
+            "mean": 0.46457984313858364,
+            "sample_sd": 0.0034459645261080665
+          }
+        },
+        "pi0": {
+          "J": {
+            "mean": -0.005947466012067675,
+            "sample_sd": 0.024932154750688506
+          },
+          "K": {
+            "mean": 0.0,
+            "sample_sd": 0.0
+          },
+          "R": {
+            "mean": -0.005947466012067675,
+            "sample_sd": 0.024932154750688506
+          },
+          "beta_KL": {
+            "mean": 0.4836470881188877,
+            "sample_sd": 0.005097143569412479
+          },
+          "delta_J": {
+            "mean": 0.48364708811888774,
+            "sample_sd": 0.005097143569412479
+          }
+        },
+        "pro": {
+          "J": {
+            "mean": 0.01405509067324602,
+            "sample_sd": 0.021327976776801167
+          },
+          "K": {
+            "mean": 0.06170490455880209,
+            "sample_sd": 0.017557725101740505
+          },
+          "R": {
+            "mean": 0.02639607158500644,
+            "sample_sd": 0.02309933431657981
+          },
+          "beta_KL": {
+            "mean": 0.463644531433574,
+            "sample_sd": 0.0034045385219808218
+          },
+          "delta_J": {
+            "mean": 0.46364453143357415,
+            "sample_sd": 0.003404538521980803
+          }
+        },
+        "tabular": {
+          "J": {
+            "mean": 0.47769962210682,
+            "sample_sd": 0.02370818276615935
+          },
+          "K": {
+            "mean": 0.9852905845742662,
+            "sample_sd": 0.003740957129315196
+          },
+          "R": {
+            "mean": 0.6747577390216732,
+            "sample_sd": 0.022973016319842932
+          },
+          "beta_KL": {
+            "mean": 0.0,
+            "sample_sd": 0.0
+          },
+          "delta_J": {
+            "mean": 5.551115123125783e-17,
+            "sample_sd": 5.551115123125783e-17
+          }
+        }
+      }
+    },
+    "0.3": {
+      "J_close": {
+        "mean": 0.392979393434568,
+        "sample_sd": 0.0240355678260117
+      },
+      "policies": {
+        "mle": {
+          "J": {
+            "mean": 0.004131503012360846,
+            "sample_sd": 0.024788844023139897
+          },
+          "K": {
+            "mean": 0.01120654709796026,
+            "sample_sd": 0.003106647527517318
+          },
+          "R": {
+            "mean": 0.007493467141748922,
+            "sample_sd": 0.02497457052720432
+          },
+          "beta_KL": {
+            "mean": 0.3888478904222071,
+            "sample_sd": 0.0030473134048209006
+          },
+          "delta_J": {
+            "mean": 0.3888478904222072,
+            "sample_sd": 0.0030473134048208997
+          }
+        },
+        "oracle": {
+          "J": {
+            "mean": 0.0071795478081132305,
+            "sample_sd": 0.022473680660655075
+          },
+          "K": {
+            "mean": 0.03382137823722482,
+            "sample_sd": 0.008748843222687054
+          },
+          "R": {
+            "mean": 0.017325961279280676,
+            "sample_sd": 0.02365950748321038
+          },
+          "beta_KL": {
+            "mean": 0.3857998456264548,
+            "sample_sd": 0.002926550893504163
+          },
+          "delta_J": {
+            "mean": 0.3857998456264548,
+            "sample_sd": 0.002926550893504145
+          }
+        },
+        "pi0": {
+          "J": {
+            "mean": -0.005947466012067675,
+            "sample_sd": 0.024932154750688506
+          },
+          "K": {
+            "mean": 0.0,
+            "sample_sd": 0.0
+          },
+          "R": {
+            "mean": -0.005947466012067675,
+            "sample_sd": 0.024932154750688506
+          },
+          "beta_KL": {
+            "mean": 0.3989268594466357,
+            "sample_sd": 0.0048871812849533205
+          },
+          "delta_J": {
+            "mean": 0.3989268594466357,
+            "sample_sd": 0.004887181284953359
+          }
+        },
+        "pro": {
+          "J": {
+            "mean": 0.007728995911308448,
+            "sample_sd": 0.022618282432297555
+          },
+          "K": {
+            "mean": 0.02834877338153052,
+            "sample_sd": 0.0083834916339242
+          },
+          "R": {
+            "mean": 0.016233627925767605,
+            "sample_sd": 0.023759066749925433
+          },
+          "beta_KL": {
+            "mean": 0.38525039752325957,
+            "sample_sd": 0.0030421985171687864
+          },
+          "delta_J": {
+            "mean": 0.38525039752325957,
+            "sample_sd": 0.00304219851716881
+          }
+        },
+        "tabular": {
+          "J": {
+            "mean": 0.392979393434568,
+            "sample_sd": 0.024035567826011676
+          },
+          "K": {
+            "mean": 0.7245025869346006,
+            "sample_sd": 0.003992855241636376
+          },
+          "R": {
+            "mean": 0.6103301695149482,
+            "sample_sd": 0.023082336895548058
+          },
+          "beta_KL": {
+            "mean": 0.0,
+            "sample_sd": 0.0
+          },
+          "delta_J": {
+            "mean": -1.850371707708594e-17,
+            "sample_sd": 3.204937810639273e-17
+          }
+        }
+      }
+    }
+  },
+  "primary_beta": 0.2,
+  "provenance": {
+    "aggregate_schema": "prorm-fisher-corrected-ngd-aggregate/v4",
+    "aggregate_sha256": "fb6967abf4a8b0ca679c6a022c9537a6d1dc471a90187580e110b751605ac930",
+    "audit_schema": "prorm-fisher-corrected-ngd-integrity-audit/v4",
+    "audit_sha256": "b1df1781fe71518557908f9ad1d986918ca6c5c0a01ca214fddf5c1ffe6c2874",
+    "producer_commit": "0f51c6a59454e7ad7e4fa9fd09f022feb0598d68",
+    "protocol": "prorm_fisher_corrected_common_beta_ngd_v4",
+    "source_config_sha256": "0ff8cb872c5bdecc33bd2e5ded7d9c3adcbc43d7b6c355b40f8d34a1ae95ce92"
+  },
+  "reward": {
+    "mle": {
+      "MSE": {
+        "mean": 0.30204720090360454,
+        "sample_sd": 0.008748806822598681
+      },
+      "NLL": {
+        "mean": 0.6834460117371686,
+        "sample_sd": 0.0010893468308493521
+      },
+      "approximate_regret": {
+        "0.1": {
+          "mean": 0.3437097536924316,
+          "sample_sd": 0.007907847915853578
+        },
+        "0.2": {
+          "mean": 0.1718548768462158,
+          "sample_sd": 0.003953923957926789
+        },
+        "0.3": {
+          "mean": 0.11456991789747721,
+          "sample_sd": 0.0026359493052845323
+        }
+      }
+    },
+    "pro": {
+      "MSE": {
+        "mean": 0.4982544112976092,
+        "sample_sd": 0.020680953650038594
+      },
+      "NLL": {
+        "mean": 0.7328529806162779,
+        "sample_sd": 0.003182867922844699
+      },
+      "approximate_regret": {
+        "0.1": {
+          "mean": 0.6325120084615751,
+          "sample_sd": 0.04895481873686918
+        },
+        "0.2": {
+          "mean": 0.31625600423078754,
+          "sample_sd": 0.02447740936843459
+        },
+        "0.3": {
+          "mean": 0.21083733615385836,
+          "sample_sd": 0.016318272912289728
+        }
+      }
+    }
+  },
+  "schema": "prorm-main-experiment-report/v1",
+  "seeds": [
+    20261001,
+    20261002,
+    20261003
+  ],
+  "status": "completed_audited_archived",
+  "title": "Fisher-corrected common-beta NGD Main Experiment v1"
+}

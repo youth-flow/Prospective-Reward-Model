@@ -42,6 +42,14 @@ venv/
 *.bin
 *.sif
 
+# LaTeX build intermediates (the reviewed PDF is retained).
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
 # Editors and operating systems.
 .idea/
 .vscode/

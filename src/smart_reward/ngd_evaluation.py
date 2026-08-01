@@ -32,6 +32,11 @@ SEED_SCHEMA = "prorm-fisher-corrected-ngd-evaluation/v4"
 AGGREGATE_SCHEMA = "prorm-fisher-corrected-ngd-aggregate/v4"
 AUDIT_SCHEMA = "prorm-fisher-corrected-ngd-integrity-audit/v4"
 BETAS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0, 2.0, 4.0)
+# The dense grid above is retained as the immutable exploratory sweep.  The
+# following subset is the frozen presentation set for Main Experiment v1;
+# beta=0.2 is the nominal condition and the endpoints are sensitivity checks.
+MAIN_REPORT_BETAS = (0.1, 0.2, 0.3)
+PRIMARY_BETA = 0.2
 POLICIES = ("pi0", "mle", "pro", "oracle", "tabular")
 _DIRECTION_KEYS = {"mle": "mle_rm", "pro": "pro_rm", "oracle": "oracle"}
 
@@ -109,8 +114,8 @@ def _policy_metrics(
     kl = (probabilities * (log_probabilities - log_reference)).sum(dim=1).mean()
     objective = reward - beta * kl
     kl_to_tabular = (
-        probabilities * (log_probabilities - log_tabular_probabilities)
-    ).sum(dim=1).mean()
+        (probabilities * (log_probabilities - log_tabular_probabilities)).sum(dim=1).mean()
+    )
     return {
         "R": float(reward.item()),
         "K": float(kl.item()),
@@ -148,9 +153,7 @@ def evaluate_candidate_pool(
         policy_probabilities[policy] = policy_log_probabilities[policy].exp()
     policy_probabilities["tabular"] = tabular
     policy_log_probabilities["tabular"] = tabular_log_probabilities
-    j_close_tensor = beta * (
-        torch.logsumexp(rewards / beta, dim=1) - math.log(candidates)
-    ).mean()
+    j_close_tensor = beta * (torch.logsumexp(rewards / beta, dim=1) - math.log(candidates)).mean()
     j_close = float(j_close_tensor.item())
     metrics = {
         policy: _policy_metrics(
@@ -164,9 +167,7 @@ def evaluate_candidate_pool(
         for policy in POLICIES
     }
     j_identity = abs(metrics["tabular"]["J"] - j_close)
-    gibbs_identity = max(
-        abs(record["delta_J"] - record["beta_KL"]) for record in metrics.values()
-    )
+    gibbs_identity = max(abs(record["delta_J"] - record["beta_KL"]) for record in metrics.values())
     scale = 1.0 + abs(j_close)
     if j_identity > 1.0e-10 * scale or gibbs_identity > 1.0e-10 * scale:
         raise RuntimeError(
@@ -217,8 +218,7 @@ def run_ngd_evaluation(
         raise ValueError("source reward result and materialized artifact identities differ")
     relative_damping = float(source["selected_relative_damping"])
     expected_candidates = [
-        float(value)
-        for value in normalized["geometry"]["damping_selection"]["relative_candidates"]
+        float(value) for value in normalized["geometry"]["damping_selection"]["relative_candidates"]
     ]
     if relative_damping not in expected_candidates:
         raise ValueError("selected Fisher damping is not a declared cross-fit candidate")
@@ -296,9 +296,7 @@ def run_ngd_evaluation(
         quadratic = float(torch.dot(moment_error, solve.solution).item())
         if quadratic < -1.0e-10:
             raise RuntimeError("inverse-Fisher moment error produced a negative quadratic form")
-        approximate_regret = {
-            str(beta): max(0.0, quadratic) / (2.0 * beta) for beta in BETAS
-        }
+        approximate_regret = {str(beta): max(0.0, quadratic) / (2.0 * beta) for beta in BETAS}
         exact_regret = {
             str(beta): float(policy_metrics[str(beta)]["policies"][label]["delta_J"])
             for beta in BETAS
@@ -309,8 +307,7 @@ def run_ngd_evaluation(
             "approximate_regret": approximate_regret,
             "exact_regret": exact_regret,
             "approximation_gap": {
-                str(beta): exact_regret[str(beta)] - approximate_regret[str(beta)]
-                for beta in BETAS
+                str(beta): exact_regret[str(beta)] - approximate_regret[str(beta)] for beta in BETAS
             },
             "moment_error_inverse_fisher_quadratic": max(0.0, quadratic),
             "moment_error_pcg_relative_residual": solve.relative_residual,
@@ -334,8 +331,7 @@ def run_ngd_evaluation(
         "definitions": {
             "reward_MSE": "mean_{p,i}(((rhat_pi-mean_i rhat_pi)-(r*_pi-mean_i r*_pi))^2)",
             "approximate_regret": (
-                "(A_rhat,test-A_r*,test)^T F_lambda,train^-1 "
-                "(A_rhat,test-A_r*,test)/(2 beta)"
+                "(A_rhat,test-A_r*,test)^T F_lambda,train^-1 (A_rhat,test-A_r*,test)/(2 beta)"
             ),
             "exact_regret": "J_tabular-J_m",
             "approximation_gap": "exact_regret-approximate_regret",
@@ -437,8 +433,7 @@ def aggregate_ngd_evaluations(
         "reward": _summarize_tree(reward_values),
         "policy": _summarize_tree(policy_values),
         "input_sha256": {
-            str(record["seed"]): sha256_file(Path(path))
-            for record, path in records_with_paths
+            str(record["seed"]): sha256_file(Path(path)) for record, path in records_with_paths
         },
         "producer": producer_identity(),
     }
@@ -483,8 +478,7 @@ def audit_ngd_run(
             or result.get("protocol") != PROTOCOL
             or result.get("seed") != seed
             or result.get("betas") != list(BETAS)
-            or result.get("test_usage")
-            != "formal_evaluation_only_no_hyperparameter_selection"
+            or result.get("test_usage") != "formal_evaluation_only_no_hyperparameter_selection"
         ):
             raise ValueError(f"seed result identity or test-usage mismatch for seed {seed}")
         if set(result.get("reward", {})) != {"mle", "pro"}:
@@ -531,9 +525,7 @@ def audit_ngd_run(
                 raise ValueError(f"five-policy coverage mismatch for seed {seed}, beta {beta}")
             for policy_name, metrics in beta_result["policies"].items():
                 if set(metrics) != {"R", "K", "J", "delta_J", "beta_KL"}:
-                    raise ValueError(
-                        f"policy metric schema mismatch for seed {seed}, beta {beta}"
-                    )
+                    raise ValueError(f"policy metric schema mismatch for seed {seed}, beta {beta}")
                 if any(
                     isinstance(value, bool)
                     or not isinstance(value, (int, float))
@@ -575,9 +567,7 @@ def audit_ngd_run(
             {
                 "seed": seed,
                 "result_sha256": sha256_file(result_path),
-                "source_artifact_metadata_sha256": bridge[
-                    "source_artifact_metadata_sha256"
-                ],
+                "source_artifact_metadata_sha256": bridge["source_artifact_metadata_sha256"],
                 "source_reward_result_sha256": bridge["source_reward_result_sha256"],
                 "max_identity_residual": max_identity_residual,
                 "status": "passed",
