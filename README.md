@@ -8,14 +8,17 @@ the one-step policy update it induces, rather than only for preference likelihoo
 The current formal result fixes beta = 0.2, writes the MLE-RM, Pro-RM, and
 oracle-r* one-step NGD updates into the model's LoRA-B parameters, and performs
 fresh generation on 512 fixed test prompts for each of four policies and three
-seeds. The retained evidence and full protocol are in
-[Real Policy Evaluation at beta = 0.2](results/real_policy_beta0p2/README.md).
+seeds. The corrected evaluation preserves the original four responses per
+prompt and independently adds two, yielding six responses and 3,072 rows per
+policy-seed instance. The retained evidence and full protocol are in
+[Real Policy Evaluation at beta = 0.2, m = 6](results/real_policy_beta0p2_m6/README.md).
 
 All three updated policies improve regularized test utility over pi0 in every
-seed. The three-seed mean ordering is oracle-r* > MLE > Pro > pi0. Therefore the
-real-policy rollout does not support the stronger Pro > MLE claim; the older
-finite candidate-pool result below must not be interpreted as evaluation of the
-actually updated language-model policies.
+seed. The three-seed mean ordering is oracle-r* > Pro > MLE > pi0. Pro exceeds
+MLE in two of three seeds, so the aggregate supports Pro > MLE descriptively but
+not as a seed-wise uniform claim. The earlier
+[m = 4 bundle](results/real_policy_beta0p2/README.md) remains preserved as the
+immutable base and is superseded only in rollout sample count.
 
 ## Exploratory finite-pool Main Experiment v1
 
