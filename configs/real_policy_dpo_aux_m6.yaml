@@ -1,0 +1,31 @@
+schema: prorm-real-policy-dpo-aux-m6-config/v1
+source_config: fisher_trpo_main.yaml
+source_config_sha256: 0ff8cb872c5bdecc33bd2e5ded7d9c3adcbc43d7b6c355b40f8d34a1ae95ce92
+direct_config: dpo_auxdpo_main.yaml
+direct_config_sha256: b28b15a57e58df975a9806d912dad40db8e0817217752c8d76011c1e01d003ac
+
+experiment:
+  name: real-policy-dpo-aux-beta0p2-m6-v1
+  seeds: [20261001, 20261002, 20261003]
+  beta: 0.2
+  source_policies: [pi0, mle_rm__beta_0p2, pro_rm__beta_0p2, oracle__beta_0p2]
+  new_policies: [dpo__beta_0p2, auxdpo__beta_0p2]
+
+rollout:
+  prompts: 512
+  base_responses_per_prompt: 4
+  additional_responses_per_prompt: 2
+  responses_per_prompt: 6
+  base_seed_namespace: real-rollout-batch
+  additional_seed_namespace: real-rollout-extension-4-to-6-batch
+  generation: fresh_test_prompt_rollout
+  kl_estimator: rao_blackwellized_updated_policy_forward_kl
+  metrics: [R, K, J]
+
+reward_evaluation:
+  metrics: [NLL, MSE, approximate_regret]
+  approximate_regret_estimator: two_fold_cross_U
+  fisher_source: train_raw_second_moment_with_frozen_selected_damping
+  folds: 2
+  fold_seed_namespace: "approx-regret-cross-v1:"
+  test_usage: evaluation_only_no_selection

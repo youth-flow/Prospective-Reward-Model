@@ -44,6 +44,12 @@ def test_cli_only_exposes_current_workflow() -> None:
         "assemble-extended-real-policy-seed",
         "aggregate-extended-real-policy",
         "audit-extended-real-policy",
+        "export-direct-policy-adapter",
+        "smoke-direct-policy",
+        "rollout-direct-policy-m6",
+        "assemble-six-policy-seed",
+        "aggregate-six-policy",
+        "audit-six-policy",
     }
 
 

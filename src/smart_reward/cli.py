@@ -10,6 +10,14 @@ from pathlib import Path
 
 from .audit import audit_fisher_trpo_run
 from .config import TRPO_PROTOCOL, ConfigError, config_hash, load_config
+from .direct_policy_evaluation import (
+    aggregate_six_policy,
+    assemble_six_policy_seed,
+    audit_six_policy_run,
+    export_direct_policy_adapter,
+    run_direct_policy_rollout,
+    smoke_direct_policy,
+)
 from .direct_preference import (
     aggregate_direct_preference,
     audit_direct_preference,
@@ -550,6 +558,76 @@ def _audit_extended_real_policy(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _export_direct_policy_adapter(arguments: argparse.Namespace) -> int:
+    export_direct_policy_adapter(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.fit_dir,
+        arguments.output_dir,
+        seed=arguments.seed,
+        method=arguments.method,
+        device=arguments.device,
+    )
+    print("stage=direct-policy-adapter status=complete", flush=True)
+    return 0
+
+
+def _rollout_direct_policy(arguments: argparse.Namespace) -> int:
+    run_direct_policy_rollout(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.fit_dir,
+        arguments.adapter_dir,
+        arguments.output_dir,
+        seed=arguments.seed,
+        method=arguments.method,
+        device=arguments.device,
+    )
+    print("stage=direct-policy-rollout-m6 status=complete", flush=True)
+    return 0
+
+
+def _smoke_direct_policy(arguments: argparse.Namespace) -> int:
+    smoke_direct_policy(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.fit_dir,
+        arguments.adapter_dir,
+        arguments.output,
+        seed=arguments.seed,
+        method=arguments.method,
+        device=arguments.device,
+    )
+    print("stage=direct-policy-smoke status=complete", flush=True)
+    return 0
+
+
+def _assemble_six_policy(arguments: argparse.Namespace) -> int:
+    assemble_six_policy_seed(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.direct_seed_root,
+        arguments.source_evaluation,
+        arguments.output,
+        seed=arguments.seed,
+    )
+    print("stage=six-policy-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _aggregate_six_policy(arguments: argparse.Namespace) -> int:
+    aggregate_six_policy(arguments.config, arguments.results, arguments.output)
+    print("stage=six-policy-three-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _audit_six_policy(arguments: argparse.Namespace) -> int:
+    audit_six_policy_run(arguments.config, arguments.run_root, arguments.output)
+    print("stage=six-policy-audit status=complete", flush=True)
+    return 0
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", default="cuda")
@@ -826,6 +904,57 @@ def build_parser() -> argparse.ArgumentParser:
     real_m6_audit.add_argument("run_root")
     real_m6_audit.add_argument("output")
     real_m6_audit.set_defaults(handler=_audit_extended_real_policy)
+
+    direct_adapter = commands.add_parser("export-direct-policy-adapter")
+    direct_adapter.add_argument("config")
+    direct_adapter.add_argument("artifact_dir")
+    direct_adapter.add_argument("fit_dir")
+    direct_adapter.add_argument("output_dir")
+    direct_adapter.add_argument("--method", choices=("dpo", "auxdpo"), required=True)
+    _add_execution_options(direct_adapter)
+    direct_adapter.set_defaults(handler=_export_direct_policy_adapter)
+
+    direct_rollout = commands.add_parser("rollout-direct-policy-m6")
+    direct_rollout.add_argument("config")
+    direct_rollout.add_argument("artifact_dir")
+    direct_rollout.add_argument("fit_dir")
+    direct_rollout.add_argument("adapter_dir")
+    direct_rollout.add_argument("output_dir")
+    direct_rollout.add_argument("--method", choices=("dpo", "auxdpo"), required=True)
+    _add_execution_options(direct_rollout)
+    direct_rollout.set_defaults(handler=_rollout_direct_policy)
+
+    direct_smoke = commands.add_parser("smoke-direct-policy")
+    direct_smoke.add_argument("config")
+    direct_smoke.add_argument("artifact_dir")
+    direct_smoke.add_argument("fit_dir")
+    direct_smoke.add_argument("adapter_dir")
+    direct_smoke.add_argument("output")
+    direct_smoke.add_argument("--method", choices=("dpo", "auxdpo"), required=True)
+    _add_execution_options(direct_smoke)
+    direct_smoke.set_defaults(handler=_smoke_direct_policy)
+
+    six_seed = commands.add_parser("assemble-six-policy-seed")
+    six_seed.add_argument("config")
+    six_seed.add_argument("artifact_dir")
+    six_seed.add_argument("reward_result")
+    six_seed.add_argument("direct_seed_root")
+    six_seed.add_argument("source_evaluation")
+    six_seed.add_argument("output")
+    six_seed.add_argument("--seed", type=int, required=True)
+    six_seed.set_defaults(handler=_assemble_six_policy)
+
+    six_aggregate = commands.add_parser("aggregate-six-policy")
+    six_aggregate.add_argument("config")
+    six_aggregate.add_argument("output")
+    six_aggregate.add_argument("--results", nargs="+", required=True)
+    six_aggregate.set_defaults(handler=_aggregate_six_policy)
+
+    six_audit = commands.add_parser("audit-six-policy")
+    six_audit.add_argument("config")
+    six_audit.add_argument("run_root")
+    six_audit.add_argument("output")
+    six_audit.set_defaults(handler=_audit_six_policy)
     return parser
 
 
