@@ -7,3 +7,5 @@
 *.yml text eol=lf
 *.py text eol=lf
 *.md text eol=lf
+results/real_policy_beta0p2/evidence/*.json text eol=lf
+results/real_policy_beta0p2/evidence/*.txt text eol=lf

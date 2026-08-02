@@ -3,7 +3,21 @@
 This repository contains the controlled ProRM experiment: learn a reward model for
 the one-step policy update it induces, rather than only for preference likelihood.
 
-## Main Experiment v1
+## Formal real-policy evaluation
+
+The current formal result fixes beta = 0.2, writes the MLE-RM, Pro-RM, and
+oracle-r* one-step NGD updates into the model's LoRA-B parameters, and performs
+fresh generation on 512 fixed test prompts for each of four policies and three
+seeds. The retained evidence and full protocol are in
+[Real Policy Evaluation at beta = 0.2](results/real_policy_beta0p2/README.md).
+
+All three updated policies improve regularized test utility over pi0 in every
+seed. The three-seed mean ordering is oracle-r* > MLE > Pro > pi0. Therefore the
+real-policy rollout does not support the stronger Pro > MLE claim; the older
+finite candidate-pool result below must not be interpreted as evaluation of the
+actually updated language-model policies.
+
+## Exploratory finite-pool Main Experiment v1
 
 The first complete main experiment is the **Fisher-corrected, common-beta, one-step
 NGD evaluation** with three formal seeds:
