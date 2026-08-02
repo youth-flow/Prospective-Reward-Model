@@ -96,6 +96,11 @@ case "${PRORM_REAL_STAGE}" in
   rollout)
     : "${PRORM_REAL_WORKERS:?}"
     : "${PRORM_REAL_GPUS_PER_JOB:?}"
+    worker_offset="${PRORM_REAL_WORKER_OFFSET:-0}"
+    [[ "${worker_offset}" =~ ^[0-9]+$ ]] || {
+      echo "PRORM_REAL_WORKER_OFFSET must be a non-negative integer" >&2
+      exit 2
+    }
     mapfile -t policies < <(run_container python -m smart_reward.cli real-policy-names)
     IFS=',' read -r -a visible_gpus <<< "${CUDA_VISIBLE_DEVICES:?}"
     (( ${#visible_gpus[@]} == PRORM_REAL_GPUS_PER_JOB )) || {
@@ -125,7 +130,9 @@ case "${PRORM_REAL_STAGE}" in
 
     pids=()
     for ((local_worker = 0; local_worker < PRORM_REAL_GPUS_PER_JOB; local_worker++)); do
-      worker=$((SLURM_ARRAY_TASK_ID * PRORM_REAL_GPUS_PER_JOB + local_worker))
+      worker=$((
+        worker_offset + SLURM_ARRAY_TASK_ID * PRORM_REAL_GPUS_PER_JOB + local_worker
+      ))
       (( worker < PRORM_REAL_WORKERS )) || continue
       run_slot "${worker}" "${visible_gpus[local_worker]}" &
       pids+=("$!")
