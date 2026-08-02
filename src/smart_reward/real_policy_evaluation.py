@@ -185,6 +185,7 @@ def validate_real_policy_adapters(
     adapter_dir: str | os.PathLike[str],
     *,
     seed: int,
+    expected_producer: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     normalized, artifact_identity, reward = _validate_source(
         config, artifact_dir, reward_result, seed=seed
@@ -192,6 +193,7 @@ def validate_real_policy_adapters(
     root = Path(adapter_dir)
     metadata = _read_json(root / "metadata.json")
     expected_names = {adapter_name(method) for method in METHODS}
+    producer = _producer() if expected_producer is None else dict(expected_producer)
     if (
         metadata.get("schema") != ADAPTER_SCHEMA
         or metadata.get("protocol") != PROTOCOL
@@ -201,7 +203,7 @@ def validate_real_policy_adapters(
         or metadata.get("seed") != seed
         or metadata.get("beta") != BETA
         or set(metadata.get("adapters", {})) != expected_names
-        or metadata.get("producer") != _producer()
+        or metadata.get("producer") != producer
     ):
         raise ValueError("real-policy adapter metadata mismatch")
     for name, record in metadata["adapters"].items():

@@ -48,6 +48,12 @@ from .real_policy_evaluation import (
 from .real_policy_evaluation import (
     policy_names as real_policy_names,
 )
+from .real_policy_extension import (
+    aggregate_extended_real_policy,
+    assemble_extended_real_policy_seed,
+    audit_extended_real_policy_run,
+    extend_real_policy_rollout,
+)
 from .rollout import evaluate_policy_rollouts, policy_instance_names
 from .statistics import aggregate_results
 from .trpo_policy import export_trpo_adapters
@@ -494,6 +500,56 @@ def _audit_real_policy(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _extend_real_policy(arguments: argparse.Namespace) -> int:
+    extend_real_policy_rollout(
+        arguments.extension_config,
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.source_rollout_dir,
+        arguments.output_dir,
+        policy_name=arguments.policy_name,
+        seed=arguments.seed,
+        device=arguments.device,
+        local_files_only=not arguments.allow_download,
+    )
+    print("stage=real-policy-rollout-extension-4-to-6 status=complete", flush=True)
+    return 0
+
+
+def _assemble_extended_real_policy(arguments: argparse.Namespace) -> int:
+    assemble_extended_real_policy_seed(
+        arguments.extension_config,
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.source_policy_root,
+        arguments.policy_root,
+        arguments.output,
+        seed=arguments.seed,
+    )
+    print("stage=real-policy-m6-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _aggregate_extended_real_policy(arguments: argparse.Namespace) -> int:
+    aggregate_extended_real_policy(arguments.extension_config, arguments.results, arguments.output)
+    print("stage=real-policy-m6-three-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _audit_extended_real_policy(arguments: argparse.Namespace) -> int:
+    audit_extended_real_policy_run(
+        arguments.extension_config,
+        arguments.source_run_root,
+        arguments.base_real_run_root,
+        arguments.run_root,
+        arguments.output,
+    )
+    print("stage=real-policy-m6-audit status=complete", flush=True)
+    return 0
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", default="cuda")
@@ -734,6 +790,42 @@ def build_parser() -> argparse.ArgumentParser:
     real_audit.add_argument("run_root")
     real_audit.add_argument("output")
     real_audit.set_defaults(handler=_audit_real_policy)
+
+    real_extend = commands.add_parser("extend-real-policy-rollout-to-six")
+    real_extend.add_argument("extension_config")
+    real_extend.add_argument("artifact_dir")
+    real_extend.add_argument("reward_result")
+    real_extend.add_argument("adapter_dir")
+    real_extend.add_argument("source_rollout_dir")
+    real_extend.add_argument("output_dir")
+    real_extend.add_argument("--policy-name", required=True)
+    _add_execution_options(real_extend)
+    real_extend.set_defaults(handler=_extend_real_policy)
+
+    real_m6_seed = commands.add_parser("assemble-extended-real-policy-seed")
+    real_m6_seed.add_argument("extension_config")
+    real_m6_seed.add_argument("artifact_dir")
+    real_m6_seed.add_argument("reward_result")
+    real_m6_seed.add_argument("adapter_dir")
+    real_m6_seed.add_argument("source_policy_root")
+    real_m6_seed.add_argument("policy_root")
+    real_m6_seed.add_argument("output")
+    real_m6_seed.add_argument("--seed", type=int, required=True)
+    real_m6_seed.set_defaults(handler=_assemble_extended_real_policy)
+
+    real_m6_aggregate = commands.add_parser("aggregate-extended-real-policy")
+    real_m6_aggregate.add_argument("extension_config")
+    real_m6_aggregate.add_argument("output")
+    real_m6_aggregate.add_argument("--results", nargs="+", required=True)
+    real_m6_aggregate.set_defaults(handler=_aggregate_extended_real_policy)
+
+    real_m6_audit = commands.add_parser("audit-extended-real-policy")
+    real_m6_audit.add_argument("extension_config")
+    real_m6_audit.add_argument("source_run_root")
+    real_m6_audit.add_argument("base_real_run_root")
+    real_m6_audit.add_argument("run_root")
+    real_m6_audit.add_argument("output")
+    real_m6_audit.set_defaults(handler=_audit_extended_real_policy)
     return parser
 
 

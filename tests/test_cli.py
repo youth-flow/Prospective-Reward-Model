@@ -40,6 +40,10 @@ def test_cli_only_exposes_current_workflow() -> None:
         "assemble-real-policy-seed",
         "aggregate-real-policy",
         "audit-real-policy",
+        "extend-real-policy-rollout-to-six",
+        "assemble-extended-real-policy-seed",
+        "aggregate-extended-real-policy",
+        "audit-extended-real-policy",
     }
 
 

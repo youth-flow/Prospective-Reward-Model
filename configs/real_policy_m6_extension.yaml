@@ -1,0 +1,23 @@
+schema: prorm-real-policy-rollout-extension-config/v1
+source_config: fisher_trpo_main.yaml
+source_config_sha256: 0ff8cb872c5bdecc33bd2e5ded7d9c3adcbc43d7b6c355b40f8d34a1ae95ce92
+
+experiment:
+  name: real-policy-beta0p2-m6-extension-v1
+  seeds: [20261001, 20261002, 20261003]
+  policies: [pi0, mle_rm__beta_0p2, pro_rm__beta_0p2, oracle__beta_0p2]
+  beta: 0.2
+
+base_rollout:
+  protocol: prorm-real-policy-common-beta-ngd-v1
+  responses_per_prompt: 4
+
+increment:
+  responses_per_prompt: 2
+  seed_namespace: real-rollout-extension-4-to-6-batch
+
+evaluation:
+  prompts: 512
+  responses_per_prompt: 6
+  metrics: [R, K, J]
+  kl_estimator: rao_blackwellized_updated_policy_forward_kl
