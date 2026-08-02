@@ -37,6 +37,17 @@ from .pipeline import (
     run_reward_stage,
     run_rollout_aggregate_stage,
 )
+from .real_policy_evaluation import (
+    aggregate_real_policy,
+    assemble_real_policy_seed,
+    audit_real_policy_run,
+    export_real_policy_adapters,
+    run_real_policy_rollout,
+    smoke_real_policy_writeback,
+)
+from .real_policy_evaluation import (
+    policy_names as real_policy_names,
+)
 from .rollout import evaluate_policy_rollouts, policy_instance_names
 from .statistics import aggregate_results
 from .trpo_policy import export_trpo_adapters
@@ -401,6 +412,88 @@ def _audit_direct(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _real_policy_names(arguments: argparse.Namespace) -> int:
+    for name in real_policy_names():
+        print(name)
+    return 0
+
+
+def _export_real_policy_adapters(arguments: argparse.Namespace) -> int:
+    export_real_policy_adapters(
+        load_config(arguments.config),
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.output_dir,
+        seed=arguments.seed,
+        device=arguments.device,
+        local_files_only=not arguments.allow_download,
+    )
+    print("stage=real-policy-adapters status=complete", flush=True)
+    return 0
+
+
+def _rollout_real_policy(arguments: argparse.Namespace) -> int:
+    run_real_policy_rollout(
+        load_config(arguments.config),
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.output_dir,
+        policy_name=arguments.policy_name,
+        seed=arguments.seed,
+        device=arguments.device,
+        local_files_only=not arguments.allow_download,
+    )
+    print("stage=real-policy-rollout status=complete", flush=True)
+    return 0
+
+
+def _smoke_real_policy(arguments: argparse.Namespace) -> int:
+    smoke_real_policy_writeback(
+        load_config(arguments.config),
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.output,
+        seed=arguments.seed,
+        device=arguments.device,
+        local_files_only=not arguments.allow_download,
+    )
+    print("stage=real-policy-smoke status=complete", flush=True)
+    return 0
+
+
+def _assemble_real_policy(arguments: argparse.Namespace) -> int:
+    assemble_real_policy_seed(
+        load_config(arguments.config),
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.policy_root,
+        arguments.output,
+        seed=arguments.seed,
+    )
+    print("stage=real-policy-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _aggregate_real_policy(arguments: argparse.Namespace) -> int:
+    aggregate_real_policy(load_config(arguments.config), arguments.results, arguments.output)
+    print("stage=real-policy-three-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _audit_real_policy(arguments: argparse.Namespace) -> int:
+    audit_real_policy_run(
+        load_config(arguments.config),
+        arguments.source_run_root,
+        arguments.run_root,
+        arguments.output,
+    )
+    print("stage=real-policy-audit status=complete", flush=True)
+    return 0
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", default="cuda")
@@ -588,6 +681,59 @@ def build_parser() -> argparse.ArgumentParser:
     direct_audit.add_argument("run_root")
     direct_audit.add_argument("output")
     direct_audit.set_defaults(handler=_audit_direct)
+
+    real_names = commands.add_parser("real-policy-names")
+    real_names.set_defaults(handler=_real_policy_names)
+
+    real_adapters = commands.add_parser("export-real-policy-adapters")
+    real_adapters.add_argument("config")
+    real_adapters.add_argument("artifact_dir")
+    real_adapters.add_argument("reward_result")
+    real_adapters.add_argument("output_dir")
+    _add_execution_options(real_adapters)
+    real_adapters.set_defaults(handler=_export_real_policy_adapters)
+
+    real_rollout = commands.add_parser("rollout-real-policy")
+    real_rollout.add_argument("config")
+    real_rollout.add_argument("artifact_dir")
+    real_rollout.add_argument("reward_result")
+    real_rollout.add_argument("adapter_dir")
+    real_rollout.add_argument("output_dir")
+    real_rollout.add_argument("--policy-name", required=True)
+    _add_execution_options(real_rollout)
+    real_rollout.set_defaults(handler=_rollout_real_policy)
+
+    real_smoke = commands.add_parser("smoke-real-policy")
+    real_smoke.add_argument("config")
+    real_smoke.add_argument("artifact_dir")
+    real_smoke.add_argument("reward_result")
+    real_smoke.add_argument("adapter_dir")
+    real_smoke.add_argument("output")
+    _add_execution_options(real_smoke)
+    real_smoke.set_defaults(handler=_smoke_real_policy)
+
+    real_seed = commands.add_parser("assemble-real-policy-seed")
+    real_seed.add_argument("config")
+    real_seed.add_argument("artifact_dir")
+    real_seed.add_argument("reward_result")
+    real_seed.add_argument("adapter_dir")
+    real_seed.add_argument("policy_root")
+    real_seed.add_argument("output")
+    real_seed.add_argument("--seed", type=int, required=True)
+    real_seed.set_defaults(handler=_assemble_real_policy)
+
+    real_aggregate = commands.add_parser("aggregate-real-policy")
+    real_aggregate.add_argument("config")
+    real_aggregate.add_argument("output")
+    real_aggregate.add_argument("--results", nargs="+", required=True)
+    real_aggregate.set_defaults(handler=_aggregate_real_policy)
+
+    real_audit = commands.add_parser("audit-real-policy")
+    real_audit.add_argument("config")
+    real_audit.add_argument("source_run_root")
+    real_audit.add_argument("run_root")
+    real_audit.add_argument("output")
+    real_audit.set_defaults(handler=_audit_real_policy)
     return parser
 
 

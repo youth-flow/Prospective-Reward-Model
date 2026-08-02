@@ -33,6 +33,13 @@ def test_cli_only_exposes_current_workflow() -> None:
         "evaluate-direct-preference",
         "aggregate-direct-preference",
         "audit-direct-preference",
+        "real-policy-names",
+        "export-real-policy-adapters",
+        "smoke-real-policy",
+        "rollout-real-policy",
+        "assemble-real-policy-seed",
+        "aggregate-real-policy",
+        "audit-real-policy",
     }
 
 
