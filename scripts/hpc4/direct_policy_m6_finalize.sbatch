@@ -22,6 +22,14 @@ for seed in "${seeds[@]}"; do
   # Keep the formal run self-contained without retraining: reward evaluation needs
   # the immutable DPO/AuxDPO fit tensors, while rollout wrote only exported PEFT
   # adapters and fresh generations into this run root.
+  source_reference="${PRORM_DIRECT_RUN_ROOT}/seed-${seed}/reference"
+  target_reference="${target_seed}/reference"
+  if [[ ! -d "${target_reference}" ]]; then
+    staging_reference="${target_seed}/.reference.${SLURM_JOB_ID}"
+    [[ ! -e "${staging_reference}" ]]
+    cp -a "${source_reference}" "${staging_reference}"
+    mv "${staging_reference}" "${target_reference}"
+  fi
   for method in dpo auxdpo; do
     source_fit="${PRORM_DIRECT_RUN_ROOT}/seed-${seed}/fits/${method}__beta_0p2"
     target_fit="${target_seed}/fits/${method}__beta_0p2"
