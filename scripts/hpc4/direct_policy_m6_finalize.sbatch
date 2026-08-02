@@ -19,6 +19,20 @@ container=(prorm_apptainer_exec --cleanenv --bind "${binds}" --pwd "${PRORM_REPO
 seeds=(20261001 20261002 20261003); results=()
 for seed in "${seeds[@]}"; do
   target_seed="${PRORM_RUN_ROOT}/seed-${seed}"
+  # Keep the formal run self-contained without retraining: reward evaluation needs
+  # the immutable DPO/AuxDPO fit tensors, while rollout wrote only exported PEFT
+  # adapters and fresh generations into this run root.
+  for method in dpo auxdpo; do
+    source_fit="${PRORM_DIRECT_RUN_ROOT}/seed-${seed}/fits/${method}__beta_0p2"
+    target_fit="${target_seed}/fits/${method}__beta_0p2"
+    if [[ ! -d "${target_fit}" ]]; then
+      mkdir -p "${target_seed}/fits"
+      staging_fit="${target_seed}/fits/.${method}__beta_0p2.${SLURM_JOB_ID}"
+      [[ ! -e "${staging_fit}" ]]
+      cp -a "${source_fit}" "${staging_fit}"
+      mv "${staging_fit}" "${target_fit}"
+    fi
+  done
   "${container[@]}" python -m smart_reward.cli assemble-six-policy-seed \
     "${PRORM_DIRECT_POLICY_CONFIG}" "${PRORM_SOURCE_RUN_ROOT}/seed-${seed}/artifact" \
     "${PRORM_SOURCE_RUN_ROOT}/seed-${seed}/reward_result.json" "${target_seed}" \
