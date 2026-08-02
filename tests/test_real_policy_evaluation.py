@@ -11,6 +11,7 @@ from smart_reward.config import load_config
 from smart_reward.real_policy_evaluation import (
     BETA,
     _policy_metrics,
+    _producer,
     adapter_name,
     export_real_policy_adapters,
     policy_names,
@@ -112,6 +113,13 @@ def test_adapter_export_writes_direction_divided_by_beta(tmp_path: Path, monkeyp
     )
     assert set(metadata["adapters"]) == {adapter_name(method) for method in real_module.METHODS}
     assert metadata["update_rule"] == "lora_B = beta_free_natural_direction / beta"
+    receipt = json.loads(
+        (tmp_path / "adapters" / ".checkpoints" / "mle_rm__beta_0p2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    expected_update = [float(value) / BETA for value in reward["policy_directions"]["mle_rm"]]
+    assert receipt["update_sha256"] == real_module._canonical_sha256(expected_update)
 
 
 def test_rollout_summary_exposes_only_r_k_j() -> None:
@@ -122,3 +130,12 @@ def test_rollout_summary_exposes_only_r_k_j() -> None:
     metrics = _policy_metrics(rows)
     assert metrics == {"R": 2.0, "K": 1.0, "J": 1.8}
     assert not any("tab" in key.lower() for key in metrics)
+
+
+def test_runtime_bridge_is_explicitly_recorded(monkeypatch) -> None:
+    monkeypatch.setattr(real_module, "producer_identity", lambda: {"git_commit": "2" * 40})
+    monkeypatch.setenv("PRORM_IMAGE_SOURCE_COMMIT", "1" * 40)
+    assert _producer() == {
+        "git_commit": "2" * 40,
+        "image_source_commit": "1" * 40,
+    }

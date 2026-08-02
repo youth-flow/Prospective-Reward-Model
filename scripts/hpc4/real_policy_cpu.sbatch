@@ -17,8 +17,15 @@ umask 027
 : "${PRORM_RUN_ROOT:?}"
 : "${PRORM_REAL_STAGE:?}"
 
-source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
-verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+if [[ -n "${PRORM_IMAGE_SOURCE_COMMIT:-}" ]]; then
+  source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_bound_runtime.sh"
+  verify_bound_runtime \
+    "${PRORM_IMAGE}" "${PRORM_IMAGE_SOURCE_COMMIT}" \
+    "${PRORM_GIT_COMMIT}" "${PRORM_REPO_ROOT}"
+else
+  source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
+  verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+fi
 source "${PRORM_REPO_ROOT}/scripts/hpc4/runtime.sh"
 container=(
   prorm_apptainer_exec --cleanenv
@@ -29,8 +36,11 @@ container=(
   --env "PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256}"
   --env "PRORM_HF_INVENTORY_SHA256=${PRORM_HF_INVENTORY_SHA256}"
   --env "SLURM_JOB_ID=${SLURM_JOB_ID}"
-  "${PRORM_IMAGE}"
 )
+if [[ -n "${PRORM_IMAGE_SOURCE_COMMIT:-}" ]]; then
+  container+=(--env "PRORM_IMAGE_SOURCE_COMMIT=${PRORM_IMAGE_SOURCE_COMMIT}")
+fi
+container+=("${PRORM_IMAGE}")
 mapfile -t seeds < <(
   "${container[@]}" python - "${PRORM_CONFIG}" <<'PY'
 import sys

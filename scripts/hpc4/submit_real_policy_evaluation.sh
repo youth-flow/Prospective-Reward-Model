@@ -26,6 +26,11 @@ case "${run_root}" in "/scratch/${USER}/"*) ;; *) echo "run root must be under u
 mkdir -p "${run_root}/logs"
 
 git_commit="$(git -C "${repo_root}" rev-parse HEAD)"
+image_source_commit="${PRORM_IMAGE_SOURCE_COMMIT:-${git_commit}}"
+[[ "${image_source_commit}" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "PRORM_IMAGE_SOURCE_COMMIT is malformed" >&2
+  exit 2
+}
 image_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
 mapfile -t config_info < <(PYTHONPATH="${repo_root}/src" python3 - "${config}" <<'PY'
 import sys
@@ -40,7 +45,7 @@ seed_count="${config_info[1]}"
 inventory="${hf_cache}/inventories/${config_sha}.json"
 [[ -f "${inventory}" ]] || { echo "missing source-config HF inventory" >&2; exit 2; }
 inventory_sha="$(sha256sum "${inventory}" | cut -d' ' -f1)"
-common="ALL,PRORM_REPO_ROOT=${repo_root},PRORM_CONFIG=${config},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${image_sha},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY_SHA256=${inventory_sha},PRORM_GIT_COMMIT=${git_commit},PRORM_SOURCE_RUN_ROOT=${source_run},PRORM_RUN_ROOT=${run_root}"
+common="ALL,PRORM_REPO_ROOT=${repo_root},PRORM_CONFIG=${config},PRORM_IMAGE=${image},PRORM_IMAGE_SOURCE_COMMIT=${image_source_commit},PRORM_IMAGE_SHA256=${image_sha},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY_SHA256=${inventory_sha},PRORM_GIT_COMMIT=${git_commit},PRORM_SOURCE_RUN_ROOT=${source_run},PRORM_RUN_ROOT=${run_root}"
 
 adapters_job="$(sbatch --parsable --job-name=prorm-real-adapters --partition=gpu-l20 \
   --exclude=gpu18,gpu19 --time=01:00:00 --array="0-$((seed_count - 1))" \

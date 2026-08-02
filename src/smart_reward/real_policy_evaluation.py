@@ -51,6 +51,20 @@ BETA = 0.2
 METHODS = ("mle_rm", "pro_rm", "oracle")
 
 
+def _producer() -> dict[str, str]:
+    """Record the code commit, immutable SIF, and an explicit bind bridge if used."""
+
+    identity = producer_identity()
+    source_commit = os.environ.get("PRORM_IMAGE_SOURCE_COMMIT")
+    if source_commit is not None:
+        if len(source_commit) != 40 or any(
+            character not in "0123456789abcdef" for character in source_commit
+        ):
+            raise ValueError("PRORM_IMAGE_SOURCE_COMMIT must be a 40-character digest")
+        identity["image_source_commit"] = source_commit
+    return identity
+
+
 def adapter_name(method: str) -> str:
     if method not in METHODS:
         raise ValueError(f"unknown reward source: {method}")
@@ -187,7 +201,7 @@ def validate_real_policy_adapters(
         or metadata.get("seed") != seed
         or metadata.get("beta") != BETA
         or set(metadata.get("adapters", {})) != expected_names
-        or metadata.get("producer") != producer_identity()
+        or metadata.get("producer") != _producer()
     ):
         raise ValueError("real-policy adapter metadata mismatch")
     for name, record in metadata["adapters"].items():
@@ -248,7 +262,7 @@ def export_real_policy_adapters(
     evidence = _read_json(Path(artifact_dir) / "metadata.json")["evidence"]
     lora_a_sha256 = evidence["policy_a_sha256"]
     lora_layout = evidence["policy_layout"]
-    producer = producer_identity()
+    producer = _producer()
     target_device = torch.device(device)
     if target_device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
@@ -261,7 +275,6 @@ def export_real_policy_adapters(
         direction = torch.tensor(
             reward["policy_directions"][method], dtype=torch.float64, device=target_device
         )
-        update = direction / BETA
         name = adapter_name(method)
         expected = {
             "schema": ADAPTER_COMPONENT_SCHEMA,
@@ -276,7 +289,9 @@ def export_real_policy_adapters(
             "beta": BETA,
             "step_scale": 1.0 / BETA,
             "direction_sha256": _canonical_sha256(direction.cpu().tolist()),
-            "update_sha256": _canonical_sha256(update.cpu().tolist()),
+            "update_sha256": _canonical_sha256(
+                [float(value) / BETA for value in reward["policy_directions"][method]]
+            ),
             "lora_a_sha256": lora_a_sha256,
             "lora_layout_sha256": _canonical_sha256(lora_layout),
             "writeback_max_abs_error": 0.0,
@@ -404,7 +419,7 @@ def validate_real_policy_rollout(
         "seed": seed,
         "artifact_metadata_sha256": artifact_identity,
         "adapter_metadata_sha256": adapter_identity,
-        "producer": producer_identity(),
+        "producer": _producer(),
         **descriptor,
         "prompt_count": int(normalized["evaluation"]["rollout"]["prompts"]),
         "responses_per_prompt": int(normalized["evaluation"]["rollout"]["responses_per_prompt"]),
@@ -490,7 +505,7 @@ def run_real_policy_rollout(
         "protocol": PROTOCOL,
         "source_config_sha256": config_hash(normalized),
         "seed": seed,
-        "producer": producer_identity(),
+        "producer": _producer(),
         "artifact_metadata_sha256": artifact_identity,
         "adapter_metadata_sha256": adapter_identity,
         **descriptor,
@@ -584,7 +599,7 @@ def run_real_policy_rollout(
         "seed": seed,
         "artifact_metadata_sha256": artifact_identity,
         "adapter_metadata_sha256": adapter_identity,
-        "producer": producer_identity(),
+        "producer": _producer(),
         **descriptor,
         "prompt_count": len(prompts),
         "responses_per_prompt": responses,
@@ -705,7 +720,7 @@ def smoke_real_policy_writeback(
             "rao_blackwellized_forward_kl_finite": True,
         },
         "sample": {"oracle_reward": reward, "forward_kl": kl},
-        "producer": producer_identity(),
+        "producer": _producer(),
     }
     _atomic_json(Path(output), payload)
     return payload
@@ -771,7 +786,7 @@ def assemble_real_policy_seed(
         "policy_receipt_sha256": {
             name: sha256_file(root / name / "receipt.json") for name in policy_names()
         },
-        "producer": producer_identity(),
+        "producer": _producer(),
     }
     target = Path(output)
     if target.exists():
@@ -822,7 +837,7 @@ def aggregate_real_policy(
         "input_sha256": {
             str(record["seed"]): sha256_file(path) for record, path in records_with_paths
         },
-        "producer": producer_identity(),
+        "producer": _producer(),
     }
     target = Path(output)
     if target.exists():
@@ -891,7 +906,7 @@ def audit_real_policy_run(
         "aggregate_sha256": sha256_file(root / "aggregate.json"),
         "beta": BETA,
         "checks": checks,
-        "producer": producer_identity(),
+        "producer": _producer(),
     }
     _atomic_json(Path(output), payload)
     return payload

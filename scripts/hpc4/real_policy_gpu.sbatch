@@ -19,8 +19,15 @@ umask 027
 : "${PRORM_REAL_STAGE:?}"
 : "${SLURM_ARRAY_TASK_ID:?}"
 
-source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
-verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+if [[ -n "${PRORM_IMAGE_SOURCE_COMMIT:-}" ]]; then
+  source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_bound_runtime.sh"
+  verify_bound_runtime \
+    "${PRORM_IMAGE}" "${PRORM_IMAGE_SOURCE_COMMIT}" \
+    "${PRORM_GIT_COMMIT}" "${PRORM_REPO_ROOT}"
+else
+  source "${PRORM_REPO_ROOT}/scripts/hpc4/verify_image_revision.sh"
+  verify_image_revision "${PRORM_IMAGE}" "${PRORM_GIT_COMMIT}"
+fi
 source "${PRORM_REPO_ROOT}/scripts/hpc4/runtime.sh"
 
 binds="${PRORM_REPO_ROOT}:${PRORM_REPO_ROOT},${PRORM_HF_CACHE}:${PRORM_HF_CACHE},${PRORM_SOURCE_RUN_ROOT}:${PRORM_SOURCE_RUN_ROOT},${PRORM_RUN_ROOT}:${PRORM_RUN_ROOT}"
@@ -40,6 +47,9 @@ container_prefix=(
   --env "PRORM_HF_INVENTORY_SHA256=${PRORM_HF_INVENTORY_SHA256}"
   --env "SLURM_JOB_ID=${SLURM_JOB_ID}"
 )
+if [[ -n "${PRORM_IMAGE_SOURCE_COMMIT:-}" ]]; then
+  container_prefix+=(--env "PRORM_IMAGE_SOURCE_COMMIT=${PRORM_IMAGE_SOURCE_COMMIT}")
+fi
 
 run_container() {
   "${container_prefix[@]}" "${PRORM_IMAGE}" "$@"
