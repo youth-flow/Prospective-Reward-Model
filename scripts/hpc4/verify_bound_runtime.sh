@@ -18,7 +18,8 @@ verify_bound_runtime() {
     return 2
   }
   source "${repo}/scripts/hpc4/verify_image_revision.sh"
-  verify_image_revision "${image}" "${image_source_commit}"
+  PRORM_REPO_ROOT="${repo}" \
+    verify_image_revision "${image}" "${image_source_commit}" || return $?
   [[ "$(git -C "${repo}" rev-parse HEAD)" = "${code_commit}" ]] || {
     echo "bound repository HEAD differs from PRORM_GIT_COMMIT" >&2
     return 2
