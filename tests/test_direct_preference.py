@@ -5,6 +5,7 @@ import torch
 
 from smart_reward.direct_preference import (
     _initialize_plateau_baseline,
+    _plateau_converged,
     auxdpo_loss,
     candidate_policy_metrics,
     centered,
@@ -21,6 +22,7 @@ SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_smoke.yaml"
 CONVERGED_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged.yaml"
 CONVERGED_V2_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_v2.yaml"
 CONVERGED_V3_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_v3.yaml"
+CONVERGED_V4_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_v4.yaml"
 CONVERGED_SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_smoke.yaml"
 
 
@@ -106,6 +108,17 @@ def test_scaled_lr_config_changes_only_batch_dependent_optimizer_rates() -> None
         "test_usage",
     ):
         assert third["training"][key] == second["training"][key]
+
+
+def test_plateau_convergence_is_not_conflated_with_generalization() -> None:
+    config = load_direct_preference_config(CONVERGED_V4_EXTENSION)
+    training = config["training"]
+    assert not _plateau_converged(
+        epochs_completed=4, bad_epochs=5, lr_reductions=1, training=training
+    )
+    assert _plateau_converged(
+        epochs_completed=6, bad_epochs=5, lr_reductions=2, training=training
+    )
 
 
 def test_soft_preference_loss_uses_every_unordered_edge() -> None:

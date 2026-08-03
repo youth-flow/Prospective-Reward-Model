@@ -41,6 +41,7 @@ ADAPTIVE_EXPERIMENTS = (
     "dpo-auxdpo-converged-v1",
     "dpo-auxdpo-converged-v2",
     "dpo-auxdpo-converged-v3",
+    "dpo-auxdpo-converged-v4",
     "dpo-auxdpo-converged-smoke-v1",
 )
 
@@ -151,6 +152,15 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
             raise ValueError("formal scaled-LR prompt batch must be two")
         if float(value["training"].get("policy_learning_rate", math.nan)) != 5.0e-6:
             raise ValueError("formal policy LR must follow the batch linear-scaling rule")
+    elif experiment_name == "dpo-auxdpo-converged-v4":
+        if betas != (0.2,) or seeds != (20261001, 20261002, 20261003):
+            raise ValueError("plateau-converged experiment identity changed")
+        if value["training"].get("limit_prompts_per_split") is not None:
+            raise ValueError("formal plateau-converged experiment may not limit prompts")
+        if int(value["training"].get("prompt_batch_size", 0)) != 2:
+            raise ValueError("formal plateau-converged prompt batch must be two")
+        if float(value["training"].get("policy_learning_rate", math.nan)) != 5.0e-6:
+            raise ValueError("formal plateau-converged policy LR changed")
     elif experiment_name == "dpo-auxdpo-converged-smoke-v1":
         if betas != (0.2,) or seeds != (20261001,):
             raise ValueError("converged smoke identity changed")
@@ -319,6 +329,20 @@ def _initialize_plateau_baseline(
     if not math.isfinite(value):
         raise ValueError("initial validation NLL must be finite")
     scheduler.step(value)
+
+
+def _plateau_converged(
+    *,
+    epochs_completed: int,
+    bad_epochs: int,
+    lr_reductions: int,
+    training: Mapping[str, Any],
+) -> bool:
+    return bool(
+        epochs_completed >= int(training["min_epochs"])
+        and bad_epochs >= int(training["early_stopping_patience"])
+        and lr_reductions >= int(training["minimum_lr_reductions"])
+    )
 
 
 def auxdpo_loss(
@@ -1043,7 +1067,6 @@ def _train_adaptive_direct_preference(
     training = extension["training"]
     batch_size = int(training["prompt_batch_size"])
     max_epochs = int(training["max_epochs"])
-    min_epochs = int(training["min_epochs"])
     condition_seed = int(seed * 1000 + round(beta * 100))
     schedule: list[tuple[int, list[int]]] = []
     for epoch in range(max_epochs):
@@ -1125,7 +1148,10 @@ def _train_adaptive_direct_preference(
     # reference policy. Without this step it would accept a worse first epoch as
     # its internal best even though checkpoint selection correctly retains pi0.
     _initialize_plateau_baseline(scheduler, initial_validation_nll)
-    best_validation_nll = initial_validation_nll
+    # pi0 initializes the scheduler baseline but is not a trained checkpoint.
+    # Checkpoint selection is among epochs >= 1, so a converged fit can honestly
+    # report worse held-out generalization than pi0 without becoming a zero update.
+    best_validation_nll = math.inf
     best_validation_mse = float(centered(true_validation.to(torch.float64)).square().mean().item())
     best_epoch = 0
     best_adapter = {
@@ -1338,12 +1364,11 @@ def _train_adaptive_direct_preference(
             epoch_running = {key: 0.0 for key in epoch_running}
             epoch_running["prompts"] = 0
             epoch_running["batches"] = 0
-            improvement = initial_validation_nll - best_validation_nll
-            if (
-                epoch + 1 >= min_epochs
-                and bad_epochs >= int(training["early_stopping_patience"])
-                and lr_reductions >= int(training["minimum_lr_reductions"])
-                and improvement >= float(training["minimum_validation_improvement"])
+            if _plateau_converged(
+                epochs_completed=epoch + 1,
+                bad_epochs=bad_epochs,
+                lr_reductions=lr_reductions,
+                training=training,
             ):
                 stopped = True
                 stop_reason = "validation_plateau_after_required_lr_reductions"
@@ -1361,7 +1386,6 @@ def _train_adaptive_direct_preference(
         converged = bool(
             stopped
             and best_epoch > 0
-            and improvement >= float(training["minimum_validation_improvement"])
         )
     if not converged:
         save_checkpoint(last_next_batch)
@@ -1427,6 +1451,22 @@ def _train_adaptive_direct_preference(
     safetensors.save_file(fitted_logps, str(temporary))
     os.replace(temporary, logps_path)
 
+    final_selection_metrics: dict[str, dict[str, float]] = {}
+    for split in ("train", "validation"):
+        split_reference = reference[split][: fitted_logps[split].shape[0]].to(torch.float64)
+        split_target = split_data[split].true_rewards[: fitted_logps[split].shape[0]].to(
+            torch.float64
+        )
+        split_implicit = beta * (fitted_logps[split].to(torch.float64) - split_reference)
+        final_selection_metrics[split] = {
+            "policy_implied_soft_btl_nll": float(
+                soft_preference_loss(split_implicit, split_target).item()
+            ),
+            "policy_implied_centered_reward_mse": float(
+                (centered(split_implicit) - centered(split_target)).square().mean().item()
+            ),
+        }
+
     payload = {
         "schema": FIT_SCHEMA,
         "status": "complete",
@@ -1449,6 +1489,12 @@ def _train_adaptive_direct_preference(
             "best_validation_policy_nll": best_validation_nll,
             "best_validation_policy_centered_reward_mse": best_validation_mse,
             "validation_nll_improvement": improvement,
+            "validation_improved_over_pi0_by_threshold": bool(
+                improvement >= float(training["minimum_validation_improvement"])
+            ),
+            "validation_improvement_reporting_threshold": float(
+                training["minimum_validation_improvement"]
+            ),
             "validation_selection_metric": training["validation_selection_metric"],
             "test_usage": training["test_usage"],
             "prompt_batch_size": batch_size,
@@ -1461,6 +1507,7 @@ def _train_adaptive_direct_preference(
                 None if method == "dpo" else float(extension["auxdpo"]["auxiliary_learning_rate"])
             ),
             "history": history,
+            "best_checkpoint_exact_metrics": final_selection_metrics,
         },
         "files": {
             "adapter.safetensors": sha256_file(adapter_path),

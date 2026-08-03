@@ -16,9 +16,11 @@ The sole selection metric is the exact soft-BTL NLL of the policy-implied reward
 `beta * log(pi/pi0)` on the frozen validation candidates. AuxDPO's prompt-candidate offset
 is excluded from this metric because it is a train-only nuisance variable. A formal fit is
 complete only after at least four epochs, two learning-rate reductions, five consecutive
-epochs without an improvement greater than `1e-5`, and a best validation improvement of at
-least `1e-4` over pi0. The best validation checkpoint is restored. If the gate is not met,
-the run fails closed and retains its resumable optimizer checkpoint.
+trained epochs without an improvement greater than `1e-5`. The best checkpoint is selected
+among trained epochs and restored; pi0 initializes the scheduler baseline but is not a
+candidate trained checkpoint. Improvement over pi0 is reported separately with a `1e-4`
+threshold and is not conflated with optimization convergence. If the plateau gate is not
+met, the run fails closed and retains its resumable optimizer checkpoint.
 
 The test labels and test metrics never affect scheduling, stopping, or checkpoint selection.
 They are evaluated only after the convergence gate passes. Every epoch records train loss,
@@ -37,6 +39,9 @@ uniform memory-safe batch of two before any completed fit or test evaluation. Ve
 applies the standard linear-scaling rule to the halved physical batch, reducing policy and
 auxiliary learning rates by two, and initializes the plateau scheduler with the epoch-zero
 validation NLL so that a degraded first epoch cannot become its internal baseline.
+Version 4 separates convergence from generalization: a fit may converge while validation
+NLL remains worse than pi0, and that outcome is reported rather than converted into a zero
+adapter. Exact train and validation NLL/MSE are recomputed at the restored best checkpoint.
 
 ## Dependency closure
 
