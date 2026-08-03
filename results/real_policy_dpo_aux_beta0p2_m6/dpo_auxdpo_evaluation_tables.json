@@ -1,0 +1,313 @@
+{
+  "schema": "prorm-dpo-auxdpo-evaluation-tables/v1",
+  "status": "complete",
+  "scope": {
+    "beta": 0.2,
+    "seeds": [20261001, 20261002, 20261003],
+    "prompt_count": 512,
+    "responses_per_prompt": 6,
+    "policy_protocol": "fresh_test_rollout_with_loaded_policy_adapters",
+    "reward_scope": "explicit reward heads for MLE-RM and ProRM; policy-implied implicit rewards for DPO and AuxDPO",
+    "training_completion": "fixed_budget_complete",
+    "optimization_convergence_recorded": false
+  },
+  "source": {
+    "aggregate": "aggregate.json",
+    "aggregate_sha256": "17e57ca603d1772bbad0cc77f0571c907d08b8121ab2b5cfe96b5fcfb3139996",
+    "protocol": "prorm-real-policy-dpo-aux-beta0p2-m6/v1"
+  },
+  "reward_evaluation": {
+    "columns": ["method", "seed", "NLL", "MSE", "approximate_regret"],
+    "definitions": {
+      "NLL": "Soft Bradley-Terry negative log-likelihood on the fixed test candidate graph.",
+      "MSE": "Mean squared error between centered policy-implied implicit rewards and centered oracle rewards on fixed test nodes.",
+      "approximate_regret": "Two-fold cross-product debiased local-regret estimate: (A_1^T F_train^{-1} A_2 + A_2^T F_train^{-1} A_1) / (4 beta), without clipping."
+    },
+    "rows": [
+      {
+        "method": "MLE-RM",
+        "seed": 20261001,
+        "NLL": 0.6823331567662909,
+        "MSE": 0.3063981632690051,
+        "approximate_regret": 0.004377932052850661
+      },
+      {
+        "method": "MLE-RM",
+        "seed": 20261002,
+        "NLL": 0.6834946578934643,
+        "MSE": 0.291975931876091,
+        "approximate_regret": 0.0049301366303499605
+      },
+      {
+        "method": "MLE-RM",
+        "seed": 20261003,
+        "NLL": 0.6845102205517504,
+        "MSE": 0.3077675075657174,
+        "approximate_regret": 0.00903996457320332
+      },
+      {
+        "method": "ProRM",
+        "seed": 20261001,
+        "NLL": 0.7321707498511945,
+        "MSE": 0.5045194248764509,
+        "approximate_regret": -0.0069418002867030915
+      },
+      {
+        "method": "ProRM",
+        "seed": 20261002,
+        "NLL": 0.730066545982968,
+        "MSE": 0.47516535050911973,
+        "approximate_regret": -0.014020008936479046
+      },
+      {
+        "method": "ProRM",
+        "seed": 20261003,
+        "NLL": 0.7363216460146714,
+        "MSE": 0.515078458507257,
+        "approximate_regret": 0.02144067482820788
+      },
+      {
+        "method": "DPO",
+        "seed": 20261001,
+        "NLL": 0.6934470223807099,
+        "MSE": 0.37028925025914755,
+        "approximate_regret": 0.01785530186841158
+      },
+      {
+        "method": "DPO",
+        "seed": 20261002,
+        "NLL": 0.6936268057269405,
+        "MSE": 0.349290494500549,
+        "approximate_regret": 0.019141690039083333
+      },
+      {
+        "method": "DPO",
+        "seed": 20261003,
+        "NLL": 0.6934876273964448,
+        "MSE": 0.35894046942359975,
+        "approximate_regret": 0.022905966591895307
+      },
+      {
+        "method": "AuxDPO",
+        "seed": 20261001,
+        "NLL": 0.6933164744372519,
+        "MSE": 0.36980365966633766,
+        "approximate_regret": 0.01819526988832758
+      },
+      {
+        "method": "AuxDPO",
+        "seed": 20261002,
+        "NLL": 0.6934825007707551,
+        "MSE": 0.3487790499533829,
+        "approximate_regret": 0.019241330390521512
+      },
+      {
+        "method": "AuxDPO",
+        "seed": 20261003,
+        "NLL": 0.6937128607053066,
+        "MSE": 0.3597696238157379,
+        "approximate_regret": 0.023210449297083047
+      }
+    ],
+    "aggregate_rows": [
+      {
+        "method": "MLE-RM",
+        "NLL": {"mean": 0.6834460117371686, "sample_sd": 0.0010893468308493521},
+        "MSE": {"mean": 0.30204720090360454, "sample_sd": 0.008748806822598681},
+        "approximate_regret": {"mean": 0.00611601108546798, "sample_sd": 0.00254722603486274}
+      },
+      {
+        "method": "ProRM",
+        "NLL": {"mean": 0.732852980616278, "sample_sd": 0.003182867922844699},
+        "MSE": {"mean": 0.4982544112976092, "sample_sd": 0.020680953650038594},
+        "approximate_regret": {"mean": 0.000159621868341914, "sample_sd": 0.0187666638146716}
+      },
+      {
+        "method": "DPO",
+        "NLL": {"mean": 0.6935204851680318, "sample_sd": 0.00009428805735994118},
+        "MSE": {"mean": 0.3595067380610988, "sample_sd": 0.010510824467170984},
+        "approximate_regret": {"mean": 0.01996765283313007, "sample_sd": 0.002624683683822274}
+      },
+      {
+        "method": "AuxDPO",
+        "NLL": {"mean": 0.6935039453044379, "sample_sd": 0.00019906134580635815},
+        "MSE": {"mean": 0.3594507778118195, "sample_sd": 0.010515930794569693},
+        "approximate_regret": {"mean": 0.02021568319197738, "sample_sd": 0.0026457567276263094}
+      }
+    ]
+  },
+  "policy_evaluation": {
+    "columns": ["method", "seed", "R", "K", "J"],
+    "definitions": {
+      "R": "Mean oracle reward on six fresh responses per fixed test prompt.",
+      "K": "Mean Rao-Blackwellized forward KL(pi || pi0) on trajectories sampled from the loaded updated policy.",
+      "J": "Regularized policy utility J = R - beta K with beta = 0.2."
+    },
+    "rows": [
+      {
+        "method": "pi0",
+        "seed": 20261001,
+        "R": 0.008394994587192962,
+        "K": 0.0,
+        "J": 0.008394994587192962
+      },
+      {
+        "method": "pi0",
+        "seed": 20261002,
+        "R": 0.010991671050903424,
+        "K": 0.0,
+        "J": 0.010991671050903424
+      },
+      {
+        "method": "pi0",
+        "seed": 20261003,
+        "R": -0.0077523714877773785,
+        "K": 0.0,
+        "J": -0.0077523714877773785
+      },
+      {
+        "method": "MLE-RM",
+        "seed": 20261001,
+        "R": 0.02544959675843628,
+        "K": 0.041438295854696605,
+        "J": 0.01716193758749696
+      },
+      {
+        "method": "MLE-RM",
+        "seed": 20261002,
+        "R": 0.02948526665937251,
+        "K": 0.02267408452484195,
+        "J": 0.024950449754404122
+      },
+      {
+        "method": "MLE-RM",
+        "seed": 20261003,
+        "R": 0.011861756697497115,
+        "K": 0.030042314895965205,
+        "J": 0.005853293718304073
+      },
+      {
+        "method": "ProRM",
+        "seed": 20261001,
+        "R": 0.04630957067643276,
+        "K": 0.10152156134719803,
+        "J": 0.02600525840699315
+      },
+      {
+        "method": "ProRM",
+        "seed": 20261002,
+        "R": 0.046717448596814794,
+        "K": 0.05458474380499941,
+        "J": 0.03580049983581491
+      },
+      {
+        "method": "ProRM",
+        "seed": 20261003,
+        "R": 0.01732965404490165,
+        "K": 0.08545735420061835,
+        "J": 0.00023818320477797875
+      },
+      {
+        "method": "r*",
+        "seed": 20261001,
+        "R": 0.05488457449178416,
+        "K": 0.1181563151153308,
+        "J": 0.031253311468718
+      },
+      {
+        "method": "r*",
+        "seed": 20261002,
+        "R": 0.04795858852030819,
+        "K": 0.06787995971217242,
+        "J": 0.0343825965778737
+      },
+      {
+        "method": "r*",
+        "seed": 20261003,
+        "R": 0.024881847743851337,
+        "K": 0.10244441468259424,
+        "J": 0.004392964807332488
+      },
+      {
+        "method": "DPO",
+        "seed": 20261001,
+        "R": 0.007885975423666959,
+        "K": 0.0000005767786349815396,
+        "J": 0.007885860067939962
+      },
+      {
+        "method": "DPO",
+        "seed": 20261002,
+        "R": 0.011333717845534103,
+        "K": 0.0000005261304729051638,
+        "J": 0.011333612619439522
+      },
+      {
+        "method": "DPO",
+        "seed": 20261003,
+        "R": -0.007446561048345776,
+        "K": 0.0000006576386605214313,
+        "J": -0.00744669257607788
+      },
+      {
+        "method": "AuxDPO",
+        "seed": 20261001,
+        "R": 0.00799725502697173,
+        "K": 0.0000005934107345905576,
+        "J": 0.007997136344824813
+      },
+      {
+        "method": "AuxDPO",
+        "seed": 20261002,
+        "R": 0.011333717845534103,
+        "K": 0.0000005410171963829424,
+        "J": 0.011333609642094827
+      },
+      {
+        "method": "AuxDPO",
+        "seed": 20261003,
+        "R": -0.007571463136386272,
+        "K": 0.0000006544948285269284,
+        "J": -0.0075715940353519775
+      }
+    ],
+    "aggregate_rows": [
+      {
+        "method": "pi0",
+        "R": {"mean": 0.0038780980501063357, "sample_sd": 0.010155616594674483},
+        "K": {"mean": 0.0, "sample_sd": 0.0},
+        "J": {"mean": 0.0038780980501063357, "sample_sd": 0.010155616594674483}
+      },
+      {
+        "method": "MLE-RM",
+        "R": {"mean": 0.0222655400384353, "sample_sd": 0.009233129953662402},
+        "K": {"mean": 0.031384898425167916, "sample_sd": 0.009453877755055132},
+        "J": {"mean": 0.01598856035340172, "sample_sd": 0.009602497215147103}
+      },
+      {
+        "method": "ProRM",
+        "R": {"mean": 0.0367855577727164, "sample_sd": 0.016850541044695886},
+        "K": {"mean": 0.08052121978427193, "sample_sd": 0.023854565128704205},
+        "J": {"mean": 0.020681313815862013, "sample_sd": 0.018369210123154654}
+      },
+      {
+        "method": "r*",
+        "R": {"mean": 0.04257500358531457, "sample_sd": 0.01570917385294334},
+        "K": {"mean": 0.09616022983669915, "sample_sd": 0.025720540673539627},
+        "J": {"mean": 0.023342957617974728, "sample_sd": 0.016485593012268027}
+      },
+      {
+        "method": "DPO",
+        "R": {"mean": 0.003924377406951762, "sample_sd": 0.009997270275805733},
+        "K": {"mean": 0.0000005868492561360449, "sample_sd": 0.00000006632996238772512},
+        "J": {"mean": 0.003924260037100534, "sample_sd": 0.009997283226579844}
+      },
+      {
+        "method": "AuxDPO",
+        "R": {"mean": 0.0039198365787065205, "sample_sd": 0.010090613107808715},
+        "K": {"mean": 0.0000005963075865001428, "sample_sd": 0.000000056794252019821524},
+        "J": {"mean": 0.003919717317189221, "sample_sd": 0.010090623913645312}
+      }
+    ]
+  }
+}
