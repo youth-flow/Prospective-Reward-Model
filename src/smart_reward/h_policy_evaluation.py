@@ -339,6 +339,12 @@ def validate_h_adapters(
     for method in NEW_METHODS:
         name = policy_name(method)
         direction = result["policy_directions"][method]
+        recorded_norm = metadata["adapters"][name]["direction_norm"]
+        recomputed_norm = float(
+            torch.linalg.vector_norm(torch.tensor(direction, dtype=torch.float64)).item()
+        )
+        if not math.isclose(recorded_norm, recomputed_norm, rel_tol=1.0e-12, abs_tol=1.0e-15):
+            raise ValueError(f"adapter direction norm differs from reward result: {name}")
         expected = {
             "schema": ADAPTER_COMPONENT_SCHEMA,
             "status": "complete",
@@ -354,9 +360,7 @@ def validate_h_adapters(
             "step_scale": 1.0 / BETA,
             "direction_sha256": _canonical_sha256(direction),
             "update_sha256": _canonical_sha256([float(value) / BETA for value in direction]),
-            "direction_norm": float(
-                torch.linalg.vector_norm(torch.tensor(direction, dtype=torch.float64)).item()
-            ),
+            "direction_norm": recorded_norm,
             "lora_a_sha256": metadata["lora_a_sha256"],
             "lora_layout_sha256": _canonical_sha256(metadata["lora_layout"]),
             "writeback_max_abs_error": metadata["adapters"][name]["writeback_max_abs_error"],
