@@ -62,7 +62,18 @@ else:
 PY
 )
 
-total_workers=$((SLURM_ARRAY_TASK_COUNT * PRORM_GPU_WORKERS_PER_JOB))
+default_worker_offset=$((SLURM_ARRAY_TASK_ID * PRORM_GPU_WORKERS_PER_JOB))
+default_total_workers=$((SLURM_ARRAY_TASK_COUNT * PRORM_GPU_WORKERS_PER_JOB))
+worker_offset="${PRORM_WORKER_OFFSET:-${default_worker_offset}}"
+total_workers="${PRORM_TOTAL_WORKERS:-${default_total_workers}}"
+[[ "${worker_offset}" =~ ^[0-9]+$ && "${total_workers}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "worker offset and total must be nonnegative integers" >&2
+  exit 2
+}
+(( worker_offset + PRORM_GPU_WORKERS_PER_JOB <= total_workers )) || {
+  echo "GPU worker range exceeds the declared global worker count" >&2
+  exit 2
+}
 run_slot() {
   local worker="$1" device="$2" index seed beta method seed_root artifact
   for ((index=worker; index<${#conditions[@]}; index+=total_workers)); do
@@ -85,7 +96,7 @@ run_slot() {
 
 pids=()
 for ((local_worker=0; local_worker<PRORM_GPU_WORKERS_PER_JOB; local_worker++)); do
-  global_worker=$((SLURM_ARRAY_TASK_ID * PRORM_GPU_WORKERS_PER_JOB + local_worker))
+  global_worker=$((worker_offset + local_worker))
   (( global_worker < ${#conditions[@]} )) || continue
   run_slot "${global_worker}" "${visible_devices[local_worker]}" &
   pids+=("$!")
