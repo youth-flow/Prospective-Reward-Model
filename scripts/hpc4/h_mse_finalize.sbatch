@@ -48,6 +48,6 @@ done
 "${container[@]}" python -m smart_reward.cli audit-h-mse-run \
   "${PRORM_H_CONFIG}" "${PRORM_SOURCE_RUN_ROOT}" "${PRORM_SOURCE_M6_ROOT}" \
   "${PRORM_RUN_ROOT}" "${PRORM_RUN_ROOT}/integrity-audit.json"
-"${PRORM_REPO_ROOT}/scripts/hpc4/archive_audited_run.sh" \
+bash "${PRORM_REPO_ROOT}/scripts/hpc4/archive_audited_run.sh" \
   "${PRORM_RUN_ROOT}" "${PRORM_ARCHIVE_ROOT}" "${PRORM_RUN_ROOT}/integrity-audit.json" \
   prorm-h-mse-integrity-audit/v1
