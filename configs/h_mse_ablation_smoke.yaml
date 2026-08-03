@@ -1,0 +1,50 @@
+schema: prorm-h-mse-ablation-config/v1
+source_config: fisher_trpo_main.yaml
+source_config_sha256: 0ff8cb872c5bdecc33bd2e5ded7d9c3adcbc43d7b6c355b40f8d34a1ae95ce92
+
+experiment:
+  name: h-mse-ablation-beta0p2-smoke-v1
+  seeds: [20261001, 20261002, 20261003]
+  methods: [oracle_mse, h_mle, h_mse, h_pro]
+
+annotation:
+  gamma: 0.9
+  geometric_support: positive_integers
+  edge_outer_weight: uniform_one
+  rng_namespace: prorm-h-annotation-v1
+  store: [N, S, H]
+  clip_H: false
+
+reward_training:
+  mse_solver: orthogonal_identifiable_least_squares
+  mse_relative_residual_tolerance: 1.0e-8
+  h_mle_optimizer: lbfgs
+  h_mle_max_iterations: 400
+  h_mle_history_size: 20
+  h_mle_gradient_tolerance: 1.0e-7
+  microbatch_size: 256
+  h_pro_solver: source_matrix_free_nested_cg
+
+reward_evaluation:
+  metrics: [NLL, MSE, approximate_regret]
+  approximate_regret_estimator: two_fold_cross_product
+  fisher_source: frozen_train_selected_damped_fisher
+  folds: 2
+  fold_namespace: "approx-regret-cross-v1:"
+  test_usage: evaluation_only_no_selection
+
+policy_update:
+  method: one_step_ngd
+  beta: 0.2
+  fisher_source: frozen_train_selected_damped_fisher
+  step: direction_divided_by_beta
+
+rollout:
+  prompts: 2
+  base_responses_per_prompt: 1
+  additional_responses_per_prompt: 0
+  responses_per_prompt: 1
+  base_seed_namespace: real-rollout-batch
+  additional_seed_namespace: real-rollout-extension-4-to-6-batch
+  generation: fresh_test_prompt_rollout
+  kl_estimator: rao_blackwellized_updated_policy_forward_kl

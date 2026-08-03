@@ -30,6 +30,22 @@ from .exact_phase import materialize_exact_delta
 from .exact_policy import export_exact_ngd_adapters
 from .exact_run import run_exact_reward_comparison
 from .fisher_crossfit import run_fisher_crossfit, select_fisher_regularization
+from .h_ablation import (
+    NEW_METHODS,
+    aggregate_h_reward_results,
+    materialize_h_annotations,
+    run_h_ablation_rewards,
+)
+from .h_policy_evaluation import (
+    aggregate_h_policy,
+    assemble_h_policy_seed,
+    assemble_h_smoke,
+    audit_h_run,
+    export_h_adapters,
+    new_policy_names,
+    run_h_rollout,
+    write_h_provenance_bridge,
+)
 from .ngd_evaluation import (
     aggregate_ngd_evaluations,
     audit_ngd_run,
@@ -641,6 +657,132 @@ def _audit_six_policy(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _h_policy_names(arguments: argparse.Namespace) -> int:
+    for name in new_policy_names():
+        print(name)
+    return 0
+
+
+def _write_h_provenance(arguments: argparse.Namespace) -> int:
+    write_h_provenance_bridge(
+        arguments.config,
+        arguments.source_run_root,
+        arguments.source_m6_run_root,
+        arguments.output,
+    )
+    print("stage=h-mse-provenance status=complete", flush=True)
+    return 0
+
+
+def _materialize_h(arguments: argparse.Namespace) -> int:
+    materialize_h_annotations(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.output_dir,
+        seed=arguments.seed,
+    )
+    print("stage=h-annotations status=complete", flush=True)
+    return 0
+
+
+def _train_h_rewards(arguments: argparse.Namespace) -> int:
+    run_h_ablation_rewards(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.source_reward_result,
+        arguments.fisher_selection,
+        arguments.sidecar_dir,
+        arguments.output,
+        seed=arguments.seed,
+        device=arguments.device,
+    )
+    print("stage=h-mse-rewards status=complete", flush=True)
+    return 0
+
+
+def _aggregate_h_rewards(arguments: argparse.Namespace) -> int:
+    aggregate_h_reward_results(arguments.config, arguments.results, arguments.output)
+    print("stage=h-mse-reward-aggregate status=complete", flush=True)
+    return 0
+
+
+def _export_h_adapters(arguments: argparse.Namespace) -> int:
+    export_h_adapters(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.output_dir,
+        seed=arguments.seed,
+        device=arguments.device,
+        local_files_only=not arguments.allow_download,
+    )
+    print("stage=h-mse-adapters status=complete", flush=True)
+    return 0
+
+
+def _rollout_h_policy(arguments: argparse.Namespace) -> int:
+    run_h_rollout(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.output_dir,
+        seed=arguments.seed,
+        method=arguments.method,
+        device=arguments.device,
+        local_files_only=not arguments.allow_download,
+    )
+    print("stage=h-mse-policy-rollout status=complete", flush=True)
+    return 0
+
+
+def _assemble_h_policy(arguments: argparse.Namespace) -> int:
+    assemble_h_policy_seed(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.source_m6_seed_root,
+        arguments.policy_root,
+        arguments.output,
+        seed=arguments.seed,
+    )
+    print("stage=h-mse-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _assemble_h_smoke(arguments: argparse.Namespace) -> int:
+    assemble_h_smoke(
+        arguments.config,
+        arguments.artifact_dir,
+        arguments.reward_result,
+        arguments.adapter_dir,
+        arguments.policy_root,
+        arguments.output,
+        seed=arguments.seed,
+    )
+    print("stage=h-mse-smoke status=complete", flush=True)
+    return 0
+
+
+def _aggregate_h_policy(arguments: argparse.Namespace) -> int:
+    aggregate_h_policy(arguments.config, arguments.results, arguments.output)
+    print("stage=h-mse-three-seed-aggregate status=complete", flush=True)
+    return 0
+
+
+def _audit_h_policy(arguments: argparse.Namespace) -> int:
+    audit_h_run(
+        arguments.config,
+        arguments.source_run_root,
+        arguments.source_m6_run_root,
+        arguments.run_root,
+        arguments.output,
+    )
+    print("stage=h-mse-integrity-audit status=complete", flush=True)
+    return 0
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", default="cuda")
@@ -977,6 +1119,93 @@ def build_parser() -> argparse.ArgumentParser:
     six_audit.add_argument("run_root")
     six_audit.add_argument("output")
     six_audit.set_defaults(handler=_audit_six_policy)
+
+    h_names = commands.add_parser("h-policy-names")
+    h_names.set_defaults(handler=_h_policy_names)
+
+    h_provenance = commands.add_parser("write-h-mse-provenance")
+    h_provenance.add_argument("config")
+    h_provenance.add_argument("source_run_root")
+    h_provenance.add_argument("source_m6_run_root")
+    h_provenance.add_argument("output")
+    h_provenance.set_defaults(handler=_write_h_provenance)
+
+    h_materialize = commands.add_parser("materialize-h-annotations")
+    h_materialize.add_argument("config")
+    h_materialize.add_argument("artifact_dir")
+    h_materialize.add_argument("output_dir")
+    h_materialize.add_argument("--seed", type=int, required=True)
+    h_materialize.set_defaults(handler=_materialize_h)
+
+    h_rewards = commands.add_parser("train-h-mse-rewards")
+    h_rewards.add_argument("config")
+    h_rewards.add_argument("artifact_dir")
+    h_rewards.add_argument("source_reward_result")
+    h_rewards.add_argument("fisher_selection")
+    h_rewards.add_argument("sidecar_dir")
+    h_rewards.add_argument("output")
+    h_rewards.add_argument("--seed", type=int, required=True)
+    h_rewards.add_argument("--device", default="cuda")
+    h_rewards.set_defaults(handler=_train_h_rewards)
+
+    h_reward_aggregate = commands.add_parser("aggregate-h-mse-rewards")
+    h_reward_aggregate.add_argument("config")
+    h_reward_aggregate.add_argument("output")
+    h_reward_aggregate.add_argument("--results", nargs="+", required=True)
+    h_reward_aggregate.set_defaults(handler=_aggregate_h_rewards)
+
+    h_adapters = commands.add_parser("export-h-mse-adapters")
+    h_adapters.add_argument("config")
+    h_adapters.add_argument("artifact_dir")
+    h_adapters.add_argument("reward_result")
+    h_adapters.add_argument("output_dir")
+    _add_execution_options(h_adapters)
+    h_adapters.set_defaults(handler=_export_h_adapters)
+
+    h_rollout = commands.add_parser("rollout-h-mse-policy")
+    h_rollout.add_argument("config")
+    h_rollout.add_argument("artifact_dir")
+    h_rollout.add_argument("reward_result")
+    h_rollout.add_argument("adapter_dir")
+    h_rollout.add_argument("output_dir")
+    h_rollout.add_argument("--method", choices=NEW_METHODS, required=True)
+    _add_execution_options(h_rollout)
+    h_rollout.set_defaults(handler=_rollout_h_policy)
+
+    h_seed = commands.add_parser("assemble-h-mse-policy-seed")
+    h_seed.add_argument("config")
+    h_seed.add_argument("artifact_dir")
+    h_seed.add_argument("reward_result")
+    h_seed.add_argument("adapter_dir")
+    h_seed.add_argument("source_m6_seed_root")
+    h_seed.add_argument("policy_root")
+    h_seed.add_argument("output")
+    h_seed.add_argument("--seed", type=int, required=True)
+    h_seed.set_defaults(handler=_assemble_h_policy)
+
+    h_smoke = commands.add_parser("assemble-h-mse-smoke")
+    h_smoke.add_argument("config")
+    h_smoke.add_argument("artifact_dir")
+    h_smoke.add_argument("reward_result")
+    h_smoke.add_argument("adapter_dir")
+    h_smoke.add_argument("policy_root")
+    h_smoke.add_argument("output")
+    h_smoke.add_argument("--seed", type=int, required=True)
+    h_smoke.set_defaults(handler=_assemble_h_smoke)
+
+    h_policy_aggregate = commands.add_parser("aggregate-h-mse-policy")
+    h_policy_aggregate.add_argument("config")
+    h_policy_aggregate.add_argument("output")
+    h_policy_aggregate.add_argument("--results", nargs="+", required=True)
+    h_policy_aggregate.set_defaults(handler=_aggregate_h_policy)
+
+    h_audit = commands.add_parser("audit-h-mse-run")
+    h_audit.add_argument("config")
+    h_audit.add_argument("source_run_root")
+    h_audit.add_argument("source_m6_run_root")
+    h_audit.add_argument("run_root")
+    h_audit.add_argument("output")
+    h_audit.set_defaults(handler=_audit_h_policy)
     return parser
 
 

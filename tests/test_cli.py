@@ -51,6 +51,17 @@ def test_cli_only_exposes_current_workflow() -> None:
         "assemble-six-policy-seed",
         "aggregate-six-policy",
         "audit-six-policy",
+        "h-policy-names",
+        "write-h-mse-provenance",
+        "materialize-h-annotations",
+        "train-h-mse-rewards",
+        "aggregate-h-mse-rewards",
+        "export-h-mse-adapters",
+        "rollout-h-mse-policy",
+        "assemble-h-mse-policy-seed",
+        "assemble-h-mse-smoke",
+        "aggregate-h-mse-policy",
+        "audit-h-mse-run",
     }
 
 
