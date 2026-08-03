@@ -597,17 +597,38 @@ def sequence_forward_kl(
     ):
         raise ValueError("KL logits must be finite")
 
-    updated_log_prob = updated_logits[:, :-1].log_softmax(dim=-1)
-    reference_log_prob = reference_logits[:, :-1].log_softmax(dim=-1)
-    token_kl = (updated_log_prob.exp() * (updated_log_prob - reference_log_prob)).sum(dim=-1)
-    selected = token_kl * response_mask[:, 1:].to(dtype=token_kl.dtype)
-    result = selected.sum(dim=1)
-    # Floating-point vocabulary reductions can produce a tiny negative residual
-    # at an exactly equal distribution.  Reject material negatives and normalize
-    # only roundoff-sized values to zero.
-    tolerance = 64.0 * torch.finfo(result.dtype).eps
+    # Direct float32 evaluation is unstable for nearly identical policies: the
+    # first-order terms cancel while the true KL is second order in the logit
+    # displacement.  Evaluate only policy-visible response positions in
+    # float64, in small chunks so the full (sequence, vocabulary) tensors are
+    # never upcast and GPU memory remains bounded.
+    selected_positions = response_mask[:, 1:].bool().nonzero(as_tuple=False)
+    result = torch.zeros(updated_logits.shape[0], dtype=torch.float64, device=updated_logits.device)
+    position_chunk = 8
+    for start in range(0, selected_positions.shape[0], position_chunk):
+        positions = selected_positions[start : start + position_chunk]
+        batch_index, sequence_index = positions[:, 0], positions[:, 1]
+        updated_log_prob = updated_logits[batch_index, sequence_index].log_softmax(
+            dim=-1, dtype=torch.float64
+        )
+        reference_log_prob = reference_logits[batch_index, sequence_index].log_softmax(
+            dim=-1, dtype=torch.float64
+        )
+        token_kl = (updated_log_prob.exp() * (updated_log_prob - reference_log_prob)).sum(dim=-1)
+        result.index_add_(0, batch_index, token_kl)
+
+    # Float64 reductions may still leave a roundoff-sized negative residual.
+    # Scale the gate by the number of accumulated response positions, reject
+    # anything larger, and normalize only valid numerical zero to exact zero.
+    response_positions = response_mask[:, 1:].sum(dim=1).to(dtype=torch.float64)
+    tolerance = response_positions.clamp_min(1.0) * 64.0 * torch.finfo(torch.float64).eps
     if bool((result < -tolerance).any()):
-        raise RuntimeError("categorical forward KL became materially negative")
+        minimum = float(result.min().item())
+        maximum_tolerance = float(tolerance.max().item())
+        raise RuntimeError(
+            "categorical forward KL remained negative after float64 evaluation: "
+            f"min={minimum:.6e}, tolerance={maximum_tolerance:.6e}"
+        )
     return result.clamp_min(0.0)
 
 

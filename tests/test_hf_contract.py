@@ -84,16 +84,48 @@ def test_sequence_forward_kl_integrates_next_token_actions_exactly() -> None:
     response_mask = torch.tensor([[0, 1, 1]])
 
     result = sequence_forward_kl(updated, reference, response_mask)
-    updated_log_prob = updated[:, :2].log_softmax(dim=-1)
-    reference_log_prob = reference[:, :2].log_softmax(dim=-1)
+    updated_log_prob = updated[:, :2].log_softmax(dim=-1, dtype=torch.float64)
+    reference_log_prob = reference[:, :2].log_softmax(dim=-1, dtype=torch.float64)
     expected = (
         (updated_log_prob.exp() * (updated_log_prob - reference_log_prob)).sum(dim=-1).sum(dim=-1)
     )
     assert torch.allclose(result, expected)
     assert torch.equal(
         sequence_forward_kl(reference, reference, response_mask),
-        torch.zeros(1),
+        torch.zeros(1, dtype=torch.float64),
     )
+
+
+def test_sequence_forward_kl_is_stable_for_nearly_identical_policies() -> None:
+    generator = torch.Generator().manual_seed(140)
+    updated = torch.randn((1, 257, 1000), generator=generator, dtype=torch.float32)
+    reference = updated + 3.0e-5 * torch.randn(
+        updated.shape, generator=generator, dtype=torch.float32
+    )
+    response_mask = torch.ones((1, 257), dtype=torch.long)
+
+    # This is the formerly used float32 computation.  It exhibits catastrophic
+    # cancellation on this deterministic case even though KL is nonnegative.
+    updated_log_prob_f32 = updated[:, :-1].log_softmax(dim=-1)
+    reference_log_prob_f32 = reference[:, :-1].log_softmax(dim=-1)
+    unstable = (
+        (updated_log_prob_f32.exp() * (updated_log_prob_f32 - reference_log_prob_f32))
+        .sum(dim=-1)
+        .sum(dim=-1)
+    )
+    assert unstable.item() < -64.0 * torch.finfo(torch.float32).eps
+
+    updated_log_prob_f64 = updated[:, :-1].log_softmax(dim=-1, dtype=torch.float64)
+    reference_log_prob_f64 = reference[:, :-1].log_softmax(dim=-1, dtype=torch.float64)
+    expected = (
+        (updated_log_prob_f64.exp() * (updated_log_prob_f64 - reference_log_prob_f64))
+        .sum(dim=-1)
+        .sum(dim=-1)
+    )
+    result = sequence_forward_kl(updated, reference, response_mask)
+
+    assert expected.item() > 0.0
+    assert torch.allclose(result, expected, rtol=1.0e-12, atol=1.0e-14)
 
 
 def test_reward_feature_pooling_selects_final_response_token() -> None:
