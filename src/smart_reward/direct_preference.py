@@ -37,6 +37,10 @@ REFERENCE_SCHEMA = "prorm-direct-preference-reference-logps/v1"
 FIT_SCHEMA = "prorm-direct-preference-fit/v1"
 EVALUATION_SCHEMA = "prorm-dpo-auxdpo-seed-evaluation/v1"
 METHODS = ("dpo", "auxdpo")
+ADAPTIVE_EXPERIMENTS = (
+    "dpo-auxdpo-converged-v1",
+    "dpo-auxdpo-converged-smoke-v1",
+)
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any], *, overwrite: bool = False) -> None:
@@ -110,31 +114,133 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
         raise ValueError(f"methods must be exactly {METHODS!r}")
     betas = tuple(float(item) for item in experiment.get("betas", ()))
     seeds = tuple(experiment.get("seeds", ()))
-    if experiment.get("name") == "dpo-auxdpo-main-v1":
+    experiment_name = experiment.get("name")
+    if experiment_name == "dpo-auxdpo-main-v1":
         if betas != (0.1, 0.2, 0.3):
             raise ValueError("formal extension betas must be exactly (0.1, 0.2, 0.3)")
         if seeds != (20261001, 20261002, 20261003):
             raise ValueError("formal extension seeds changed")
         if value["training"].get("limit_prompts_per_split") is not None:
             raise ValueError("formal extension may not limit prompts")
-    elif experiment.get("name") == "dpo-auxdpo-smoke-v1":
+    elif experiment_name == "dpo-auxdpo-smoke-v1":
         if betas != (0.2,) or seeds != (20261001,):
             raise ValueError("smoke identity changed")
         limit = value["training"].get("limit_prompts_per_split")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 8:
             raise ValueError("smoke prompt limit must be in [1, 8]")
+    elif experiment_name == "dpo-auxdpo-converged-v1":
+        if betas != (0.2,) or seeds != (20261001, 20261002, 20261003):
+            raise ValueError("converged experiment identity changed")
+        if value["training"].get("limit_prompts_per_split") is not None:
+            raise ValueError("formal converged experiment may not limit prompts")
+    elif experiment_name == "dpo-auxdpo-converged-smoke-v1":
+        if betas != (0.2,) or seeds != (20261001,):
+            raise ValueError("converged smoke identity changed")
+        limit = value["training"].get("limit_prompts_per_split")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 8:
+            raise ValueError("converged smoke prompt limit must be in [1, 8]")
     else:
         raise ValueError("undeclared direct-preference experiment name")
     training = value["training"]
     if training.get("objective") != "response_token_log_policy_ratio":
         raise ValueError("direct preference training must use real sequence log probabilities")
-    if int(training.get("epochs", 0)) != 2:
+    if experiment_name in ADAPTIVE_EXPERIMENTS:
+        expected_training = {
+            "objective",
+            "max_epochs",
+            "min_epochs",
+            "prompt_batch_size",
+            "gradient_accumulation_steps",
+            "policy_optimizer",
+            "learning_rate_schedule",
+            "warmup_epochs",
+            "policy_learning_rate",
+            "min_policy_learning_rate",
+            "validation_min_delta",
+            "minimum_validation_improvement",
+            "lr_reduction_factor",
+            "lr_reduction_patience",
+            "minimum_lr_reductions",
+            "early_stopping_patience",
+            "weight_decay",
+            "adam_betas",
+            "adam_epsilon",
+            "max_gradient_norm",
+            "checkpoint_prompt_batches",
+            "compute_dtype",
+            "model_dtype",
+            "shuffle",
+            "validation_selection_metric",
+            "restore_best_validation_checkpoint",
+            "test_usage",
+            "limit_prompts_per_split",
+        }
+        if set(training) != expected_training:
+            raise ValueError("adaptive direct-preference training keys changed")
+        if training["learning_rate_schedule"] != "warmup_then_validation_plateau":
+            raise ValueError("adaptive learning-rate schedule changed")
+        if training["validation_selection_metric"] != "policy_implied_soft_btl_nll":
+            raise ValueError("validation selection metric changed")
+        if training["test_usage"] != "final_evaluation_only":
+            raise ValueError("test may only be used for final evaluation")
+        if training["restore_best_validation_checkpoint"] is not True:
+            raise ValueError("best validation checkpoint must be restored")
+        for key in (
+            "max_epochs",
+            "min_epochs",
+            "prompt_batch_size",
+            "warmup_epochs",
+            "lr_reduction_patience",
+            "early_stopping_patience",
+            "checkpoint_prompt_batches",
+        ):
+            if isinstance(training[key], bool) or not isinstance(training[key], int):
+                raise ValueError(f"training.{key} must be an integer")
+        if not 1 <= training["min_epochs"] <= training["max_epochs"]:
+            raise ValueError("adaptive epoch bounds are invalid")
+        if not 0 <= training["warmup_epochs"] <= training["min_epochs"]:
+            raise ValueError("warmup_epochs must be within the minimum training budget")
+        if training["prompt_batch_size"] < 1 or training["checkpoint_prompt_batches"] < 1:
+            raise ValueError("adaptive batch sizes must be positive")
+        if training["gradient_accumulation_steps"] != 1:
+            raise ValueError("AuxDPO moment estimation forbids microbatch accumulation")
+        if training["policy_optimizer"] != "adamw":
+            raise ValueError("adaptive direct preference optimizer changed")
+        if training["shuffle"] != "deterministic_prompt_level":
+            raise ValueError("adaptive prompt shuffle changed")
+        if training["minimum_lr_reductions"] < 0:
+            raise ValueError("minimum_lr_reductions must be nonnegative")
+        for key in (
+            "policy_learning_rate",
+            "min_policy_learning_rate",
+            "validation_min_delta",
+            "lr_reduction_factor",
+            "max_gradient_norm",
+        ):
+            number = float(training[key])
+            if not math.isfinite(number) or number <= 0.0:
+                raise ValueError(f"training.{key} must be finite and positive")
+        minimum_improvement = float(training["minimum_validation_improvement"])
+        if not math.isfinite(minimum_improvement) or minimum_improvement < 0.0:
+            raise ValueError("minimum_validation_improvement must be finite and nonnegative")
+        if not 0.0 < float(training["lr_reduction_factor"]) < 1.0:
+            raise ValueError("lr_reduction_factor must lie in (0, 1)")
+        if float(training["min_policy_learning_rate"]) >= float(
+            training["policy_learning_rate"]
+        ):
+            raise ValueError("minimum policy learning rate must be below its initial value")
+    elif int(training.get("epochs", 0)) != 2:
         raise ValueError("direct-preference extension is frozen to two epochs")
     if str(training.get("compute_dtype")) != "bfloat16":
         raise ValueError("formal extension compute dtype must be bfloat16")
     aux = value["auxdpo"]
     if aux.get("reported_test_reward") != "policy_implied_implicit_reward":
         raise ValueError("AuxDPO test reward scope changed")
+    if experiment_name in ADAPTIVE_EXPERIMENTS:
+        minimum_aux = float(aux.get("min_auxiliary_learning_rate", math.nan))
+        initial_aux = float(aux.get("auxiliary_learning_rate", math.nan))
+        if not 0.0 < minimum_aux < initial_aux:
+            raise ValueError("adaptive auxiliary learning-rate bounds are invalid")
     digest = value.get("source_config_sha256")
     if not isinstance(digest, str) or len(digest) != 64:
         raise ValueError("source config digest is invalid")
@@ -404,7 +510,12 @@ def compute_reference_logps(
     batch_size = int(extension["training"]["prompt_batch_size"])
     prompt_limit = extension["training"].get("limit_prompts_per_split")
     tensors: dict[str, torch.Tensor] = {}
-    for split in ("train", "test"):
+    split_names = (
+        ("train", "validation", "test")
+        if extension["experiment"]["name"] in ADAPTIVE_EXPERIMENTS
+        else ("train", "test")
+    )
+    for split in split_names:
         groups = group_candidate_nodes(
             artifact_dir, split=split, candidates=int(source_config["data"]["num_candidates"])
         )
@@ -502,6 +613,41 @@ def _fit_directory(method: str, beta: float) -> str:
 
 
 def train_direct_preference(
+    extension_path: str | os.PathLike[str],
+    artifact_dir: str | os.PathLike[str],
+    reference_dir: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
+    *,
+    seed: int,
+    beta: float,
+    method: Literal["dpo", "auxdpo"],
+    device: str | torch.device = "cuda",
+) -> dict[str, Any]:
+    extension = load_direct_preference_config(extension_path)
+    if extension["experiment"]["name"] in ADAPTIVE_EXPERIMENTS:
+        return _train_adaptive_direct_preference(
+            extension_path,
+            artifact_dir,
+            reference_dir,
+            output_dir,
+            seed=seed,
+            beta=beta,
+            method=method,
+            device=device,
+        )
+    return _train_fixed_direct_preference(
+        extension_path,
+        artifact_dir,
+        reference_dir,
+        output_dir,
+        seed=seed,
+        beta=beta,
+        method=method,
+        device=device,
+    )
+
+
+def _train_fixed_direct_preference(
     extension_path: str | os.PathLike[str],
     artifact_dir: str | os.PathLike[str],
     reference_dir: str | os.PathLike[str],
@@ -772,6 +918,517 @@ def train_direct_preference(
             "auxiliary_learning_rate": (
                 None if method == "dpo" else float(extension["auxdpo"]["auxiliary_learning_rate"])
             ),
+        },
+        "files": {
+            "adapter.safetensors": sha256_file(adapter_path),
+            "updated_logps.safetensors": sha256_file(logps_path),
+            **({} if delta_path is None else {"delta.safetensors": sha256_file(delta_path)}),
+        },
+        "lora_a_sha256": setup.a_state_sha256,
+        "producer": producer_identity(),
+    }
+    _atomic_json(result_path, payload)
+    checkpoint_path.unlink(missing_ok=True)
+    return payload
+
+
+def _train_adaptive_direct_preference(
+    extension_path: str | os.PathLike[str],
+    artifact_dir: str | os.PathLike[str],
+    reference_dir: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
+    *,
+    seed: int,
+    beta: float,
+    method: Literal["dpo", "auxdpo"],
+    device: str | torch.device = "cuda",
+) -> dict[str, Any]:
+    """Fit one policy with validation-only scheduling and fail-closed convergence."""
+
+    extension = load_direct_preference_config(extension_path)
+    _, source_config = resolve_source_config(extension_path, extension)
+    if method not in METHODS or beta not in tuple(extension["experiment"]["betas"]):
+        raise ValueError("undeclared adaptive direct-preference condition")
+    if seed not in extension["experiment"]["seeds"]:
+        raise ValueError("undeclared adaptive seed")
+    digest = extension_hash(extension)
+    reference_metadata, reference = _load_reference(
+        reference_dir, seed=seed, extension_digest=digest
+    )
+    if set(reference) != {"train", "validation", "test"}:
+        raise ValueError("adaptive reference cache must contain train, validation, and test")
+    artifact_identity = exact_delta_artifact_metadata_sha256(
+        artifact_dir,
+        expected_config_hash=extension["source_config_sha256"],
+        expected_seed=seed,
+    )
+    if reference_metadata["artifact_metadata_sha256"] != artifact_identity:
+        raise ValueError("reference cache and artifact identities differ")
+
+    target = Path(output_dir) / _fit_directory(method, beta)
+    result_path = target / "result.json"
+    if result_path.exists():
+        with result_path.open("r", encoding="utf-8") as stream:
+            existing = json.load(stream)
+        if (
+            existing.get("schema") == FIT_SCHEMA
+            and existing.get("status") == "complete"
+            and existing.get("seed") == seed
+            and existing.get("method") == method
+            and float(existing.get("beta")) == beta
+            and existing.get("extension_config_sha256") == digest
+            and existing.get("training", {}).get("converged") is True
+        ):
+            return existing
+        raise ValueError("existing adaptive direct-preference result identity mismatch")
+
+    target.mkdir(parents=True, exist_ok=True)
+    target_device = torch.device(device)
+    setup, pad_token_id = _model_and_setup(source_config, seed, target_device)
+    if setup.a_state_sha256 != reference_metadata["lora_a_sha256"]:
+        raise ValueError("training LoRA-A basis differs from the reference cache")
+    setup.model.eval()
+
+    experiment = load_exact_delta_artifact(
+        artifact_dir,
+        expected_config_hash=extension["source_config_sha256"],
+        expected_seed=seed,
+    )
+    prompt_limit = extension["training"].get("limit_prompts_per_split")
+    train_groups = group_candidate_nodes(
+        artifact_dir, split="train", candidates=experiment.train.num_candidates
+    )
+    validation_groups = group_candidate_nodes(
+        artifact_dir, split="validation", candidates=experiment.train.num_candidates
+    )
+    if prompt_limit is not None:
+        train_groups = train_groups[: int(prompt_limit)]
+        validation_groups = validation_groups[: int(prompt_limit)]
+    prompt_count = len(train_groups)
+    validation_count = len(validation_groups)
+    reference_train = reference["train"][:prompt_count].to(torch.float32)
+    reference_validation = reference["validation"][:validation_count].to(torch.float32)
+    true_train = experiment.train.true_rewards[:prompt_count].to(torch.float32)
+    true_validation = experiment.validation.true_rewards[:validation_count].to(torch.float32)
+    score_train = experiment.train.policy_scores[:prompt_count].to(torch.float32)
+
+    training = extension["training"]
+    batch_size = int(training["prompt_batch_size"])
+    max_epochs = int(training["max_epochs"])
+    min_epochs = int(training["min_epochs"])
+    condition_seed = int(seed * 1000 + round(beta * 100))
+    schedule: list[tuple[int, list[int]]] = []
+    for epoch in range(max_epochs):
+        epoch_order = list(range(prompt_count))
+        random.Random(condition_seed + epoch).shuffle(epoch_order)
+        schedule.extend(
+            (epoch, epoch_order[start : start + batch_size])
+            for start in range(0, prompt_count, batch_size)
+        )
+    schedule_digest = _canonical_sha256(schedule)
+    batches_per_epoch = math.ceil(prompt_count / batch_size)
+    warmup_steps = int(training["warmup_epochs"]) * batches_per_epoch
+
+    policy_parameters = [parameter for _, parameter in setup.named_tangent_parameters()]
+    policy_lr = float(training["policy_learning_rate"])
+    parameter_groups: list[dict[str, Any]] = [{"params": policy_parameters, "lr": policy_lr}]
+    initial_group_lrs = [policy_lr]
+    minimum_group_lrs = [float(training["min_policy_learning_rate"])]
+    delta_raw: torch.nn.Parameter | None = None
+    if method == "auxdpo":
+        delta_raw = torch.nn.Parameter(
+            torch.zeros(
+                (prompt_count, experiment.train.num_candidates),
+                dtype=torch.float32,
+                device=target_device,
+            )
+        )
+        aux_lr = float(extension["auxdpo"]["auxiliary_learning_rate"])
+        parameter_groups.append({"params": [delta_raw], "lr": aux_lr})
+        initial_group_lrs.append(aux_lr)
+        minimum_group_lrs.append(float(extension["auxdpo"]["min_auxiliary_learning_rate"]))
+
+    optimizer = torch.optim.AdamW(
+        parameter_groups,
+        betas=tuple(float(item) for item in training["adam_betas"]),
+        eps=float(training["adam_epsilon"]),
+        weight_decay=float(training["weight_decay"]),
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=float(training["lr_reduction_factor"]),
+        patience=int(training["lr_reduction_patience"]),
+        threshold=float(training["validation_min_delta"]),
+        threshold_mode="abs",
+        min_lr=minimum_group_lrs,
+    )
+
+    @torch.no_grad()
+    def heldout_metrics() -> tuple[float, float]:
+        chunks: list[torch.Tensor] = []
+        for start in range(0, validation_count, batch_size):
+            chunks.append(
+                response_log_probabilities(
+                    setup.model,
+                    validation_groups[start : start + batch_size],
+                    pad_token_id=pad_token_id,
+                    device=target_device,
+                    compute_dtype=torch.bfloat16,
+                )
+                .detach()
+                .cpu()
+            )
+        updated = torch.cat(chunks).to(torch.float32)
+        implicit = beta * (updated - reference_validation)
+        nll = float(soft_preference_loss(implicit, true_validation).item())
+        mse = float(
+            (centered(implicit.to(torch.float64)) - centered(true_validation.to(torch.float64)))
+            .square()
+            .mean()
+            .item()
+        )
+        return nll, mse
+
+    initial_validation_nll = float(
+        soft_preference_loss(torch.zeros_like(true_validation), true_validation).item()
+    )
+    best_validation_nll = initial_validation_nll
+    best_validation_mse = float(centered(true_validation.to(torch.float64)).square().mean().item())
+    best_epoch = 0
+    best_adapter = {
+        name: parameter.detach().cpu().clone()
+        for name, parameter in setup.named_tangent_parameters()
+    }
+    best_delta_raw = None if delta_raw is None else delta_raw.detach().cpu().clone()
+    history: list[dict[str, Any]] = []
+    bad_epochs = 0
+    lr_reductions = 0
+    start_batch = 0
+    processed_batches = 0
+    epoch_running = {
+        "prompts": 0,
+        "batches": 0,
+        "loss_sum": 0.0,
+        "preference_nll_sum": 0.0,
+        "nullspace_penalty_sum": 0.0,
+        "delta_amplitude_sum": 0.0,
+        "policy_grad_norm_sum": 0.0,
+        "policy_grad_norm_max": 0.0,
+    }
+    checkpoint_path = target / "checkpoint.pt"
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if checkpoint.get("identity") != [digest, seed, beta, method]:
+            raise ValueError("adaptive training checkpoint identity mismatch")
+        if checkpoint.get("schedule_sha256") != schedule_digest:
+            raise ValueError("adaptive training checkpoint schedule mismatch")
+        by_name = dict(setup.named_tangent_parameters())
+        for name, value in checkpoint["adapter"].items():
+            by_name[name].data.copy_(value.to(target_device))
+        if delta_raw is not None:
+            delta_raw.data.copy_(checkpoint["delta_raw"].to(target_device))
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        start_batch = int(checkpoint["next_batch"])
+        processed_batches = int(checkpoint["processed_batches"])
+        history = list(checkpoint["history"])
+        bad_epochs = int(checkpoint["bad_epochs"])
+        lr_reductions = int(checkpoint["lr_reductions"])
+        best_validation_nll = float(checkpoint["best_validation_nll"])
+        best_validation_mse = float(checkpoint["best_validation_mse"])
+        best_epoch = int(checkpoint["best_epoch"])
+        best_adapter = checkpoint["best_adapter"]
+        best_delta_raw = checkpoint["best_delta_raw"]
+        epoch_running = dict(checkpoint["epoch_running"])
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(target_device)
+
+    def save_checkpoint(next_batch: int) -> None:
+        _atomic_torch(
+            checkpoint_path,
+            {
+                "identity": [digest, seed, beta, method],
+                "schedule_sha256": schedule_digest,
+                "next_batch": next_batch,
+                "processed_batches": processed_batches,
+                "adapter": {
+                    name: parameter.detach().cpu()
+                    for name, parameter in setup.named_tangent_parameters()
+                },
+                "delta_raw": None if delta_raw is None else delta_raw.detach().cpu(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "history": history,
+                "bad_epochs": bad_epochs,
+                "lr_reductions": lr_reductions,
+                "best_validation_nll": best_validation_nll,
+                "best_validation_mse": best_validation_mse,
+                "best_epoch": best_epoch,
+                "best_adapter": best_adapter,
+                "best_delta_raw": best_delta_raw,
+                "epoch_running": epoch_running,
+            },
+        )
+
+    checkpoint_every = int(training["checkpoint_prompt_batches"])
+    stopped = False
+    stop_reason: str | None = None
+    last_next_batch = start_batch
+    for batch_number, (epoch, indices) in enumerate(schedule):
+        if batch_number < start_batch:
+            continue
+        if batch_number < warmup_steps:
+            scale = float(batch_number + 1) / float(max(warmup_steps, 1))
+            for group, initial_lr in zip(optimizer.param_groups, initial_group_lrs, strict=True):
+                group["lr"] = initial_lr * scale
+
+        nodes = tuple(train_groups[index] for index in indices)
+        updated = response_log_probabilities(
+            setup.model,
+            nodes,
+            pad_token_id=pad_token_id,
+            device=target_device,
+            compute_dtype=torch.bfloat16,
+        )
+        index_cpu = torch.tensor(indices, dtype=torch.long)
+        reference_batch = reference_train.index_select(0, index_cpu).to(target_device)
+        true_batch = true_train.index_select(0, index_cpu).to(target_device)
+        implicit = beta * (updated - reference_batch)
+        if delta_raw is None:
+            loss = soft_preference_loss(implicit, true_batch)
+            diagnostics = {
+                "preference_nll": loss,
+                "nullspace_penalty": loss.new_zeros(()),
+                "delta_amplitude": loss.new_zeros(()),
+            }
+        else:
+            score_batch = score_train.index_select(0, index_cpu).to(target_device)
+            loss, diagnostics = auxdpo_loss(
+                implicit,
+                true_batch,
+                delta_raw.index_select(0, index_cpu.to(target_device)),
+                score_batch,
+                nullspace_weight=float(extension["auxdpo"]["nullspace_weight"]),
+                amplitude_weight=float(extension["auxdpo"]["amplitude_weight"]),
+                delta_cap=float(extension["auxdpo"]["delta_cap"]),
+            )
+        if not bool(torch.isfinite(loss)):
+            raise RuntimeError("adaptive direct-preference loss became non-finite")
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            policy_parameters, max_norm=float(training["max_gradient_norm"])
+        )
+        if not bool(torch.isfinite(grad_norm)):
+            raise RuntimeError("adaptive policy gradient norm became non-finite")
+        optimizer.step()
+
+        batch_prompts = len(indices)
+        processed_batches += 1
+        epoch_running["prompts"] += batch_prompts
+        epoch_running["batches"] += 1
+        epoch_running["loss_sum"] += float(loss.detach().item()) * batch_prompts
+        for key in ("preference_nll", "nullspace_penalty", "delta_amplitude"):
+            epoch_running[f"{key}_sum"] += (
+                float(diagnostics[key].detach().item()) * batch_prompts
+            )
+        grad_value = float(grad_norm.detach().item())
+        epoch_running["policy_grad_norm_sum"] += grad_value
+        epoch_running["policy_grad_norm_max"] = max(
+            float(epoch_running["policy_grad_norm_max"]), grad_value
+        )
+        next_batch = batch_number + 1
+        last_next_batch = next_batch
+        epoch_complete = next_batch == len(schedule) or schedule[next_batch][0] != epoch
+        if epoch_complete:
+            validation_nll, validation_mse = heldout_metrics()
+            min_delta = float(training["validation_min_delta"])
+            improved = validation_nll < best_validation_nll - min_delta
+            if improved:
+                best_validation_nll = validation_nll
+                best_validation_mse = validation_mse
+                best_epoch = epoch + 1
+                best_adapter = {
+                    name: parameter.detach().cpu().clone()
+                    for name, parameter in setup.named_tangent_parameters()
+                }
+                best_delta_raw = (
+                    None if delta_raw is None else delta_raw.detach().cpu().clone()
+                )
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+            policy_lr_before = float(optimizer.param_groups[0]["lr"])
+            scheduler.step(validation_nll)
+            policy_lr_after = float(optimizer.param_groups[0]["lr"])
+            if policy_lr_after < policy_lr_before * (1.0 - 1.0e-12):
+                lr_reductions += 1
+            prompts_seen = max(int(epoch_running["prompts"]), 1)
+            batches_seen = max(int(epoch_running["batches"]), 1)
+            record = {
+                "epoch": epoch + 1,
+                "train_online_loss": float(epoch_running["loss_sum"]) / prompts_seen,
+                "train_online_preference_nll": (
+                    float(epoch_running["preference_nll_sum"]) / prompts_seen
+                ),
+                "train_online_nullspace_penalty": (
+                    float(epoch_running["nullspace_penalty_sum"]) / prompts_seen
+                ),
+                "train_online_delta_amplitude": (
+                    float(epoch_running["delta_amplitude_sum"]) / prompts_seen
+                ),
+                "validation_policy_nll": validation_nll,
+                "validation_policy_centered_reward_mse": validation_mse,
+                "policy_grad_norm_mean": (
+                    float(epoch_running["policy_grad_norm_sum"]) / batches_seen
+                ),
+                "policy_grad_norm_max": float(epoch_running["policy_grad_norm_max"]),
+                "policy_lr_before_plateau_step": policy_lr_before,
+                "policy_lr_after_plateau_step": policy_lr_after,
+                "auxiliary_lr_after_plateau_step": (
+                    None if delta_raw is None else float(optimizer.param_groups[1]["lr"])
+                ),
+                "improved_by_min_delta": improved,
+                "bad_epochs": bad_epochs,
+                "lr_reductions": lr_reductions,
+            }
+            history.append(record)
+            print(
+                f"adaptive-train seed={seed} beta={beta:g} method={method} "
+                f"epoch={epoch + 1}/{max_epochs} train={record['train_online_loss']:.8f} "
+                f"valid={validation_nll:.8f} lr={policy_lr_after:.3e} "
+                f"best_epoch={best_epoch} bad={bad_epochs} reductions={lr_reductions}",
+                flush=True,
+            )
+            epoch_running = {key: 0.0 for key in epoch_running}
+            epoch_running["prompts"] = 0
+            epoch_running["batches"] = 0
+            improvement = initial_validation_nll - best_validation_nll
+            if (
+                epoch + 1 >= min_epochs
+                and bad_epochs >= int(training["early_stopping_patience"])
+                and lr_reductions >= int(training["minimum_lr_reductions"])
+                and improvement >= float(training["minimum_validation_improvement"])
+            ):
+                stopped = True
+                stop_reason = "validation_plateau_after_required_lr_reductions"
+        if next_batch % checkpoint_every == 0 or epoch_complete or stopped:
+            save_checkpoint(next_batch)
+        if stopped:
+            break
+
+    is_smoke = extension["experiment"]["name"] == "dpo-auxdpo-converged-smoke-v1"
+    improvement = initial_validation_nll - best_validation_nll
+    if is_smoke:
+        converged = True
+        stop_reason = stop_reason or "bounded_resource_and_control_flow_smoke_complete"
+    else:
+        converged = bool(
+            stopped
+            and best_epoch > 0
+            and improvement >= float(training["minimum_validation_improvement"])
+        )
+    if not converged:
+        save_checkpoint(last_next_batch)
+        raise RuntimeError(
+            "adaptive direct-preference fit exhausted its budget without the preregistered "
+            f"convergence gate: best_epoch={best_epoch}, improvement={improvement:.8g}, "
+            f"bad_epochs={bad_epochs}, lr_reductions={lr_reductions}"
+        )
+
+    by_name = dict(setup.named_tangent_parameters())
+    with torch.no_grad():
+        for name, value in best_adapter.items():
+            by_name[name].copy_(value.to(target_device))
+        if delta_raw is not None and best_delta_raw is not None:
+            delta_raw.copy_(best_delta_raw.to(target_device))
+
+    adapter_path = target / "adapter.safetensors"
+    _save_trainable_tensors(setup, adapter_path)
+    delta_path: Path | None = None
+    if delta_raw is not None:
+        delta_path = target / "delta.safetensors"
+        delta = centered(
+            float(extension["auxdpo"]["delta_cap"]) * torch.tanh(delta_raw.detach())
+        ).cpu().contiguous()
+        safetensors = __import__("safetensors.torch", fromlist=["save_file"])
+        temporary = target / ".delta.tmp.safetensors"
+        safetensors.save_file({"train.delta": delta}, str(temporary))
+        os.replace(temporary, delta_path)
+
+    fitted_logps: dict[str, torch.Tensor] = {}
+    split_data = {
+        "train": experiment.train,
+        "validation": experiment.validation,
+        "test": experiment.test,
+    }
+    with torch.no_grad():
+        for split in ("train", "validation", "test"):
+            split_groups = group_candidate_nodes(
+                artifact_dir, split=split, candidates=experiment.train.num_candidates
+            )
+            if prompt_limit is not None:
+                split_groups = split_groups[: int(prompt_limit)]
+            chunks = []
+            for start in range(0, len(split_groups), batch_size):
+                chunks.append(
+                    response_log_probabilities(
+                        setup.model,
+                        split_groups[start : start + batch_size],
+                        pad_token_id=pad_token_id,
+                        device=target_device,
+                        compute_dtype=torch.bfloat16,
+                    )
+                    .detach()
+                    .cpu()
+                )
+            fitted_logps[split] = torch.cat(chunks).to(torch.float32).contiguous()
+            expected_shape = split_data[split].true_rewards[: len(split_groups)].shape
+            if fitted_logps[split].shape != expected_shape:
+                raise RuntimeError(f"final {split} log-probability shape changed")
+    logps_path = target / "updated_logps.safetensors"
+    safetensors = __import__("safetensors.torch", fromlist=["save_file"])
+    temporary = target / ".updated_logps.tmp.safetensors"
+    safetensors.save_file(fitted_logps, str(temporary))
+    os.replace(temporary, logps_path)
+
+    payload = {
+        "schema": FIT_SCHEMA,
+        "status": "complete",
+        "method": method,
+        "seed": seed,
+        "beta": beta,
+        "source_config_sha256": extension["source_config_sha256"],
+        "extension_config_sha256": digest,
+        "artifact_metadata_sha256": artifact_identity,
+        "reference_metadata_sha256": sha256_file(Path(reference_dir) / "metadata.json"),
+        "training": {
+            "objective": "exact_soft_BTL_over_response_token_log_policy_ratio",
+            "initialization": "reference_policy_with_zero_lora_B",
+            "optimizer_resume": "not_applicable_fresh_adaptive_trajectory",
+            "converged": True,
+            "stop_reason": stop_reason,
+            "epochs_completed": len(history),
+            "best_epoch": best_epoch,
+            "initial_validation_policy_nll": initial_validation_nll,
+            "best_validation_policy_nll": best_validation_nll,
+            "best_validation_policy_centered_reward_mse": best_validation_mse,
+            "validation_nll_improvement": improvement,
+            "validation_selection_metric": training["validation_selection_metric"],
+            "test_usage": training["test_usage"],
+            "prompt_batch_size": batch_size,
+            "prompt_batches_processed": processed_batches,
+            "policy_learning_rate": policy_lr,
+            "min_policy_learning_rate": float(training["min_policy_learning_rate"]),
+            "learning_rate_schedule": training["learning_rate_schedule"],
+            "lr_reductions": lr_reductions,
+            "auxiliary_learning_rate": (
+                None if method == "dpo" else float(extension["auxdpo"]["auxiliary_learning_rate"])
+            ),
+            "history": history,
         },
         "files": {
             "adapter.safetensors": sha256_file(adapter_path),

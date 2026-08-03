@@ -17,6 +17,8 @@ from smart_reward.direct_preference import (
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "configs" / "dpo_auxdpo_main.yaml"
 SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_smoke.yaml"
+CONVERGED_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged.yaml"
+CONVERGED_SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_smoke.yaml"
 
 
 def test_formal_direct_preference_config_is_bound_to_source() -> None:
@@ -32,6 +34,32 @@ def test_smoke_config_is_a_bounded_subset_of_the_formal_source() -> None:
     _, source_config = resolve_source_config(SMOKE_EXTENSION, extension)
     assert extension["training"]["limit_prompts_per_split"] == 4
     assert set(extension["experiment"]["seeds"]).issubset(source_config["run"]["seeds"])
+
+
+def test_converged_config_uses_validation_only_adaptive_stopping() -> None:
+    extension = load_direct_preference_config(CONVERGED_EXTENSION)
+    _, source_config = resolve_source_config(CONVERGED_EXTENSION, extension)
+    training = extension["training"]
+    assert extension["experiment"]["betas"] == [0.2]
+    assert extension["experiment"]["seeds"] == source_config["run"]["seeds"]
+    assert training["validation_selection_metric"] == "policy_implied_soft_btl_nll"
+    assert training["test_usage"] == "final_evaluation_only"
+    assert training["gradient_accumulation_steps"] == 1
+    assert training["min_epochs"] < training["max_epochs"]
+    assert training["minimum_lr_reductions"] == 2
+    assert training["restore_best_validation_checkpoint"] is True
+
+
+def test_converged_smoke_changes_only_budget_and_prompt_limit() -> None:
+    formal = load_direct_preference_config(CONVERGED_EXTENSION)
+    smoke = load_direct_preference_config(CONVERGED_SMOKE_EXTENSION)
+    assert smoke["experiment"]["seeds"] == [formal["experiment"]["seeds"][0]]
+    assert smoke["experiment"]["betas"] == formal["experiment"]["betas"]
+    assert smoke["training"]["prompt_batch_size"] == formal["training"]["prompt_batch_size"]
+    assert smoke["training"]["policy_learning_rate"] == formal["training"][
+        "policy_learning_rate"
+    ]
+    assert smoke["training"]["limit_prompts_per_split"] == 8
 
 
 def test_soft_preference_loss_uses_every_unordered_edge() -> None:

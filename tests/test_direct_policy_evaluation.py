@@ -23,6 +23,17 @@ def test_formal_direct_policy_config_is_frozen() -> None:
     assert policy_name("auxdpo") == "auxdpo__beta_0p2"
 
 
+def test_converged_direct_policy_config_preserves_the_rollout_estimand() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = load_direct_policy_config(
+        root / "configs" / "real_policy_dpo_aux_converged_m6.yaml"
+    )
+    assert config["experiment"]["beta"] == 0.2
+    assert config["rollout"]["prompts"] == 512
+    assert config["rollout"]["responses_per_prompt"] == 6
+    assert config["reward_evaluation"]["folds"] == 2
+
+
 def test_two_fold_cross_u_uses_cross_products_without_clipping() -> None:
     train_scores = torch.tensor([[[-1.0], [1.0]], [[-1.0], [1.0]]], dtype=torch.float64)
     test_scores = train_scores.clone()

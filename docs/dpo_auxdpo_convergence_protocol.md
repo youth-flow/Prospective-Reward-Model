@@ -1,0 +1,46 @@
+# DPO/AuxDPO convergence protocol
+
+This run changes only DPO/AuxDPO fitting and its downstream real-policy evaluation. It
+reuses the immutable six-candidate artifact, exact soft-BTL labels, Qwen2.5-1.5B reference,
+rank-4 last-layer LoRA-B parameterization, and the three formal seeds. The comparison beta
+is fixed at 0.2 before training. MLE-RM, ProRM, oracle policy, and pi0 are not retrained.
+
+## Selection and stopping
+
+Both methods start from the same zero LoRA-B reference policy and use matched deterministic
+prompt orders and a physical prompt batch of four. The policy learning rate is `1e-5` with
+one warmup epoch. A validation-plateau scheduler multiplies all optimizer-group learning
+rates by 0.3 after one plateau epoch. Formal training allows at most 32 epochs.
+
+The sole selection metric is the exact soft-BTL NLL of the policy-implied reward
+`beta * log(pi/pi0)` on the frozen validation candidates. AuxDPO's prompt-candidate offset
+is excluded from this metric because it is a train-only nuisance variable. A formal fit is
+complete only after at least four epochs, two learning-rate reductions, five consecutive
+epochs without an improvement greater than `1e-5`, and a best validation improvement of at
+least `1e-4` over pi0. The best validation checkpoint is restored. If the gate is not met,
+the run fails closed and retains its resumable optimizer checkpoint.
+
+The test labels and test metrics never affect scheduling, stopping, or checkpoint selection.
+They are evaluated only after the convergence gate passes. Every epoch records train loss,
+validation NLL and MSE, policy gradient norms, learning rates, plateau state, and whether the
+best checkpoint changed.
+
+## AuxDPO batching
+
+AuxDPO's squared reference-score moment is evaluated on the actual physical prompt batch.
+Gradient accumulation is disabled because independently squaring microbatch moments is not
+equivalent to squaring the moment of the combined batch. The same physical batch is used by
+DPO for a matched comparison. Batch size is admitted by a bounded GPU-memory smoke, not by
+test performance.
+
+## Dependency closure
+
+The affected closure is:
+
+```text
+reference log-probability cache -> converged DPO/AuxDPO fits -> PEFT writeback
+-> fresh six-response test rollout -> three-seed aggregate -> integrity audit -> archive
+```
+
+Candidate generation, oracle scoring, reward-model fitting, Fisher estimation, and the four
+existing policies remain immutable and are validated by their original hashes.
