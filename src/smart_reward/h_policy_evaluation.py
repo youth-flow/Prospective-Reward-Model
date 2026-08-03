@@ -211,7 +211,9 @@ def write_h_provenance_bridge(
     output_path = Path(output)
     if output_path.is_file():
         observed = _read_json(output_path)
-        if observed != payload:
+        observed_stable = {key: value for key, value in observed.items() if key != "producer"}
+        payload_stable = {key: value for key, value in payload.items() if key != "producer"}
+        if observed_stable != payload_stable or not isinstance(observed.get("producer"), dict):
             raise ValueError("existing provenance bridge differs from immutable sources")
         return observed
     _atomic_json(output_path, payload)
