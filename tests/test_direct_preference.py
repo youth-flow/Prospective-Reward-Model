@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "configs" / "dpo_auxdpo_main.yaml"
 SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_smoke.yaml"
 CONVERGED_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged.yaml"
+CONVERGED_V2_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_v2.yaml"
 CONVERGED_SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_smoke.yaml"
 
 
@@ -60,6 +61,24 @@ def test_converged_smoke_changes_only_budget_and_prompt_limit() -> None:
         "policy_learning_rate"
     ]
     assert smoke["training"]["limit_prompts_per_split"] == 8
+
+
+def test_memory_safe_converged_config_preserves_science_and_halves_physical_batch() -> None:
+    first = load_direct_preference_config(CONVERGED_EXTENSION)
+    second = load_direct_preference_config(CONVERGED_V2_EXTENSION)
+    assert second["experiment"]["seeds"] == first["experiment"]["seeds"]
+    assert second["experiment"]["betas"] == first["experiment"]["betas"]
+    assert second["training"]["prompt_batch_size"] == 2
+    for key in (
+        "policy_learning_rate",
+        "max_epochs",
+        "min_epochs",
+        "validation_min_delta",
+        "early_stopping_patience",
+        "validation_selection_metric",
+        "test_usage",
+    ):
+        assert second["training"][key] == first["training"][key]
 
 
 def test_soft_preference_loss_uses_every_unordered_edge() -> None:

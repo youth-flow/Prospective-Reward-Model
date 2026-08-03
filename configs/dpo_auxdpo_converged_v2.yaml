@@ -1,0 +1,59 @@
+schema: prorm-dpo-auxdpo-extension-config/v1
+source_config: fisher_trpo_main.yaml
+source_config_sha256: 0ff8cb872c5bdecc33bd2e5ded7d9c3adcbc43d7b6c355b40f8d34a1ae95ce92
+
+experiment:
+  name: dpo-auxdpo-converged-v2
+  seeds: [20261001, 20261002, 20261003]
+  betas: [0.2]
+  methods: [dpo, auxdpo]
+  preference_labels: exact_soft_btl
+  reference_policy: frozen_sequence_policy
+  candidate_evaluation_reference: uniform_over_frozen_candidate_pool
+
+training:
+  objective: response_token_log_policy_ratio
+  max_epochs: 32
+  min_epochs: 4
+  prompt_batch_size: 2
+  gradient_accumulation_steps: 1
+  policy_optimizer: adamw
+  learning_rate_schedule: warmup_then_validation_plateau
+  warmup_epochs: 1
+  policy_learning_rate: 1.0e-5
+  min_policy_learning_rate: 1.0e-7
+  validation_min_delta: 1.0e-5
+  minimum_validation_improvement: 1.0e-4
+  lr_reduction_factor: 0.3
+  lr_reduction_patience: 1
+  minimum_lr_reductions: 2
+  early_stopping_patience: 5
+  weight_decay: 0.0
+  adam_betas: [0.9, 0.999]
+  adam_epsilon: 1.0e-8
+  max_gradient_norm: 1.0
+  checkpoint_prompt_batches: 128
+  compute_dtype: bfloat16
+  model_dtype: float32
+  shuffle: deterministic_prompt_level
+  validation_selection_metric: policy_implied_soft_btl_nll
+  restore_best_validation_checkpoint: true
+  test_usage: final_evaluation_only
+  limit_prompts_per_split: null
+
+auxdpo:
+  variable: shared_prompt_candidate_offset
+  nullspace_estimator: batchwise_reference_score_moment
+  nullspace_weight: 1.0
+  amplitude_weight: 0.01
+  delta_cap: 1.0
+  auxiliary_learning_rate: 5.0e-3
+  min_auxiliary_learning_rate: 5.0e-5
+  reported_test_reward: policy_implied_implicit_reward
+  augmented_reward_scope: train_diagnostics_only
+
+evaluation:
+  splits: [train, validation, test]
+  reward_metrics: [NLL, MSE, approximate_regret]
+  policy_metrics: [R, K, J, delta_J, beta_KL, J_close]
+  report_betas: [0.2]

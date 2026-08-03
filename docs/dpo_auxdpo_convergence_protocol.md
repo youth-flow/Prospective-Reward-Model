@@ -8,7 +8,7 @@ is fixed at 0.2 before training. MLE-RM, ProRM, oracle policy, and pi0 are not r
 ## Selection and stopping
 
 Both methods start from the same zero LoRA-B reference policy and use matched deterministic
-prompt orders and a physical prompt batch of four. The policy learning rate is `1e-5` with
+prompt orders and a physical prompt batch of two. The policy learning rate is `1e-5` with
 one warmup epoch. A validation-plateau scheduler multiplies all optimizer-group learning
 rates by 0.3 after one plateau epoch. Formal training allows at most 32 epochs.
 
@@ -31,7 +31,9 @@ AuxDPO's squared reference-score moment is evaluated on the actual physical prom
 Gradient accumulation is disabled because independently squaring microbatch moments is not
 equivalent to squaring the moment of the combined batch. The same physical batch is used by
 DPO for a matched comparison. Batch size is admitted by a bounded GPU-memory smoke, not by
-test performance.
+test performance. A batch of four passed a short control-flow smoke but failed closed on the
+formal long-sequence inventory at the 44.4-GiB device limit; version 2 therefore freezes the
+uniform memory-safe batch of two before any completed fit or test evaluation.
 
 ## Dependency closure
 

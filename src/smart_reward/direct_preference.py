@@ -39,6 +39,7 @@ EVALUATION_SCHEMA = "prorm-dpo-auxdpo-seed-evaluation/v1"
 METHODS = ("dpo", "auxdpo")
 ADAPTIVE_EXPERIMENTS = (
     "dpo-auxdpo-converged-v1",
+    "dpo-auxdpo-converged-v2",
     "dpo-auxdpo-converged-smoke-v1",
 )
 
@@ -133,6 +134,13 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
             raise ValueError("converged experiment identity changed")
         if value["training"].get("limit_prompts_per_split") is not None:
             raise ValueError("formal converged experiment may not limit prompts")
+    elif experiment_name == "dpo-auxdpo-converged-v2":
+        if betas != (0.2,) or seeds != (20261001, 20261002, 20261003):
+            raise ValueError("memory-safe converged experiment identity changed")
+        if value["training"].get("limit_prompts_per_split") is not None:
+            raise ValueError("formal memory-safe experiment may not limit prompts")
+        if int(value["training"].get("prompt_batch_size", 0)) != 2:
+            raise ValueError("formal memory-safe prompt batch must be two")
     elif experiment_name == "dpo-auxdpo-converged-smoke-v1":
         if betas != (0.2,) or seeds != (20261001,):
             raise ValueError("converged smoke identity changed")
