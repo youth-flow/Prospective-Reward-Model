@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from smart_reward.direct_preference import (
+    _initialize_plateau_baseline,
     auxdpo_loss,
     candidate_policy_metrics,
     centered,
@@ -19,6 +20,7 @@ EXTENSION = ROOT / "configs" / "dpo_auxdpo_main.yaml"
 SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_smoke.yaml"
 CONVERGED_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged.yaml"
 CONVERGED_V2_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_v2.yaml"
+CONVERGED_V3_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_v3.yaml"
 CONVERGED_SMOKE_EXTENSION = ROOT / "configs" / "dpo_auxdpo_converged_smoke.yaml"
 
 
@@ -81,6 +83,31 @@ def test_memory_safe_converged_config_preserves_science_and_halves_physical_batc
         assert second["training"][key] == first["training"][key]
 
 
+def test_scaled_lr_config_changes_only_batch_dependent_optimizer_rates() -> None:
+    second = load_direct_preference_config(CONVERGED_V2_EXTENSION)
+    third = load_direct_preference_config(CONVERGED_V3_EXTENSION)
+    assert third["experiment"]["seeds"] == second["experiment"]["seeds"]
+    assert third["experiment"]["betas"] == second["experiment"]["betas"]
+    assert third["training"]["prompt_batch_size"] == second["training"]["prompt_batch_size"]
+    assert third["training"]["policy_learning_rate"] == pytest.approx(
+        second["training"]["policy_learning_rate"] / 2.0
+    )
+    assert third["auxdpo"]["auxiliary_learning_rate"] == pytest.approx(
+        second["auxdpo"]["auxiliary_learning_rate"] / 2.0
+    )
+    for key in (
+        "max_epochs",
+        "min_epochs",
+        "validation_min_delta",
+        "minimum_validation_improvement",
+        "early_stopping_patience",
+        "minimum_lr_reductions",
+        "validation_selection_metric",
+        "test_usage",
+    ):
+        assert third["training"][key] == second["training"][key]
+
+
 def test_soft_preference_loss_uses_every_unordered_edge() -> None:
     oracle = torch.tensor([[1.0, 0.0, -1.0]], dtype=torch.float64)
     pairs = pair_indices(3)
@@ -129,3 +156,14 @@ def test_centering_removes_only_prompt_constants() -> None:
     shifted = values + torch.tensor([[91.0], [-17.0]])
     assert torch.allclose(centered(values), centered(shifted))
     assert torch.allclose(centered(values).mean(dim=1), torch.zeros(2))
+
+
+def test_plateau_scheduler_is_initialized_against_epoch_zero_policy() -> None:
+    parameter = torch.nn.Parameter(torch.zeros(()))
+    optimizer = torch.optim.SGD([parameter], lr=1.0)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=0, threshold=1.0e-5, threshold_mode="abs"
+    )
+    _initialize_plateau_baseline(scheduler, 0.693147)
+    scheduler.step(0.694)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.5)

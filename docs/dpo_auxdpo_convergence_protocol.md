@@ -8,7 +8,7 @@ is fixed at 0.2 before training. MLE-RM, ProRM, oracle policy, and pi0 are not r
 ## Selection and stopping
 
 Both methods start from the same zero LoRA-B reference policy and use matched deterministic
-prompt orders and a physical prompt batch of two. The policy learning rate is `1e-5` with
+prompt orders and a physical prompt batch of two. The policy learning rate is `5e-6` with
 one warmup epoch. A validation-plateau scheduler multiplies all optimizer-group learning
 rates by 0.3 after one plateau epoch. Formal training allows at most 32 epochs.
 
@@ -33,7 +33,10 @@ equivalent to squaring the moment of the combined batch. The same physical batch
 DPO for a matched comparison. Batch size is admitted by a bounded GPU-memory smoke, not by
 test performance. A batch of four passed a short control-flow smoke but failed closed on the
 formal long-sequence inventory at the 44.4-GiB device limit; version 2 therefore freezes the
-uniform memory-safe batch of two before any completed fit or test evaluation.
+uniform memory-safe batch of two before any completed fit or test evaluation. Version 3
+applies the standard linear-scaling rule to the halved physical batch, reducing policy and
+auxiliary learning rates by two, and initializes the plateau scheduler with the epoch-zero
+validation NLL so that a degraded first epoch cannot become its internal baseline.
 
 ## Dependency closure
 

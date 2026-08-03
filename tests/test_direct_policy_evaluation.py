@@ -40,6 +40,13 @@ def test_converged_direct_policy_config_preserves_the_rollout_estimand() -> None
     assert memory_safe["rollout"] == config["rollout"]
     assert memory_safe["direct_config_sha256"] != config["direct_config_sha256"]
 
+    scaled_lr = load_direct_policy_config(
+        root / "configs" / "real_policy_dpo_aux_converged_v3_m6.yaml"
+    )
+    assert scaled_lr["experiment"] == config["experiment"]
+    assert scaled_lr["rollout"] == config["rollout"]
+    assert scaled_lr["direct_config_sha256"] != memory_safe["direct_config_sha256"]
+
 
 def test_two_fold_cross_u_uses_cross_products_without_clipping() -> None:
     train_scores = torch.tensor([[[-1.0], [1.0]], [[-1.0], [1.0]]], dtype=torch.float64)

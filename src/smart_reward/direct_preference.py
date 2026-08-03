@@ -40,6 +40,7 @@ METHODS = ("dpo", "auxdpo")
 ADAPTIVE_EXPERIMENTS = (
     "dpo-auxdpo-converged-v1",
     "dpo-auxdpo-converged-v2",
+    "dpo-auxdpo-converged-v3",
     "dpo-auxdpo-converged-smoke-v1",
 )
 
@@ -141,6 +142,15 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
             raise ValueError("formal memory-safe experiment may not limit prompts")
         if int(value["training"].get("prompt_batch_size", 0)) != 2:
             raise ValueError("formal memory-safe prompt batch must be two")
+    elif experiment_name == "dpo-auxdpo-converged-v3":
+        if betas != (0.2,) or seeds != (20261001, 20261002, 20261003):
+            raise ValueError("scaled-LR converged experiment identity changed")
+        if value["training"].get("limit_prompts_per_split") is not None:
+            raise ValueError("formal scaled-LR experiment may not limit prompts")
+        if int(value["training"].get("prompt_batch_size", 0)) != 2:
+            raise ValueError("formal scaled-LR prompt batch must be two")
+        if float(value["training"].get("policy_learning_rate", math.nan)) != 5.0e-6:
+            raise ValueError("formal policy LR must follow the batch linear-scaling rule")
     elif experiment_name == "dpo-auxdpo-converged-smoke-v1":
         if betas != (0.2,) or seeds != (20261001,):
             raise ValueError("converged smoke identity changed")
@@ -299,6 +309,16 @@ def centered(values: torch.Tensor) -> torch.Tensor:
     if values.ndim != 2:
         raise ValueError("candidate values must have shape (prompts, candidates)")
     return values - values.mean(dim=1, keepdim=True)
+
+
+def _initialize_plateau_baseline(
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
+    initial_validation_nll: float,
+) -> None:
+    value = float(initial_validation_nll)
+    if not math.isfinite(value):
+        raise ValueError("initial validation NLL must be finite")
+    scheduler.step(value)
 
 
 def auxdpo_loss(
@@ -1101,6 +1121,10 @@ def _train_adaptive_direct_preference(
     initial_validation_nll = float(
         soft_preference_loss(torch.zeros_like(true_validation), true_validation).item()
     )
+    # The plateau scheduler must compare epoch one against the actual epoch-zero
+    # reference policy. Without this step it would accept a worse first epoch as
+    # its internal best even though checkpoint selection correctly retains pi0.
+    _initialize_plateau_baseline(scheduler, initial_validation_nll)
     best_validation_nll = initial_validation_nll
     best_validation_mse = float(centered(true_validation.to(torch.float64)).square().mean().item())
     best_epoch = 0
