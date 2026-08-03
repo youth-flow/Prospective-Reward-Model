@@ -774,7 +774,7 @@ def run_h_ablation_rewards(
     )
     source_reward = load_trpo_reward_comparison(
         source_reward_result,
-        expected_config_hash=extension["source_config_sha256"],
+        expected_config_sha256=extension["source_config_sha256"],
         expected_seed=seed,
     )
     if source_reward["artifact_metadata_sha256"] != artifact_identity:

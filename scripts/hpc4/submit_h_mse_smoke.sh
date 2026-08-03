@@ -10,7 +10,10 @@ config="$(realpath -e "$1")"; image="$(realpath -e "$2")"; hf_cache="$(realpath 
 source_run="$(realpath -e "$4")"; source_m6="$(realpath -e "$5")"
 smoke_root="$(realpath -m "$6")"; image_source_commit="$7"
 [[ -z "$(git -C "${repo_root}" status --porcelain)" ]] || { echo "submission requires clean worktree" >&2; exit 2; }
-[[ ! -e "${smoke_root}" ]] || { echo "refusing to reuse smoke root" >&2; exit 2; }
+if [[ -e "${smoke_root}" && -e "${smoke_root}/smoke.json" ]]; then
+  echo "refusing to overwrite a completed smoke root" >&2
+  exit 2
+fi
 mkdir -p "${smoke_root}/logs"
 git_commit="$(git -C "${repo_root}" rev-parse HEAD)"; image_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
 source_sha="0ff8cb872c5bdecc33bd2e5ded7d9c3adcbc43d7b6c355b40f8d34a1ae95ce92"

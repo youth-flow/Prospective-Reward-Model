@@ -208,7 +208,13 @@ def write_h_provenance_bridge(
     output: str | os.PathLike[str],
 ) -> dict[str, Any]:
     payload = _provenance_payload(config_path, source_run_root, source_m6_run_root)
-    _atomic_json(Path(output), payload)
+    output_path = Path(output)
+    if output_path.is_file():
+        observed = _read_json(output_path)
+        if observed != payload:
+            raise ValueError("existing provenance bridge differs from immutable sources")
+        return observed
+    _atomic_json(output_path, payload)
     return payload
 
 
