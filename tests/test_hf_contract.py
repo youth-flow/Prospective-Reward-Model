@@ -104,17 +104,10 @@ def test_sequence_forward_kl_is_stable_for_nearly_identical_policies() -> None:
     )
     response_mask = torch.ones((1, 257), dtype=torch.long)
 
-    # This is the formerly used float32 computation.  It exhibits catastrophic
-    # cancellation on this deterministic case even though KL is nonnegative.
-    updated_log_prob_f32 = updated[:, :-1].log_softmax(dim=-1)
-    reference_log_prob_f32 = reference[:, :-1].log_softmax(dim=-1)
-    unstable = (
-        (updated_log_prob_f32.exp() * (updated_log_prob_f32 - reference_log_prob_f32))
-        .sum(dim=-1)
-        .sum(dim=-1)
-    )
-    assert unstable.item() < -64.0 * torch.finfo(torch.float32).eps
-
+    # The sign and magnitude of cancellation in the former float32 computation
+    # depend on the backend kernel.  Test the portable contract instead: the
+    # implementation performs the reduction in float64 and matches an
+    # independently evaluated float64 expression.
     updated_log_prob_f64 = updated[:, :-1].log_softmax(dim=-1, dtype=torch.float64)
     reference_log_prob_f64 = reference[:, :-1].log_softmax(dim=-1, dtype=torch.float64)
     expected = (
@@ -125,6 +118,8 @@ def test_sequence_forward_kl_is_stable_for_nearly_identical_policies() -> None:
     result = sequence_forward_kl(updated, reference, response_mask)
 
     assert expected.item() > 0.0
+    assert result.dtype == torch.float64
+    assert result.item() >= 0.0
     assert torch.allclose(result, expected, rtol=1.0e-12, atol=1.0e-14)
 
 
