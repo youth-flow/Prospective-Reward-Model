@@ -12,6 +12,7 @@ import json
 import math
 import os
 import random
+import shutil
 import statistics
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -42,6 +43,7 @@ ADAPTIVE_EXPERIMENTS = (
     "dpo-auxdpo-converged-v2",
     "dpo-auxdpo-converged-v3",
     "dpo-auxdpo-converged-v4",
+    "dpo-auxdpo-converged-v5",
     "dpo-auxdpo-converged-smoke-v1",
 )
 
@@ -82,6 +84,14 @@ def _atomic_torch(path: Path, value: object) -> None:
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"JSON object required: {path}")
+    return value
 
 
 def _canonical_sha256(value: object) -> str:
@@ -161,6 +171,17 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
             raise ValueError("formal plateau-converged prompt batch must be two")
         if float(value["training"].get("policy_learning_rate", math.nan)) != 5.0e-6:
             raise ValueError("formal plateau-converged policy LR changed")
+    elif experiment_name == "dpo-auxdpo-converged-v5":
+        if betas != (0.2,) or seeds != (20261001, 20261002, 20261003):
+            raise ValueError("full-gradient converged experiment identity changed")
+        if value["training"].get("limit_prompts_per_split") is not None:
+            raise ValueError("formal full-gradient experiment may not limit prompts")
+        if int(value["training"].get("prompt_batch_size", 0)) != 2:
+            raise ValueError("formal full-gradient physical prompt batch must be two")
+        if int(value["training"].get("gradient_accumulation_steps", 0)) != 1536:
+            raise ValueError("formal full-gradient accumulation must span all train prompts")
+        if float(value["training"].get("policy_learning_rate", math.nan)) != 5.0e-6:
+            raise ValueError("formal full-gradient policy LR changed")
     elif experiment_name == "dpo-auxdpo-converged-smoke-v1":
         if betas != (0.2,) or seeds != (20261001,):
             raise ValueError("converged smoke identity changed")
@@ -203,6 +224,8 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
             "test_usage",
             "limit_prompts_per_split",
         }
+        if experiment_name == "dpo-auxdpo-converged-v5":
+            expected_training.add("minimum_training_improvement")
         if set(training) != expected_training:
             raise ValueError("adaptive direct-preference training keys changed")
         if training["learning_rate_schedule"] != "warmup_then_validation_plateau":
@@ -230,8 +253,14 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
             raise ValueError("warmup_epochs must be within the minimum training budget")
         if training["prompt_batch_size"] < 1 or training["checkpoint_prompt_batches"] < 1:
             raise ValueError("adaptive batch sizes must be positive")
-        if training["gradient_accumulation_steps"] != 1:
-            raise ValueError("AuxDPO moment estimation forbids microbatch accumulation")
+        accumulation = training["gradient_accumulation_steps"]
+        if isinstance(accumulation, bool) or not isinstance(accumulation, int):
+            raise ValueError("gradient_accumulation_steps must be an integer")
+        if experiment_name == "dpo-auxdpo-converged-v5":
+            if accumulation < 2:
+                raise ValueError("full-gradient training requires gradient accumulation")
+        elif accumulation != 1:
+            raise ValueError("legacy adaptive protocols used one microbatch per update")
         if training["policy_optimizer"] != "adamw":
             raise ValueError("adaptive direct preference optimizer changed")
         if training["shuffle"] != "deterministic_prompt_level":
@@ -251,11 +280,13 @@ def load_direct_preference_config(path: str | os.PathLike[str]) -> dict[str, Any
         minimum_improvement = float(training["minimum_validation_improvement"])
         if not math.isfinite(minimum_improvement) or minimum_improvement < 0.0:
             raise ValueError("minimum_validation_improvement must be finite and nonnegative")
+        if experiment_name == "dpo-auxdpo-converged-v5":
+            minimum_train = float(training["minimum_training_improvement"])
+            if not math.isfinite(minimum_train) or minimum_train <= 0.0:
+                raise ValueError("minimum_training_improvement must be finite and positive")
         if not 0.0 < float(training["lr_reduction_factor"]) < 1.0:
             raise ValueError("lr_reduction_factor must lie in (0, 1)")
-        if float(training["min_policy_learning_rate"]) >= float(
-            training["policy_learning_rate"]
-        ):
+        if float(training["min_policy_learning_rate"]) >= float(training["policy_learning_rate"]):
             raise ValueError("minimum policy learning rate must be below its initial value")
     elif int(training.get("epochs", 0)) != 2:
         raise ValueError("direct-preference extension is frozen to two epochs")
@@ -368,6 +399,40 @@ def auxdpo_loss(
     loss = preference + nullspace_weight * null_penalty - amplitude_weight * amplitude
     return loss, {
         "preference_nll": preference,
+        "nullspace_penalty": null_penalty,
+        "delta_amplitude": amplitude,
+        "delta": delta,
+        "nullspace_moment": moment,
+    }
+
+
+def auxdpo_global_regularizer(
+    delta_raw: torch.Tensor,
+    reference_scores: torch.Tensor,
+    *,
+    nullspace_weight: float,
+    amplitude_weight: float,
+    delta_cap: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Return the full-train AuxDPO regularizer.
+
+    The null-space penalty is the squared *global* score moment.  Averaging
+    squared microbatch moments would change the objective and add a positive
+    sampling-variance term, so the formal accumulated protocol evaluates this
+    term once over all frozen train nodes.
+    """
+
+    if delta_raw.ndim != 2 or reference_scores.shape[:2] != delta_raw.shape:
+        raise ValueError("global AuxDPO delta and score shapes differ")
+    if reference_scores.ndim != 3:
+        raise ValueError("global AuxDPO scores must have three dimensions")
+    delta = centered(delta_cap * torch.tanh(delta_raw))
+    scores = reference_scores - reference_scores.mean(dim=1, keepdim=True)
+    moment = torch.einsum("bmd,bm->d", scores, delta) / float(delta.numel())
+    null_penalty = moment.square().sum()
+    amplitude = delta.square().mean()
+    regularizer = nullspace_weight * null_penalty - amplitude_weight * amplitude
+    return regularizer, {
         "nullspace_penalty": null_penalty,
         "delta_amplitude": amplitude,
         "delta": delta,
@@ -616,6 +681,106 @@ def compute_reference_logps(
     }
     _atomic_json(metadata_path, payload)
     return payload
+
+
+def import_reference_logps(
+    source_extension_path: str | os.PathLike[str],
+    target_extension_path: str | os.PathLike[str],
+    artifact_dir: str | os.PathLike[str],
+    source_reference_dir: str | os.PathLike[str],
+    target_reference_dir: str | os.PathLike[str],
+    *,
+    seed: int,
+) -> dict[str, Any]:
+    """Import a byte-identical reference cache across training-only configs."""
+
+    source_extension = load_direct_preference_config(source_extension_path)
+    target_extension = load_direct_preference_config(target_extension_path)
+    source_config_path, source_config = resolve_source_config(
+        source_extension_path, source_extension
+    )
+    target_config_path, target_config = resolve_source_config(
+        target_extension_path, target_extension
+    )
+    if (
+        seed not in source_extension["experiment"]["seeds"]
+        or seed not in target_extension["experiment"]["seeds"]
+    ):
+        raise ValueError("reference import seed is not shared by both protocols")
+    if (
+        source_extension["source_config_sha256"] != target_extension["source_config_sha256"]
+        or config_hash(source_config) != config_hash(target_config)
+        or source_config_path.name != target_config_path.name
+    ):
+        raise ValueError("reference import source model/data configurations differ")
+    invariant_training_keys = ("prompt_batch_size", "compute_dtype", "limit_prompts_per_split")
+    if any(
+        source_extension["training"][key] != target_extension["training"][key]
+        for key in invariant_training_keys
+    ):
+        raise ValueError("reference-generating training settings differ")
+
+    artifact_path = Path(artifact_dir)
+    artifact_identity = exact_delta_artifact_metadata_sha256(
+        artifact_path,
+        expected_config_hash=target_extension["source_config_sha256"],
+        expected_seed=seed,
+    )
+    artifact_metadata = _read_json(artifact_path / "metadata.json")
+    source_root = Path(source_reference_dir)
+    source_metadata_path = source_root / "metadata.json"
+    source_tensors_path = source_root / "reference_logps.safetensors"
+    source_metadata = _read_json(source_metadata_path)
+    source_checks = {
+        "schema": REFERENCE_SCHEMA,
+        "status": "complete",
+        "seed": seed,
+        "source_config_sha256": target_extension["source_config_sha256"],
+        "extension_config_sha256": extension_hash(source_extension),
+        "artifact_metadata_sha256": artifact_identity,
+        "artifact_candidates_sha256": sha256_file(artifact_path / "candidates.jsonl"),
+        "lora_a_sha256": artifact_metadata["evidence"]["policy_a_sha256"],
+        "compute_dtype": target_extension["training"]["compute_dtype"],
+        "limit_prompts_per_split": target_extension["training"]["limit_prompts_per_split"],
+        "tensors_sha256": sha256_file(source_tensors_path),
+    }
+    if any(source_metadata.get(key) != value for key, value in source_checks.items()):
+        raise ValueError("source reference cache failed provenance validation")
+
+    target_root = Path(target_reference_dir)
+    if target_root.exists():
+        raise FileExistsError(f"refusing to replace reference cache: {target_root}")
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{target_root.name}.import-", dir=target_root.parent))
+    try:
+        target_tensors = staging / "reference_logps.safetensors"
+        shutil.copy2(source_tensors_path, target_tensors)
+        if sha256_file(target_tensors) != source_metadata["tensors_sha256"]:
+            raise RuntimeError("imported reference tensor bytes changed")
+        payload = {
+            **source_metadata,
+            "extension_config_sha256": extension_hash(target_extension),
+            "producer": producer_identity(),
+            "provenance_bridge": {
+                "schema": "prorm-reference-cache-import/v1",
+                "mode": "byte_identical_copy",
+                "source_metadata_sha256": sha256_file(source_metadata_path),
+                "source_extension_config_sha256": extension_hash(source_extension),
+                "target_extension_config_sha256": extension_hash(target_extension),
+                "tensors_sha256": source_metadata["tensors_sha256"],
+            },
+        }
+        _atomic_json(staging / "metadata.json", payload)
+        os.replace(staging, target_root)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    imported = _read_json(target_root / "metadata.json")
+    if imported.get("extension_config_sha256") != extension_hash(target_extension) or imported.get(
+        "tensors_sha256"
+    ) != sha256_file(target_root / "reference_logps.safetensors"):
+        raise RuntimeError("imported reference cache failed final verification")
+    return imported
 
 
 def _load_reference(
@@ -1065,6 +1230,7 @@ def _train_adaptive_direct_preference(
     score_train = experiment.train.policy_scores[:prompt_count].to(torch.float32)
 
     training = extension["training"]
+    full_gradient_protocol = extension["experiment"]["name"] == "dpo-auxdpo-converged-v5"
     batch_size = int(training["prompt_batch_size"])
     max_epochs = int(training["max_epochs"])
     condition_seed = int(seed * 1000 + round(beta * 100))
@@ -1078,7 +1244,10 @@ def _train_adaptive_direct_preference(
         )
     schedule_digest = _canonical_sha256(schedule)
     batches_per_epoch = math.ceil(prompt_count / batch_size)
-    warmup_steps = int(training["warmup_epochs"]) * batches_per_epoch
+    gradient_accumulation_steps = int(training["gradient_accumulation_steps"])
+    updates_per_epoch = math.ceil(batches_per_epoch / gradient_accumulation_steps)
+    warmup_updates = int(training["warmup_epochs"]) * updates_per_epoch
+    legacy_warmup_steps = int(training["warmup_epochs"]) * batches_per_epoch
 
     policy_parameters = [parameter for _, parameter in setup.named_tangent_parameters()]
     policy_lr = float(training["policy_learning_rate"])
@@ -1098,6 +1267,9 @@ def _train_adaptive_direct_preference(
         parameter_groups.append({"params": [delta_raw], "lr": aux_lr})
         initial_group_lrs.append(aux_lr)
         minimum_group_lrs.append(float(extension["auxdpo"]["min_auxiliary_learning_rate"]))
+    global_aux_scores = (
+        score_train.to(target_device) if full_gradient_protocol and method == "auxdpo" else None
+    )
 
     optimizer = torch.optim.AdamW(
         parameter_groups,
@@ -1114,6 +1286,7 @@ def _train_adaptive_direct_preference(
         threshold_mode="abs",
         min_lr=minimum_group_lrs,
     )
+    optimizer.zero_grad(set_to_none=True)
 
     @torch.no_grad()
     def heldout_metrics() -> tuple[float, float]:
@@ -1144,6 +1317,7 @@ def _train_adaptive_direct_preference(
     initial_validation_nll = float(
         soft_preference_loss(torch.zeros_like(true_validation), true_validation).item()
     )
+    initial_train_nll = float(soft_preference_loss(torch.zeros_like(true_train), true_train).item())
     # The plateau scheduler must compare epoch one against the actual epoch-zero
     # reference policy. Without this step it would accept a worse first epoch as
     # its internal best even though checkpoint selection correctly retains pi0.
@@ -1164,6 +1338,9 @@ def _train_adaptive_direct_preference(
     lr_reductions = 0
     start_batch = 0
     processed_batches = 0
+    optimizer_steps = 0
+    accumulated_microbatches = 0
+    accumulated_prompts = 0
     epoch_running = {
         "prompts": 0,
         "batches": 0,
@@ -1173,6 +1350,7 @@ def _train_adaptive_direct_preference(
         "delta_amplitude_sum": 0.0,
         "policy_grad_norm_sum": 0.0,
         "policy_grad_norm_max": 0.0,
+        "optimizer_steps": 0,
     }
     checkpoint_path = target / "checkpoint.pt"
     if checkpoint_path.exists():
@@ -1190,6 +1368,9 @@ def _train_adaptive_direct_preference(
         scheduler.load_state_dict(checkpoint["scheduler"])
         start_batch = int(checkpoint["next_batch"])
         processed_batches = int(checkpoint["processed_batches"])
+        optimizer_steps = int(checkpoint.get("optimizer_steps", 0))
+        accumulated_microbatches = int(checkpoint.get("accumulated_microbatches", 0))
+        accumulated_prompts = int(checkpoint.get("accumulated_prompts", 0))
         history = list(checkpoint["history"])
         bad_epochs = int(checkpoint["bad_epochs"])
         lr_reductions = int(checkpoint["lr_reductions"])
@@ -1203,6 +1384,17 @@ def _train_adaptive_direct_preference(
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to(target_device)
+        saved_gradients = checkpoint.get("gradients")
+        parameters = [
+            parameter for group in optimizer.param_groups for parameter in group["params"]
+        ]
+        if full_gradient_protocol:
+            if not isinstance(saved_gradients, list) or len(saved_gradients) != len(parameters):
+                raise ValueError("full-gradient checkpoint gradient state mismatch")
+            for parameter, gradient in zip(parameters, saved_gradients, strict=True):
+                parameter.grad = None if gradient is None else gradient.to(target_device)
+        elif saved_gradients is not None:
+            raise ValueError("legacy checkpoint unexpectedly stores accumulated gradients")
 
     def save_checkpoint(next_batch: int) -> None:
         _atomic_torch(
@@ -1212,6 +1404,9 @@ def _train_adaptive_direct_preference(
                 "schedule_sha256": schedule_digest,
                 "next_batch": next_batch,
                 "processed_batches": processed_batches,
+                "optimizer_steps": optimizer_steps,
+                "accumulated_microbatches": accumulated_microbatches,
+                "accumulated_prompts": accumulated_prompts,
                 "adapter": {
                     name: parameter.detach().cpu()
                     for name, parameter in setup.named_tangent_parameters()
@@ -1228,6 +1423,15 @@ def _train_adaptive_direct_preference(
                 "best_adapter": best_adapter,
                 "best_delta_raw": best_delta_raw,
                 "epoch_running": epoch_running,
+                "gradients": (
+                    [
+                        None if parameter.grad is None else parameter.grad.detach().cpu()
+                        for group in optimizer.param_groups
+                        for parameter in group["params"]
+                    ]
+                    if full_gradient_protocol
+                    else None
+                ),
             },
         )
 
@@ -1238,8 +1442,8 @@ def _train_adaptive_direct_preference(
     for batch_number, (epoch, indices) in enumerate(schedule):
         if batch_number < start_batch:
             continue
-        if batch_number < warmup_steps:
-            scale = float(batch_number + 1) / float(max(warmup_steps, 1))
+        if not full_gradient_protocol and batch_number < legacy_warmup_steps:
+            scale = float(batch_number + 1) / float(max(legacy_warmup_steps, 1))
             for group, initial_lr in zip(optimizer.param_groups, initial_group_lrs, strict=True):
                 group["lr"] = initial_lr * scale
 
@@ -1262,6 +1466,17 @@ def _train_adaptive_direct_preference(
                 "nullspace_penalty": loss.new_zeros(()),
                 "delta_amplitude": loss.new_zeros(()),
             }
+        elif full_gradient_protocol:
+            delta_batch = centered(
+                float(extension["auxdpo"]["delta_cap"])
+                * torch.tanh(delta_raw.index_select(0, index_cpu.to(target_device)))
+            )
+            loss = soft_preference_loss(implicit + delta_batch, true_batch)
+            diagnostics = {
+                "preference_nll": loss,
+                "nullspace_penalty": loss.new_zeros(()),
+                "delta_amplitude": loss.new_zeros(()),
+            }
         else:
             score_batch = score_train.index_select(0, index_cpu).to(target_device)
             loss, diagnostics = auxdpo_loss(
@@ -1275,33 +1490,97 @@ def _train_adaptive_direct_preference(
             )
         if not bool(torch.isfinite(loss)):
             raise RuntimeError("adaptive direct-preference loss became non-finite")
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            policy_parameters, max_norm=float(training["max_gradient_norm"])
-        )
-        if not bool(torch.isfinite(grad_norm)):
-            raise RuntimeError("adaptive policy gradient norm became non-finite")
-        optimizer.step()
-
         batch_prompts = len(indices)
         processed_batches += 1
         epoch_running["prompts"] += batch_prompts
         epoch_running["batches"] += 1
         epoch_running["loss_sum"] += float(loss.detach().item()) * batch_prompts
         for key in ("preference_nll", "nullspace_penalty", "delta_amplitude"):
-            epoch_running[f"{key}_sum"] += (
-                float(diagnostics[key].detach().item()) * batch_prompts
-            )
-        grad_value = float(grad_norm.detach().item())
-        epoch_running["policy_grad_norm_sum"] += grad_value
-        epoch_running["policy_grad_norm_max"] = max(
-            float(epoch_running["policy_grad_norm_max"]), grad_value
-        )
+            epoch_running[f"{key}_sum"] += float(diagnostics[key].detach().item()) * batch_prompts
         next_batch = batch_number + 1
         last_next_batch = next_batch
         epoch_complete = next_batch == len(schedule) or schedule[next_batch][0] != epoch
+
+        if full_gradient_protocol:
+            (loss * float(batch_prompts)).backward()
+            accumulated_microbatches += 1
+            accumulated_prompts += batch_prompts
+            update_boundary = (
+                accumulated_microbatches >= gradient_accumulation_steps or epoch_complete
+            )
+            if update_boundary:
+                if delta_raw is not None:
+                    if global_aux_scores is None:
+                        raise RuntimeError("full-gradient AuxDPO scores are unavailable")
+                    regularizer, global_diagnostics = auxdpo_global_regularizer(
+                        delta_raw,
+                        global_aux_scores,
+                        nullspace_weight=float(extension["auxdpo"]["nullspace_weight"]),
+                        amplitude_weight=float(extension["auxdpo"]["amplitude_weight"]),
+                        delta_cap=float(extension["auxdpo"]["delta_cap"]),
+                    )
+                    if not bool(torch.isfinite(regularizer)):
+                        raise RuntimeError("global AuxDPO regularizer became non-finite")
+                    (regularizer * float(accumulated_prompts)).backward()
+                    epoch_running["loss_sum"] += (
+                        float(regularizer.detach().item()) * accumulated_prompts
+                    )
+                    epoch_running["nullspace_penalty_sum"] += (
+                        float(global_diagnostics["nullspace_penalty"].detach().item())
+                        * accumulated_prompts
+                    )
+                    epoch_running["delta_amplitude_sum"] += (
+                        float(global_diagnostics["delta_amplitude"].detach().item())
+                        * accumulated_prompts
+                    )
+                for group in optimizer.param_groups:
+                    for parameter in group["params"]:
+                        if parameter.grad is not None:
+                            parameter.grad.div_(float(accumulated_prompts))
+                            if not bool(torch.isfinite(parameter.grad).all()):
+                                raise RuntimeError("accumulated gradient became non-finite")
+                if optimizer_steps < warmup_updates:
+                    scale = float(optimizer_steps + 1) / float(max(warmup_updates, 1))
+                    for group, initial_lr in zip(
+                        optimizer.param_groups, initial_group_lrs, strict=True
+                    ):
+                        group["lr"] = initial_lr * scale
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    policy_parameters, max_norm=float(training["max_gradient_norm"])
+                )
+                if not bool(torch.isfinite(grad_norm)):
+                    raise RuntimeError("adaptive policy gradient norm became non-finite")
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                optimizer_steps += 1
+                accumulated_microbatches = 0
+                accumulated_prompts = 0
+                grad_value = float(grad_norm.detach().item())
+                epoch_running["policy_grad_norm_sum"] += grad_value
+                epoch_running["policy_grad_norm_max"] = max(
+                    float(epoch_running["policy_grad_norm_max"]), grad_value
+                )
+                epoch_running["optimizer_steps"] += 1
+        else:
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                policy_parameters, max_norm=float(training["max_gradient_norm"])
+            )
+            if not bool(torch.isfinite(grad_norm)):
+                raise RuntimeError("adaptive policy gradient norm became non-finite")
+            optimizer.step()
+            optimizer_steps += 1
+            grad_value = float(grad_norm.detach().item())
+            epoch_running["policy_grad_norm_sum"] += grad_value
+            epoch_running["policy_grad_norm_max"] = max(
+                float(epoch_running["policy_grad_norm_max"]), grad_value
+            )
+            epoch_running["optimizer_steps"] += 1
+
         if epoch_complete:
+            if accumulated_microbatches != 0 or accumulated_prompts != 0:
+                raise RuntimeError("epoch ended with unapplied accumulated gradients")
             validation_nll, validation_mse = heldout_metrics()
             min_delta = float(training["validation_min_delta"])
             improved = validation_nll < best_validation_nll - min_delta
@@ -1313,9 +1592,7 @@ def _train_adaptive_direct_preference(
                     name: parameter.detach().cpu().clone()
                     for name, parameter in setup.named_tangent_parameters()
                 }
-                best_delta_raw = (
-                    None if delta_raw is None else delta_raw.detach().cpu().clone()
-                )
+                best_delta_raw = None if delta_raw is None else delta_raw.detach().cpu().clone()
                 bad_epochs = 0
             else:
                 bad_epochs += 1
@@ -1325,7 +1602,7 @@ def _train_adaptive_direct_preference(
             if policy_lr_after < policy_lr_before * (1.0 - 1.0e-12):
                 lr_reductions += 1
             prompts_seen = max(int(epoch_running["prompts"]), 1)
-            batches_seen = max(int(epoch_running["batches"]), 1)
+            steps_seen = max(int(epoch_running["optimizer_steps"]), 1)
             record = {
                 "epoch": epoch + 1,
                 "train_online_loss": float(epoch_running["loss_sum"]) / prompts_seen,
@@ -1341,9 +1618,10 @@ def _train_adaptive_direct_preference(
                 "validation_policy_nll": validation_nll,
                 "validation_policy_centered_reward_mse": validation_mse,
                 "policy_grad_norm_mean": (
-                    float(epoch_running["policy_grad_norm_sum"]) / batches_seen
+                    float(epoch_running["policy_grad_norm_sum"]) / steps_seen
                 ),
                 "policy_grad_norm_max": float(epoch_running["policy_grad_norm_max"]),
+                "optimizer_steps": int(epoch_running["optimizer_steps"]),
                 "policy_lr_before_plateau_step": policy_lr_before,
                 "policy_lr_after_plateau_step": policy_lr_after,
                 "auxiliary_lr_after_plateau_step": (
@@ -1383,10 +1661,7 @@ def _train_adaptive_direct_preference(
         converged = True
         stop_reason = stop_reason or "bounded_resource_and_control_flow_smoke_complete"
     else:
-        converged = bool(
-            stopped
-            and best_epoch > 0
-        )
+        converged = bool(stopped and best_epoch > 0)
     if not converged:
         save_checkpoint(last_next_batch)
         raise RuntimeError(
@@ -1407,9 +1682,11 @@ def _train_adaptive_direct_preference(
     delta_path: Path | None = None
     if delta_raw is not None:
         delta_path = target / "delta.safetensors"
-        delta = centered(
-            float(extension["auxdpo"]["delta_cap"]) * torch.tanh(delta_raw.detach())
-        ).cpu().contiguous()
+        delta = (
+            centered(float(extension["auxdpo"]["delta_cap"]) * torch.tanh(delta_raw.detach()))
+            .cpu()
+            .contiguous()
+        )
         safetensors = __import__("safetensors.torch", fromlist=["save_file"])
         temporary = target / ".delta.tmp.safetensors"
         safetensors.save_file({"train.delta": delta}, str(temporary))
@@ -1421,41 +1698,46 @@ def _train_adaptive_direct_preference(
         "validation": experiment.validation,
         "test": experiment.test,
     }
-    with torch.no_grad():
-        for split in ("train", "validation", "test"):
-            split_groups = group_candidate_nodes(
-                artifact_dir, split=split, candidates=experiment.train.num_candidates
-            )
-            if prompt_limit is not None:
-                split_groups = split_groups[: int(prompt_limit)]
-            chunks = []
-            for start in range(0, len(split_groups), batch_size):
-                chunks.append(
-                    response_log_probabilities(
-                        setup.model,
-                        split_groups[start : start + batch_size],
-                        pad_token_id=pad_token_id,
-                        device=target_device,
-                        compute_dtype=torch.bfloat16,
-                    )
-                    .detach()
-                    .cpu()
+
+    @torch.no_grad()
+    def fitted_split_logps(split: str) -> torch.Tensor:
+        split_groups = group_candidate_nodes(
+            artifact_dir, split=split, candidates=experiment.train.num_candidates
+        )
+        if prompt_limit is not None:
+            split_groups = split_groups[: int(prompt_limit)]
+        chunks = []
+        for start in range(0, len(split_groups), batch_size):
+            chunks.append(
+                response_log_probabilities(
+                    setup.model,
+                    split_groups[start : start + batch_size],
+                    pad_token_id=pad_token_id,
+                    device=target_device,
+                    compute_dtype=torch.bfloat16,
                 )
-            fitted_logps[split] = torch.cat(chunks).to(torch.float32).contiguous()
-            expected_shape = split_data[split].true_rewards[: len(split_groups)].shape
-            if fitted_logps[split].shape != expected_shape:
-                raise RuntimeError(f"final {split} log-probability shape changed")
-    logps_path = target / "updated_logps.safetensors"
-    safetensors = __import__("safetensors.torch", fromlist=["save_file"])
-    temporary = target / ".updated_logps.tmp.safetensors"
-    safetensors.save_file(fitted_logps, str(temporary))
-    os.replace(temporary, logps_path)
+                .detach()
+                .cpu()
+            )
+        result = torch.cat(chunks).to(torch.float32).contiguous()
+        expected_shape = split_data[split].true_rewards[: len(split_groups)].shape
+        if result.shape != expected_shape:
+            raise RuntimeError(f"final {split} log-probability shape changed")
+        return result
+
+    # The formal v5 gate is resolved entirely from train/validation.  Test
+    # inference happens only after the selected checkpoint passes that gate.
+    selection_splits = ("train", "validation")
+    for split in selection_splits:
+        fitted_logps[split] = fitted_split_logps(split)
+    if not full_gradient_protocol:
+        fitted_logps["test"] = fitted_split_logps("test")
 
     final_selection_metrics: dict[str, dict[str, float]] = {}
     for split in ("train", "validation"):
         split_reference = reference[split][: fitted_logps[split].shape[0]].to(torch.float64)
-        split_target = split_data[split].true_rewards[: fitted_logps[split].shape[0]].to(
-            torch.float64
+        split_target = (
+            split_data[split].true_rewards[: fitted_logps[split].shape[0]].to(torch.float64)
         )
         split_implicit = beta * (fitted_logps[split].to(torch.float64) - split_reference)
         final_selection_metrics[split] = {
@@ -1466,6 +1748,25 @@ def _train_adaptive_direct_preference(
                 (centered(split_implicit) - centered(split_target)).square().mean().item()
             ),
         }
+
+    train_nll_improvement = (
+        initial_train_nll - final_selection_metrics["train"]["policy_implied_soft_btl_nll"]
+    )
+    if full_gradient_protocol and train_nll_improvement < float(
+        training["minimum_training_improvement"]
+    ):
+        raise RuntimeError(
+            "full-gradient DPO/AuxDPO stopped without the preregistered train-objective "
+            f"improvement: {train_nll_improvement:.8g}"
+        )
+    if full_gradient_protocol:
+        fitted_logps["test"] = fitted_split_logps("test")
+
+    logps_path = target / "updated_logps.safetensors"
+    safetensors = __import__("safetensors.torch", fromlist=["save_file"])
+    temporary = target / ".updated_logps.tmp.safetensors"
+    safetensors.save_file(fitted_logps, str(temporary))
+    os.replace(temporary, logps_path)
 
     payload = {
         "schema": FIT_SCHEMA,
@@ -1480,15 +1781,26 @@ def _train_adaptive_direct_preference(
         "training": {
             "objective": "exact_soft_BTL_over_response_token_log_policy_ratio",
             "initialization": "reference_policy_with_zero_lora_B",
-            "optimizer_resume": "not_applicable_fresh_adaptive_trajectory",
+            "optimizer_resume": (
+                "within_run_checkpoint_resumable_with_accumulated_gradients"
+                if full_gradient_protocol
+                else "not_applicable_fresh_adaptive_trajectory"
+            ),
             "converged": True,
             "stop_reason": stop_reason,
             "epochs_completed": len(history),
             "best_epoch": best_epoch,
             "initial_validation_policy_nll": initial_validation_nll,
+            "initial_train_policy_nll": initial_train_nll,
             "best_validation_policy_nll": best_validation_nll,
             "best_validation_policy_centered_reward_mse": best_validation_mse,
             "validation_nll_improvement": improvement,
+            "train_nll_improvement": train_nll_improvement,
+            "minimum_training_improvement": (
+                None
+                if not full_gradient_protocol
+                else float(training["minimum_training_improvement"])
+            ),
             "validation_improved_over_pi0_by_threshold": bool(
                 improvement >= float(training["minimum_validation_improvement"])
             ),
@@ -1498,7 +1810,9 @@ def _train_adaptive_direct_preference(
             "validation_selection_metric": training["validation_selection_metric"],
             "test_usage": training["test_usage"],
             "prompt_batch_size": batch_size,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
             "prompt_batches_processed": processed_batches,
+            "optimizer_steps": optimizer_steps,
             "policy_learning_rate": policy_lr,
             "min_policy_learning_rate": float(training["min_policy_learning_rate"]),
             "learning_rate_schedule": training["learning_rate_schedule"],
@@ -1851,6 +2165,7 @@ __all__ = [
     "FIT_SCHEMA",
     "METHODS",
     "REFERENCE_SCHEMA",
+    "auxdpo_global_regularizer",
     "auxdpo_loss",
     "aggregate_direct_preference",
     "audit_direct_preference",
@@ -1861,6 +2176,7 @@ __all__ = [
     "evaluate_direct_preference_seed",
     "extension_hash",
     "group_candidate_nodes",
+    "import_reference_logps",
     "load_direct_preference_config",
     "pair_indices",
     "resolve_source_config",

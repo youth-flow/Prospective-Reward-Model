@@ -29,6 +29,7 @@ def test_cli_only_exposes_current_workflow() -> None:
         "aggregate-ngd",
         "audit-ngd",
         "cache-direct-reference",
+        "import-direct-reference",
         "train-direct-preference",
         "evaluate-direct-preference",
         "aggregate-direct-preference",

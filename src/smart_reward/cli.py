@@ -23,6 +23,7 @@ from .direct_preference import (
     audit_direct_preference,
     compute_reference_logps,
     evaluate_direct_preference_seed,
+    import_reference_logps,
     train_direct_preference,
 )
 from .exact_phase import materialize_exact_delta
@@ -373,6 +374,18 @@ def _cache_direct_reference(arguments: argparse.Namespace) -> int:
         device=arguments.device,
     )
     print("stage=direct-reference status=complete", flush=True)
+    return 0
+
+
+def _import_direct_reference(arguments: argparse.Namespace) -> int:
+    import_reference_logps(
+        arguments.source_extension_config,
+        arguments.target_extension_config,
+        arguments.artifact_dir,
+        arguments.source_reference_dir,
+        arguments.target_reference_dir,
+        seed=arguments.seed,
+    )
     return 0
 
 
@@ -781,6 +794,15 @@ def build_parser() -> argparse.ArgumentParser:
     direct_reference.add_argument("--seed", type=int, required=True)
     direct_reference.add_argument("--device", default="cuda")
     direct_reference.set_defaults(handler=_cache_direct_reference)
+
+    direct_reference_import = commands.add_parser("import-direct-reference")
+    direct_reference_import.add_argument("source_extension_config")
+    direct_reference_import.add_argument("target_extension_config")
+    direct_reference_import.add_argument("artifact_dir")
+    direct_reference_import.add_argument("source_reference_dir")
+    direct_reference_import.add_argument("target_reference_dir")
+    direct_reference_import.add_argument("--seed", type=int, required=True)
+    direct_reference_import.set_defaults(handler=_import_direct_reference)
 
     direct_train = commands.add_parser("train-direct-preference")
     direct_train.add_argument("extension_config")
